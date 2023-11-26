@@ -4,8 +4,8 @@ _Query Xarray with SQL._
 
 ## What is this?
 
-This is an experiment to try to provide an SQL interface for raster data. If all
-goes well, the user experience will look like the following:
+This is an experiment that provides an SQL interface for raster data. If all
+goes well, the experience will look like:
 
 ```python
 import xarray as xr
@@ -27,16 +27,13 @@ df = pd.read_sql(
 
 A few quick reasons:
 
-* SQL is the lingua franca of data. The only thing more democratizing is
-  spreadsheets.
-* Scientific datasets often have analytics use-cases that are ignored by modern 
-  tooling.
-* There are a lot of Xarray-openeable datasets that I would have like to make
-  available to my users via SQL, i.e. from [GEE](https://github.com/google/xee)
+* SQL is the lingua franca of data.
+* Scientific datasets are often inaccessible to non-scientists.
+* There are many Xarray-openeable datasets I would like to make
+  available to users via SQL, e.g. from [GEE](https://github.com/google/Xee)
   or [Pangeo](https://pangeo-forge.org/).
   
-This seems like a light-weight way to prove the value of the interface before 
-investing in a deeper integration.
+This is a light-weight way to prove the value of the interface.
 
 ## What would a deeper integration look like?
 
