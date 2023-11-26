@@ -7,17 +7,17 @@ import xarray as xr
 
 
 def _index_to_position(index: int, dimensions: t.List[int]) -> t.List[int]:
-  """Convert an index into a the position within an NDArray."""
+  """Converts a table index into a position within an nd-array."""
   # Authored by ChatGPT from the following prompt:
-  # """
-  # Lets say I have an integer “index”. It represents the index of an array
-  # where the last index value is the product of the dimensions of the array.
-  # Each index value corresponds to a cell in the array. The array can be D
-  # dimensions, and usually D is 3 or 4. In Python, how do I convert the
-  # integer “index” into the position of the cell in the array (i.e. a list
-  # of integers of length D where each value represents the position along
-  # the dimension)?
-  # """
+  #   """
+  #   Lets say I have an integer “index”. It represents the index of an array
+  #   where the last index value is the product of the dimensions of the array.
+  #   Each index value corresponds to a cell in the array. The array can be D
+  #   dimensions, and usually D is 3 or 4. In Python, how do I convert the
+  #   integer “index” into the position of the cell in the array (i.e. a list
+  #   of integers of length D where each value represents the position along
+  #   the dimension)?
+  #   """
   position = []
   for dim in reversed(dimensions):
     position.insert(0, index % dim)
@@ -26,7 +26,7 @@ def _index_to_position(index: int, dimensions: t.List[int]) -> t.List[int]:
 
 
 def _unbox(array):
-  """Extract the scalar value for numpy arrays that are just scalars."""
+  """When a numpy array is a scalar, it extracts the value."""
   try:
     return array.item()
   except ValueError:
