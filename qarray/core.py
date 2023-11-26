@@ -53,7 +53,7 @@ class XarrayDatasetTable(sqlglot.executor.table.Table):
     return functools.reduce(operator.mul, self.ds.dims.values(), 1)
 
   def __getitem__(self, index):
-    """Translates a flat table index into a ND-Array lookup."""
+    """Translates a flat table index into a nd-array lookup."""
     positions = _index_to_position(index, self._dvals)
     coord_idx = dict(zip(self._dkeys, positions))
     item = self.ds.isel(coord_idx)
