@@ -1,9 +1,37 @@
 import functools
+import itertools
 import operator
 import typing as t
 
 import sqlglot.executor.table
 import xarray as xr
+
+Row = t.List[t.Any]
+
+
+# TODO(alxmrs): Could this be vectorized somehow? Maybe with map_block?
+def unravel(ds: xr.Dataset) -> t.Iterator[Row]:
+  dim_keys, dim_vals = zip(*ds.dims.items())
+
+  for idx in itertools.product(dim_vals):
+    coord_idx = dict(zip(dim_keys, idx))
+    data = ds.isel(coord_idx)
+    coord_data = [ds.coords[v][coord_idx[v]] for v in dim_keys]
+    row = [_unbox(v.values) for v in coord_data + list(data.data_vars.values())]
+    yield row
+
+
+# Borrowed from google/weather-tools
+def ichunked(iterable: t.Iterable, chunk_size: int) -> t.Iterator[t.Iterable]:
+  input_ = iter(iterable)
+  try:
+    while True:
+      it = itertools.islice(input_, chunk_size)
+      # Peek to check if `it` has next item
+      first = next(it)
+      yield itertools.chain([first], it)
+  except StopIteration:
+    pass
 
 
 def _index_to_position(index: int, dimensions: t.List[int]) -> t.List[int]:
