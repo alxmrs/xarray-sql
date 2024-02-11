@@ -3,6 +3,7 @@ import typing as t
 
 import dask.dataframe as dd
 import numpy as np
+import pandas as pd
 import xarray as xr
 from dask.dataframe.io import from_map
 
@@ -20,7 +21,7 @@ def _get_chunk_slicer(dim: t.Hashable, chunk_index: t.Mapping,
 
 
 # Adapted from Xarray `map_blocks` implementation.
-def explode(ds: xr.Dataset, chunks=None) -> t.Generator[xr.Dataset]:
+def explode(ds: xr.Dataset, chunks=None) -> t.Iterator[xr.Dataset]:
   """Explodes a dataset into its chunks."""
   if chunks is not None:
     ds.chunk(chunks)
@@ -45,10 +46,17 @@ def explode(ds: xr.Dataset, chunks=None) -> t.Generator[xr.Dataset]:
   yield from (ds.isel(b) for b in blocks)
 
 
+# TODO(alxmrs): Does this need to be ichunked?
+def to_pd(ds: xr.Dataset) -> pd.DataFrame:
+  columns = list(ds.dims.keys()) + list(ds.data_vars.keys())
+  return pd.DataFrame(qr.unravel(ds), columns=columns)
+
+
 def to_dd(ds: xr.Dataset) -> dd.DataFrame:
   dss = explode(ds)
 
+  # TODO(alxmrs): Add partition info -- https://docs.dask.org/en/latest/dataframe-design.html#partitions
   return from_map(
-    qr.unravel,  # TODO(alxmrs): Does this need to be ichunked?
+    to_pd,
     dss,
   )

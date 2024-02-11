@@ -9,11 +9,11 @@ import xarray as xr
 Row = t.List[t.Any]
 
 
-# TODO(alxmrs): Could this be vectorized somehow? Maybe with map_block?
+# TODO(alxmrs): Return 2d ndarray (with dtypes)?
 def unravel(ds: xr.Dataset) -> t.Iterator[Row]:
   dim_keys, dim_vals = zip(*ds.dims.items())
 
-  for idx in itertools.product(dim_vals):
+  for idx in itertools.product(*(range(d) for d in dim_vals)):
     coord_idx = dict(zip(dim_keys, idx))
     data = ds.isel(coord_idx)
     coord_data = [ds.coords[v][coord_idx[v]] for v in dim_keys]
