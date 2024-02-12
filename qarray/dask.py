@@ -20,12 +20,9 @@ def _get_chunk_slicer(dim: t.Hashable, chunk_index: t.Mapping,
   return slice(None)
 
 
-# Adapted from Xarray `map_blocks` implementation.
-def explode(ds: xr.Dataset, chunks=None) -> t.Iterator[xr.Dataset]:
-  """Explodes a dataset into its chunks."""
-  if chunks is not None:
-    ds.chunk(chunks)
-  assert ds.chunks, 'Dataset must be chunked'
+def block_slices(ds: xr.Dataset) -> t.Iterator[t.Dict[str, slice]]:
+  """Compute block slices for a chunked Dataset."""
+  assert ds.chunks, 'Dataset `ds` must be chunked.'
 
   chunk_bounds = {
     dim: np.cumsum((0,) + chunks_v) for dim, chunks_v in ds.chunks.items()
@@ -42,8 +39,16 @@ def explode(ds: xr.Dataset, chunks=None) -> t.Iterator[xr.Dataset]:
     }
     for chunk_index in chunk_idxs
   )
+  yield from blocks
 
-  yield from (ds.isel(b) for b in blocks)
+
+# Adapted from Xarray `map_blocks` implementation.
+def explode(ds: xr.Dataset, chunks=None) -> t.Iterator[xr.Dataset]:
+  """Explodes a dataset into its chunks."""
+  if chunks is not None:
+    ds.chunk(chunks)
+
+  yield from (ds.isel(b) for b in block_slices(ds))
 
 
 # TODO(alxmrs): Does this need to be ichunked?
@@ -52,11 +57,21 @@ def to_pd(ds: xr.Dataset) -> pd.DataFrame:
   return pd.DataFrame(qr.unravel(ds), columns=columns)
 
 
-def to_dd(ds: xr.Dataset) -> dd.DataFrame:
-  dss = explode(ds)
+def _block_len(block: t.Dict[str, slice]) -> int:
+  return np.prod([v.stop - v.start for v in block.values()])
 
-  # TODO(alxmrs): Add partition info -- https://docs.dask.org/en/latest/dataframe-design.html#partitions
+
+def to_dd(ds: xr.Dataset) -> dd.DataFrame:
+  blocks = list(block_slices(ds))
+
+  block_lengths = [_block_len(b) for b in blocks]
+  divisions = tuple(np.cumsum([0] + block_lengths))  # 0 ==> start partition.
+
+  def f(b: t.Dict[str, slice]) -> pd.DataFrame:
+    return to_pd(ds.isel(b))
+
   return from_map(
-    to_pd,
-    dss,
+    f,
+    blocks,
+    divisions=divisions
   )

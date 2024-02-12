@@ -52,7 +52,8 @@ class DaskDataframeTest(DaskTestCase):
   def test_sanity(self):
     df = to_dd(self.air_small).compute()
     self.assertIsNotNone(df)
-    self.assertEqual(len(df), np.prod(list(self.air_small.dims.values())))
+    l = len(df)
+    self.assertEqual(l, np.prod(list(self.air_small.dims.values())))
 
 
 if __name__ == '__main__':
