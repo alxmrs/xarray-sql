@@ -21,19 +21,6 @@ def unravel(ds: xr.Dataset) -> t.Iterator[Row]:
     yield row
 
 
-# Borrowed from google/weather-tools
-def ichunked(iterable: t.Iterable, chunk_size: int) -> t.Iterator[t.Iterable]:
-  input_ = iter(iterable)
-  try:
-    while True:
-      it = itertools.islice(input_, chunk_size)
-      # Peek to check if `it` has next item
-      first = next(it)
-      yield itertools.chain([first], it)
-  except StopIteration:
-    pass
-
-
 def _index_to_position(index: int, dimensions: t.List[int]) -> t.List[int]:
   """Converts a table index into a position within an nd-array."""
   # Authored by ChatGPT from the following prompt:
