@@ -26,9 +26,9 @@ def block_slices(ds: xr.Dataset) -> t.Iterator[t.Dict[str, slice]]:
   assert ds.chunks, 'Dataset `ds` must be chunked.'
 
   chunk_bounds = {
-    dim: np.cumsum((0,) + chunks_v) for dim, chunks_v in ds.chunks.items()
+    dim: np.cumsum((0,) + c) for dim, c in ds.chunks.items()
   }
-  ichunk = {dim: range(len(chunks_v)) for dim, chunks_v in ds.chunks.items()}
+  ichunk = {dim: range(len(c)) for dim, c in ds.chunks.items()}
   ick, icv = zip(*ichunk.items())  # Makes same order of keys and val.
   chunk_idxs = (
     dict(zip(ick, i)) for i in itertools.product(*icv)
