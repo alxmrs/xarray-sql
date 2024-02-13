@@ -54,6 +54,11 @@ class DaskDataframeTest(DaskTestCase):
     self.assertIsNotNone(df)
     self.assertEqual(len(df), np.prod(list(self.air_small.dims.values())))
 
+  def test_columns(self):
+    df = to_dd(self.air_small).compute()
+    cols = list(df.columns)
+    self.assertEqual(cols, ['lat', 'time', 'lon', 'air'])
+
 
 if __name__ == '__main__':
   unittest.main()

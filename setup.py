@@ -7,6 +7,7 @@ setuptools.setup(
     install_requires=['xarray', 'sqlglot'],
     extras_require={
         'dev': ['pyink'],
+        'test': ['dask-sql'],
     },
     python_requires='>=3.9',
 )
