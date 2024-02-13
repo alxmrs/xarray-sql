@@ -1,9 +1,24 @@
 import functools
+import itertools
 import operator
 import typing as t
 
 import sqlglot.executor.table
 import xarray as xr
+
+Row = t.List[t.Any]
+
+
+# TODO(alxmrs): Return 2d ndarray (with dtypes)?
+def unravel(ds: xr.Dataset) -> t.Iterator[Row]:
+  dim_keys, dim_vals = zip(*ds.dims.items())
+
+  for idx in itertools.product(*(range(d) for d in dim_vals)):
+    coord_idx = dict(zip(dim_keys, idx))
+    data = ds.isel(coord_idx)
+    coord_data = [ds.coords[v][coord_idx[v]] for v in dim_keys]
+    row = [_unbox(v.values) for v in coord_data + list(data.data_vars.values())]
+    yield row
 
 
 def _index_to_position(index: int, dimensions: t.List[int]) -> t.List[int]:
