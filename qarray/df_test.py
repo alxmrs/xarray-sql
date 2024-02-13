@@ -4,7 +4,7 @@ import unittest
 import numpy as np
 import xarray as xr
 
-from .dask import explode, to_dd
+from .df import explode, to_dd
 
 
 class DaskTestCase(unittest.TestCase):
