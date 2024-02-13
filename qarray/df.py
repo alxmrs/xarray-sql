@@ -20,6 +20,7 @@ def _get_chunk_slicer(dim: t.Hashable, chunk_index: t.Mapping,
   return slice(None)
 
 
+# Adapted from Xarray `map_blocks` implementation.
 def block_slices(ds: xr.Dataset) -> t.Iterator[t.Dict[str, slice]]:
   """Compute block slices for a chunked Dataset."""
   assert ds.chunks, 'Dataset `ds` must be chunked.'
@@ -42,7 +43,6 @@ def block_slices(ds: xr.Dataset) -> t.Iterator[t.Dict[str, slice]]:
   yield from blocks
 
 
-# Adapted from Xarray `map_blocks` implementation.
 def explode(ds: xr.Dataset, chunks=None) -> t.Iterator[xr.Dataset]:
   """Explodes a dataset into its chunks."""
   if chunks is not None:
