@@ -4,12 +4,12 @@ import operator
 import typing as t
 
 import sqlglot.executor.table
+import numpy as np
 import xarray as xr
 
 Row = t.List[t.Any]
 
 
-# TODO(alxmrs): Return 2d ndarray (with dtypes)?
 def unravel(ds: xr.Dataset) -> t.Iterator[Row]:
   dim_keys, dim_vals = zip(*ds.dims.items())
 
@@ -19,6 +19,31 @@ def unravel(ds: xr.Dataset) -> t.Iterator[Row]:
     coord_data = [ds.coords[v][coord_idx[v]] for v in dim_keys]
     row = [v.values for v in coord_data + list(data.data_vars.values())]
     yield row
+
+
+def unbounded_unravel(ds: xr.Dataset) -> np.ndarray:
+  """Unravel with unbounded memory (as a NumPy Array)."""
+  dim_keys, dim_vals = zip(*ds.dims.items())
+  var_keys = list(ds.data_vars.keys())
+  columns = list(dim_keys) + var_keys
+
+  N = np.prod([d for d in dim_vals])
+  DD, DV = len(ds.dims), len(ds.data_vars)
+
+  out = np.recarray((N,), dtype=[(t, ds[t].dtype) for t in columns])
+
+  for name, da in ds.items():
+    out[name] = da.values.ravel()
+
+  coords = np.empty((N, DD))
+  for i, c in enumerate(itertools.product(*[ds.coords[v] for v in dim_keys])):
+    coord = np.array(c)
+    coords[i] = coord
+
+  for i, d in enumerate(dim_keys):
+    out[d] = coords[:, i]
+
+  return out
 
 
 def _index_to_position(index: int, dimensions: t.List[int]) -> t.List[int]:
