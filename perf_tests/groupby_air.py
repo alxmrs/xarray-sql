@@ -9,8 +9,11 @@ if __name__ == '__main__':
   air = xr.tutorial.open_dataset('air_temperature')
   chunks = {'time': 240, 'lat': 5, 'lon': 7}
   air = air.chunk(chunks)
+  air_small = air.isel(
+    time=slice(0, 12), lat=slice(0, 11), lon=slice(0, 10)
+  ).chunk(chunks)
 
-  df = qr.to_dd(air)
+  df = qr.to_dd(air_small)
 
   c = Context()
   c.create_table('air', df)

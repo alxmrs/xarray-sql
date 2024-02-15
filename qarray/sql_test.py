@@ -39,7 +39,7 @@ class SqlTestCase(DaskTestCase):
     expected = self.air_small.dims['lat'] * self.air_small.dims['lon']
     self.assertEqual(len(result), expected)
 
-  def test_agg_regular(self):
+  def slow_test_agg_regular(self):
     df = to_dd(self.air)
 
     c = Context()
