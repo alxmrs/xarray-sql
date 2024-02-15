@@ -1,9 +1,8 @@
 import itertools
 import unittest
 
-import numpy as np
-import pandas as pd
 import dask.dataframe as dd
+import numpy as np
 import xarray as xr
 
 from .df import explode, to_dd

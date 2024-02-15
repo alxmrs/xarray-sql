@@ -74,7 +74,7 @@ def to_dd(ds: xr.Dataset) -> dd.DataFrame:
   divisions = tuple(np.cumsum([0] + block_lengths))  # 0 ==> start partition.
 
   def f(b: t.Dict[str, slice]) -> pd.DataFrame:
-    return to_pd(ds.isel(b))
+    return to_pd(ds.isel(b), bounded=False)
 
   return from_map(
     f,
