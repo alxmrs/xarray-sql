@@ -17,7 +17,7 @@ def unravel(ds: xr.Dataset) -> t.Iterator[Row]:
     coord_idx = dict(zip(dim_keys, idx))
     data = ds.isel(coord_idx)
     coord_data = [ds.coords[v][coord_idx[v]] for v in dim_keys]
-    row = [_unbox(v.values) for v in coord_data + list(data.data_vars.values())]
+    row = [v for v in coord_data + list(data.data_vars.values())]
     yield row
 
 
