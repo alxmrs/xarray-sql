@@ -7,7 +7,7 @@ import pandas as pd
 import xarray as xr
 from dask.dataframe.io import from_map
 
-from . import core as qr
+from . import core
 
 
 # Borrowed from Xarray
@@ -54,7 +54,10 @@ def explode(ds: xr.Dataset, chunks=None) -> t.Iterator[xr.Dataset]:
 # TODO(alxmrs): Does this need to be ichunked?
 def to_pd(ds: xr.Dataset) -> pd.DataFrame:
   columns = list(ds.dims.keys()) + list(ds.data_vars.keys())
-  return pd.DataFrame(qr.unravel(ds), columns=columns)
+  df = pd.DataFrame(core.unravel(ds), columns=columns)
+  for c in columns:
+    df[c] = df[c].astype(ds[c].dtype)
+  return df
 
 
 def _block_len(block: t.Dict[str, slice]) -> int:

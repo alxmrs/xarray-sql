@@ -2,6 +2,8 @@ import itertools
 import unittest
 
 import numpy as np
+import pandas as pd
+import dask.dataframe as dd
 import xarray as xr
 
 from .df import explode, to_dd
@@ -58,6 +60,12 @@ class DaskDataframeTest(DaskTestCase):
     df = to_dd(self.air_small).compute()
     cols = list(df.columns)
     self.assertEqual(cols, ['lat', 'time', 'lon', 'air'])
+
+  def test_dtypes(self):
+    df: dd.DataFrame = to_dd(self.air_small).compute()
+    types = list(df.dtypes)
+    self.assertEqual([self.air_small[c].dtype for c in df.columns], types)
+
 
 
 if __name__ == '__main__':
