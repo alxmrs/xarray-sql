@@ -30,7 +30,7 @@ def unbounded_unravel(ds: xr.Dataset) -> np.ndarray:
   N = np.prod([d for d in dim_vals])
   DD, DV = len(ds.dims), len(ds.data_vars)
 
-  out = np.recarray((N,), dtype=[(t, ds[t].dtype) for t in columns])
+  out = np.recarray((N,), dtype=[(c, ds[c].dtype) for c in columns])
 
   for name, da in ds.items():
     out[name] = da.values.ravel()
