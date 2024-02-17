@@ -60,7 +60,7 @@ def to_pd(ds: xr.Dataset, bounded=True) -> pd.DataFrame:
     return df
   else:
     data = core.unbounded_unravel(ds)
-    return pd.DataFrame(data, columns=columns)
+    return pd.DataFrame.from_records(data)
 
 
 def _block_len(block: t.Dict[str, slice]) -> int:

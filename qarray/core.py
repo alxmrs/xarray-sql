@@ -35,6 +35,7 @@ def unbounded_unravel(ds: xr.Dataset) -> np.ndarray:
   for name, da in ds.items():
     out[name] = da.values.ravel()
 
+  # TODO(alxmrs): Find a way to make this into an array with one call.
   coords = np.empty((N, DD))
   for i, c in enumerate(itertools.product(*[ds.coords[v] for v in dim_keys])):
     coord = np.array(c)
