@@ -51,13 +51,16 @@ def explode(ds: xr.Dataset, chunks=None) -> t.Iterator[xr.Dataset]:
   yield from (ds.isel(b) for b in block_slices(ds))
 
 
-# TODO(alxmrs): Does this need to be ichunked?
-def to_pd(ds: xr.Dataset) -> pd.DataFrame:
+def to_pd(ds: xr.Dataset, bounded=True) -> pd.DataFrame:
   columns = list(ds.dims.keys()) + list(ds.data_vars.keys())
-  df = pd.DataFrame(core.unravel(ds), columns=columns)
-  for c in columns:
-    df[c] = df[c].astype(ds[c].dtype)
-  return df
+  if bounded:
+    df = pd.DataFrame(core.unravel(ds), columns=columns)
+    for c in columns:
+      df[c] = df[c].astype(ds[c].dtype)
+    return df
+  else:
+    data = core.unbounded_unravel(ds)
+    return pd.DataFrame.from_records(data)
 
 
 def _block_len(block: t.Dict[str, slice]) -> int:
@@ -71,7 +74,7 @@ def to_dd(ds: xr.Dataset) -> dd.DataFrame:
   divisions = tuple(np.cumsum([0] + block_lengths))  # 0 ==> start partition.
 
   def f(b: t.Dict[str, slice]) -> pd.DataFrame:
-    return to_pd(ds.isel(b))
+    return to_pd(ds.isel(b), bounded=False)
 
   return from_map(
     f,

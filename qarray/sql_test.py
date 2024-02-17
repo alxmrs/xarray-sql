@@ -1,4 +1,5 @@
 import unittest
+
 from dask_sql import Context
 
 from .df import to_dd
