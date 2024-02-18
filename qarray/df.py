@@ -76,10 +76,18 @@ def to_dd(ds: xr.Dataset) -> dd.DataFrame:
   def f(b: t.Dict[str, slice]) -> pd.DataFrame:
     return to_pd(ds.isel(b), bounded=False)
 
+  token = (
+    f'xarray-Dataset-' 
+    f'{"_".join(list(ds.dims.keys()))}'
+    f'__'
+    f'{"_".join(list(ds.data_vars.keys()))}'
+  )
+
   return from_map(
     f,
     blocks,
-    divisions=divisions
+    divisions=divisions,
+    token=token,
   )
 
 # TODO(alxmrs): Try dask expressions dataframe:
