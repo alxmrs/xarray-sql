@@ -52,7 +52,7 @@ def explode(ds: xr.Dataset, chunks=None) -> t.Iterator[xr.Dataset]:
 
 
 def to_pd(ds: xr.Dataset, bounded=True) -> pd.DataFrame:
-  columns = list(ds.dims.keys()) + list(ds.data_vars.keys())
+  columns = core.get_columns(ds)
   if bounded:
     df = pd.DataFrame(core.unravel(ds), columns=columns)
     for c in columns:
@@ -76,10 +76,28 @@ def to_dd(ds: xr.Dataset) -> dd.DataFrame:
   def f(b: t.Dict[str, slice]) -> pd.DataFrame:
     return to_pd(ds.isel(b), bounded=False)
 
+  # Token is needed to prevent Dask from spending too many cycles calculating
+  # it's own token from the constituent parts.
+  token = (
+    f'xarray-Dataset-' 
+    f'{"_".join(list(ds.dims.keys()))}'
+    f'__'
+    f'{"_".join(list(ds.data_vars.keys()))}'
+  )
+
+  columns = core.get_columns(ds)
+
+  # TODO(#18): Is it possible to pass the length (known now) here?
+  meta = {
+    c: ds[c].dtype for c in columns
+  }
+
   return from_map(
     f,
     blocks,
-    divisions=divisions
+    meta=meta,
+    divisions=divisions,
+    token=token,
   )
 
 # TODO(alxmrs): Try dask expressions dataframe:

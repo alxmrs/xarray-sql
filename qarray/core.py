@@ -10,6 +10,10 @@ import xarray as xr
 Row = t.List[t.Any]
 
 
+def get_columns(ds: xr.Dataset) -> t.List[str]:
+  return list(ds.dims.keys()) + list(ds.data_vars.keys())
+
+
 def unravel(ds: xr.Dataset) -> t.Iterator[Row]:
   dim_keys, dim_vals = zip(*ds.dims.items())
 
@@ -25,7 +29,7 @@ def unbounded_unravel(ds: xr.Dataset) -> np.ndarray:
   """Unravel with unbounded memory (as a NumPy Array)."""
   dim_keys, dim_vals = zip(*ds.dims.items())
   var_keys = list(ds.data_vars.keys())
-  columns = list(dim_keys) + var_keys
+  columns = get_columns(ds)
 
   N = np.prod([d for d in dim_vals])
   DD, DV = len(ds.dims), len(ds.data_vars)

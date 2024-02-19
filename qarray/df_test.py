@@ -66,6 +66,5 @@ class DaskDataframeTest(DaskTestCase):
     self.assertEqual([self.air_small[c].dtype for c in df.columns], types)
 
 
-
 if __name__ == '__main__':
   unittest.main()
