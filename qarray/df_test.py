@@ -65,15 +65,6 @@ class DaskDataframeTest(DaskTestCase):
     types = list(df.dtypes)
     self.assertEqual([self.air_small[c].dtype for c in df.columns], types)
 
-  def slow_test_open_era5(self):
-    era5_ds = xr.open_zarr(
-      'gs://gcp-public-data-arco-era5/ar/1959-2022-full_37-1h-0p25deg-chunk-1.zarr-v2',
-      chunks={'time': 240, 'level': 1}
-    )
-    era5_wind_df = to_dd(era5_ds[['u_component_of_wind', 'v_component_of_wind']])
-
-    self.assertEqual(len(era5_wind_df), 234)
-
 
 if __name__ == '__main__':
   unittest.main()

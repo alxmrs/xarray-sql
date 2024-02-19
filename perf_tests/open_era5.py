@@ -10,4 +10,4 @@ era5_ds = xr.open_zarr(
 )
 era5_wind_df = qr.to_dd(era5_ds[['u_component_of_wind', 'v_component_of_wind']])
 
-print(len(era5_wind_df))
+print(era5_wind_df.columns)
