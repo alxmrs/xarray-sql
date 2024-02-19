@@ -87,7 +87,7 @@ def to_dd(ds: xr.Dataset) -> dd.DataFrame:
 
   columns = core.get_columns(ds)
 
-  # TODO(alxmrs): Is it possible to pass the length (known now) here?
+  # TODO(#18): Is it possible to pass the length (known now) here?
   meta = {
     c: ds[c].dtype for c in columns
   }
