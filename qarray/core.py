@@ -3,7 +3,6 @@ import itertools
 import operator
 import typing as t
 
-import sqlglot.executor.table
 import numpy as np
 import xarray as xr
 
@@ -74,34 +73,3 @@ def _unbox(array):
     return array.item()
   except ValueError:
     return array
-
-
-class XarrayDatasetTable(sqlglot.executor.table.Table):
-  """Translates an Xarray Dataset into a flat Table for SQL query execution."""
-
-  # TODO(alxmrs): Does this need to take a column_range?
-  def __init__(self, ds: xr.Dataset, column_range=None) -> None:
-    self.ds = ds
-
-    # Collect the these up front to guarantee an order for the columns and data.
-    self._dkeys, self._dvals = zip(*ds.dims.items())
-
-    columns = tuple(list(self._dkeys) + list(ds.data_vars.keys()))
-
-    super().__init__(columns, None, column_range)
-
-  def __len__(self):
-    # math.prod is not available in all python versions, so we quickly implement
-    # it here.
-    return functools.reduce(operator.mul, self.ds.dims.values(), 1)
-
-  def __getitem__(self, index):
-    """Translates a flat table index into a nd-array lookup."""
-    positions = _index_to_position(index, self._dvals)
-    coord_idx = dict(zip(self._dkeys, positions))
-    item = self.ds.isel(coord_idx)
-    coord_vals = [self.ds.coords[v][coord_idx[v]] for v in self._dkeys]
-    row = [_unbox(v.values) for v in coord_vals + list(item.data_vars.values())]
-    self.reader.row = row
-    return self.reader
-
