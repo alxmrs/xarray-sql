@@ -5,7 +5,7 @@ import dask.dataframe as dd
 import numpy as np
 import xarray as xr
 
-from .df import explode, to_dd
+from .df import explode, to_dd, block_slices
 
 
 class DaskTestCase(unittest.TestCase):
@@ -64,6 +64,14 @@ class DaskDataframeTest(DaskTestCase):
     df: dd.DataFrame = to_dd(self.air_small).compute()
     types = list(df.dtypes)
     self.assertEqual([self.air_small[c].dtype for c in df.columns], types)
+
+  def test_partitions_dont_match_dataset_chunks(self):
+    standard_blocks = list(block_slices(self.air_small))
+    default: dd.DataFrame = to_dd(self.air_small)
+    chunked: dd.DataFrame = to_dd(self.air_small, dict(time=5))
+
+    self.assertEqual(default.npartitions, len(standard_blocks))
+    self.assertNotEqual(chunked.npartitions, len(standard_blocks))
 
 
 if __name__ == '__main__':

@@ -9,6 +9,9 @@ from dask.dataframe.io import from_map
 
 from . import core
 
+Block = t.Dict[str, slice]
+Chunks = t.Dict[str, int]
+
 
 # Borrowed from Xarray
 def _get_chunk_slicer(dim: t.Hashable, chunk_index: t.Mapping,
@@ -21,14 +24,24 @@ def _get_chunk_slicer(dim: t.Hashable, chunk_index: t.Mapping,
 
 
 # Adapted from Xarray `map_blocks` implementation.
-def block_slices(ds: xr.Dataset) -> t.Iterator[t.Dict[str, slice]]:
+def block_slices(
+    ds: xr.Dataset,
+    chunks: t.Optional[Chunks] = None
+) -> t.Iterator[Block]:
   """Compute block slices for a chunked Dataset."""
-  assert ds.chunks, 'Dataset `ds` must be chunked.'
+  if chunks is not None:
+    for_chunking = ds.copy(data=None, deep=False).chunk(chunks)
+    chunks = for_chunking.chunks
+    del for_chunking
+  else:
+    chunks = ds.chunks
+
+  assert chunks, 'Dataset `ds` must be chunked or `chunks` must be provided.'
 
   chunk_bounds = {
-    dim: np.cumsum((0,) + c) for dim, c in ds.chunks.items()
+    dim: np.cumsum((0,) + c) for dim, c in chunks.items()
   }
-  ichunk = {dim: range(len(c)) for dim, c in ds.chunks.items()}
+  ichunk = {dim: range(len(c)) for dim, c in chunks.items()}
   ick, icv = zip(*ichunk.items())  # Makes same order of keys and val.
   chunk_idxs = (
     dict(zip(ick, i)) for i in itertools.product(*icv)
@@ -43,12 +56,12 @@ def block_slices(ds: xr.Dataset) -> t.Iterator[t.Dict[str, slice]]:
   yield from blocks
 
 
-def explode(ds: xr.Dataset, chunks=None) -> t.Iterator[xr.Dataset]:
+def explode(
+    ds: xr.Dataset,
+    chunks: t.Optional[Chunks] = None
+) -> t.Iterator[xr.Dataset]:
   """Explodes a dataset into its chunks."""
-  if chunks is not None:
-    ds.chunk(chunks)
-
-  yield from (ds.isel(b) for b in block_slices(ds))
+  yield from (ds.isel(b) for b in block_slices(ds, chunks=chunks))
 
 
 def to_pd(ds: xr.Dataset, bounded=True) -> pd.DataFrame:
@@ -63,17 +76,28 @@ def to_pd(ds: xr.Dataset, bounded=True) -> pd.DataFrame:
     return pd.DataFrame.from_records(data)
 
 
-def _block_len(block: t.Dict[str, slice]) -> int:
+def _block_len(block: Block) -> int:
   return np.prod([v.stop - v.start for v in block.values()])
 
 
-def to_dd(ds: xr.Dataset) -> dd.DataFrame:
-  blocks = list(block_slices(ds))
+def to_dd(ds: xr.Dataset, chunks: t.Optional[Chunks] = None) -> dd.DataFrame:
+  """Unravel a Dataset into a Dataframe, partitioned by chunks.
+
+  Args:
+    ds: An Xarray Dataset. All `data_vars` mush share the same dimensions.
+    chunks: Xarray-like chunks. If not provided, will default to the Dataset's
+     chunks. The product of the chunk sizes becomes the standard length of each
+     dataframe partition.
+
+  Returns:
+    A Dask Dataframe, which is a table representation of the input Dataset.
+  """
+  blocks = list(block_slices(ds, chunks))
 
   block_lengths = [_block_len(b) for b in blocks]
   divisions = tuple(np.cumsum([0] + block_lengths))  # 0 ==> start partition.
 
-  def f(b: t.Dict[str, slice]) -> pd.DataFrame:
+  def f(b: Block) -> pd.DataFrame:
     return to_pd(ds.isel(b), bounded=False)
 
   # Token is needed to prevent Dask from spending too many cycles calculating
