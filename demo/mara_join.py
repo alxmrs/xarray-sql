@@ -25,13 +25,13 @@ mv_gdf = gdd.from_dask_dataframe(mv_df, 'geometry')
 era5_ds = xr.open_zarr(
   'gs://gcp-public-data-arco-era5/ar/'
   '1959-2022-full_37-1h-0p25deg-chunk-1.zarr-v2',
-  chunks={'time': 48, 'level': 1}
+  chunks={'time': 240, 'level': 1}
 )
 era5_wind_ds = era5_ds[['u_component_of_wind', 'v_component_of_wind']].sel(
   time=timerange,
   level=1000,  # surface level only.
 )
-era5_wind_df = qr.to_dd(era5_wind_ds)
+era5_wind_df = qr.to_dd(era5_wind_ds, chunks=dict(time=6))
 # What is the CRS?
 era5_wind_df['geometry'] = gdd.points_from_xy(
   era5_wind_df, 'longitude', 'latitude',
