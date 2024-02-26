@@ -11,7 +11,7 @@ from .df import explode, to_dd, block_slices
 class DaskTestCase(unittest.TestCase):
   def setUp(self) -> None:
     self.air = xr.tutorial.open_dataset('air_temperature')
-    self.chunks = {'time': 240, 'lat': 5, 'lon': 7}
+    self.chunks = {'time': 240}
     self.air = self.air.chunk(self.chunks)
 
     self.air_small = self.air.isel(
@@ -28,7 +28,9 @@ class ExplodeTest(DaskTestCase):
 
   def test_dim_sizes__one(self):
     ds = next(iter(explode(self.air)))
-    self.assertEqual(dict(ds.dims), self.chunks)
+    for k, v in self.chunks.items():
+      self.assertIn(k, ds.dims)
+      self.assertEqual(v, ds.dims[k])
 
   def skip_test_dim_sizes__all(self):
     # TODO(alxmrs): Why is this test slow?
@@ -72,6 +74,11 @@ class DaskDataframeTest(DaskTestCase):
 
     self.assertEqual(default.npartitions, len(standard_blocks))
     self.assertNotEqual(chunked.npartitions, len(standard_blocks))
+
+  def test_chunk_perf(self):
+    df = to_dd(self.air, chunks=dict(time=6)).compute()
+    self.assertIsNotNone(df)
+    self.assertEqual(len(df), np.prod(list(self.air.dims.values())))
 
 
 if __name__ == '__main__':

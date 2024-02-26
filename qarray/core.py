@@ -28,22 +28,20 @@ def unravel(ds: xr.Dataset) -> t.Iterator[Row]:
 def unbounded_unravel(ds: xr.Dataset) -> np.ndarray:
   """Unravel with unbounded memory (as a NumPy Array)."""
   dim_keys, dim_vals = zip(*ds.dims.items())
-  var_keys = list(ds.data_vars.keys())
   columns = get_columns(ds)
 
   N = np.prod([d for d in dim_vals])
-  DD, DV = len(ds.dims), len(ds.data_vars)
 
   out = np.recarray((N,), dtype=[(c, ds[c].dtype) for c in columns])
 
   for name, da in ds.items():
     out[name] = da.values.ravel()
 
-  # TODO(alxmrs): Find a way to make this into an array with one call.
-  coords = np.empty((N, DD))
-  for i, c in enumerate(itertools.product(*[ds.coords[k] for k in dim_keys])):
-    coord = np.array(c)
-    coords[i] = coord
+  prod_vals = (ds.coords[k].values for k in dim_keys)
+  coords = (
+    np.array(np.meshgrid(*prod_vals), dtype=int).T
+    .reshape(-1, len(dim_keys))
+  )
 
   for i, d in enumerate(dim_keys):
     out[d] = coords[:, i]
