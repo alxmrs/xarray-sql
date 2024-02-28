@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Demo of a spatial join using Qarray and dask_geopandas for MARA."""
 import dask.dataframe as dd
 import dask_geopandas as gdd
@@ -27,19 +28,20 @@ era5_ds = xr.open_zarr(
   '1959-2022-full_37-1h-0p25deg-chunk-1.zarr-v2',
   chunks={'time': 240, 'level': 1}
 )
+print('era5 dataset opened.')
 era5_wind_ds = era5_ds[['u_component_of_wind', 'v_component_of_wind']].sel(
   time=timerange,
   level=1000,  # surface level only.
 )
-era5_wind_df = qr.to_dd(era5_wind_ds, chunks=dict(time=6))
+era5_wind_df = qr.to_dd(era5_wind_ds)
 # What is the CRS?
 era5_wind_df['geometry'] = gdd.points_from_xy(
   era5_wind_df, 'longitude', 'latitude',
 )
 era5_wind_gdf = gdd.from_dask_dataframe(era5_wind_df, 'geometry')
 
-
+print('beginning spatial join')
 # Only an inner spatial join is supported right now (in dask_geopandas).
-intersection = mv_gdf.sjoin(era5_wind_gdf)
-print(intersection.head())
+intersection = era5_wind_gdf.sjoin(mv_gdf).compute()
+print(intersection.compute)
 
