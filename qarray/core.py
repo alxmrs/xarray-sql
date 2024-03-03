@@ -1,6 +1,4 @@
-import functools
 import itertools
-import operator
 import typing as t
 
 import numpy as np
