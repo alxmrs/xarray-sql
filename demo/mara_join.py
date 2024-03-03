@@ -33,7 +33,7 @@ era5_wind_ds = era5_ds[['u_component_of_wind', 'v_component_of_wind']].sel(
   time=timerange,
   level=1000,  # surface level only.
 )
-era5_wind_df = qr.to_dd(era5_wind_ds)
+era5_wind_df = qr.read_xarray(era5_wind_ds)
 # What is the CRS?
 era5_wind_df['geometry'] = gdd.points_from_xy(
   era5_wind_df, 'longitude', 'latitude',
@@ -43,5 +43,5 @@ era5_wind_gdf = gdd.from_dask_dataframe(era5_wind_df, 'geometry')
 print('beginning spatial join')
 # Only an inner spatial join is supported right now (in dask_geopandas).
 intersection = era5_wind_gdf.sjoin(mv_gdf).compute()
-print(intersection.compute)
+print(intersection)
 
