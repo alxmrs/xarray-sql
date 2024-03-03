@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Demo of a spatial join using Qarray and dask_geopandas for MARA."""
+"""Demo of a spatial join using Qarray and dask_geopandas for MARA.
+
+Please run the following to access the ERA5 dataset:
+```
+gcloud auth application-default login
+```
+"""
 import dask.dataframe as dd
 import dask_geopandas as gdd
 import xarray as xr
@@ -42,6 +48,6 @@ era5_wind_gdf = gdd.from_dask_dataframe(era5_wind_df, 'geometry')
 
 print('beginning spatial join')
 # Only an inner spatial join is supported right now (in dask_geopandas).
-intersection = era5_wind_gdf.sjoin(mv_gdf).compute()
+intersection = mv_gdf.sjoin(era5_wind_gdf).compute()
 print(intersection)
 
