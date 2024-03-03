@@ -5,7 +5,7 @@ import dask.dataframe as dd
 import numpy as np
 import xarray as xr
 
-from .df import explode, to_dd, block_slices
+from .df import explode, read_xarray, block_slices
 
 
 class DaskTestCase(unittest.TestCase):
@@ -53,30 +53,30 @@ class ExplodeTest(DaskTestCase):
 class DaskDataframeTest(DaskTestCase):
 
   def test_sanity(self):
-    df = to_dd(self.air_small).compute()
+    df = read_xarray(self.air_small).compute()
     self.assertIsNotNone(df)
     self.assertEqual(len(df), np.prod(list(self.air_small.dims.values())))
 
   def test_columns(self):
-    df = to_dd(self.air_small).compute()
+    df = read_xarray(self.air_small).compute()
     cols = list(df.columns)
     self.assertEqual(cols, ['lat', 'time', 'lon', 'air'])
 
   def test_dtypes(self):
-    df: dd.DataFrame = to_dd(self.air_small).compute()
+    df: dd.DataFrame = read_xarray(self.air_small).compute()
     types = list(df.dtypes)
     self.assertEqual([self.air_small[c].dtype for c in df.columns], types)
 
   def test_partitions_dont_match_dataset_chunks(self):
     standard_blocks = list(block_slices(self.air_small))
-    default: dd.DataFrame = to_dd(self.air_small)
-    chunked: dd.DataFrame = to_dd(self.air_small, dict(time=5))
+    default: dd.DataFrame = read_xarray(self.air_small)
+    chunked: dd.DataFrame = read_xarray(self.air_small, dict(time=5))
 
     self.assertEqual(default.npartitions, len(standard_blocks))
     self.assertNotEqual(chunked.npartitions, len(standard_blocks))
 
   def test_chunk_perf(self):
-    df = to_dd(self.air, chunks=dict(time=6)).compute()
+    df = read_xarray(self.air, chunks=dict(time=6)).compute()
     self.assertIsNotNone(df)
     self.assertEqual(len(df), np.prod(list(self.air.dims.values())))
 

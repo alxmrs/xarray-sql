@@ -2,7 +2,6 @@ import itertools
 import typing as t
 
 import numpy as np
-import pandas as pd
 import xarray as xr
 
 Row = t.List[t.Any]
@@ -12,6 +11,7 @@ def get_columns(ds: xr.Dataset) -> t.List[str]:
   return list(ds.dims.keys()) + list(ds.data_vars.keys())
 
 
+# Deprecated
 def unravel(ds: xr.Dataset) -> t.Iterator[Row]:
   dim_keys, dim_vals = zip(*ds.dims.items())
 
@@ -23,6 +23,7 @@ def unravel(ds: xr.Dataset) -> t.Iterator[Row]:
     yield row
 
 
+# Deprecated
 def unbounded_unravel(ds: xr.Dataset) -> np.ndarray:
   """Unravel with unbounded memory (as a NumPy Array)."""
   dim_keys, dim_vals = zip(*ds.dims.items())

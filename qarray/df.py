@@ -11,7 +11,7 @@ from dask.dataframe.io import from_map
 from . import core
 
 Block = t.Dict[str, slice]
-Chunks = t.Dict[str, int]
+Chunks = t.Optional[t.Dict[str, int]]
 
 # Turn on Dask-Expr
 dask.config.set({'dataframe.query-planning-warning': False})
@@ -31,10 +31,7 @@ def _get_chunk_slicer(dim: t.Hashable, chunk_index: t.Mapping,
 
 
 # Adapted from Xarray `map_blocks` implementation.
-def block_slices(
-    ds: xr.Dataset,
-    chunks: t.Optional[Chunks] = None
-) -> t.Iterator[Block]:
+def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> t.Iterator[Block]:
   """Compute block slices for a chunked Dataset."""
   if chunks is not None:
     for_chunking = ds.copy(data=None, deep=False).chunk(chunks)
@@ -63,10 +60,7 @@ def block_slices(
   yield from blocks
 
 
-def explode(
-    ds: xr.Dataset,
-    chunks: t.Optional[Chunks] = None
-) -> t.Iterator[xr.Dataset]:
+def explode(ds: xr.Dataset, chunks: Chunks = None) -> t.Iterator[xr.Dataset]:
   """Explodes a dataset into its chunks."""
   yield from (ds.isel(b) for b in block_slices(ds, chunks=chunks))
 
@@ -75,8 +69,8 @@ def _block_len(block: Block) -> int:
   return np.prod([v.stop - v.start for v in block.values()])
 
 
-def to_dd(ds: xr.Dataset, chunks: t.Optional[Chunks] = None) -> dd.DataFrame:
-  """Unravel a Dataset into a Dataframe, partitioned by chunks.
+def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> dd.DataFrame:
+  """Pivots an Xarray Dataset into a Dask Dataframe, partitioned by chunks.
 
   Args:
     ds: An Xarray Dataset. All `data_vars` mush share the same dimensions.

@@ -2,13 +2,13 @@ import unittest
 
 from dask_sql import Context
 
-from .df import to_dd
+from . import read_xarray
 from .df_test import DaskTestCase
 
 
 class SqlTestCase(DaskTestCase):
   def test_sanity(self):
-    df = to_dd(self.air_small)
+    df = read_xarray(self.air_small)
 
     c = Context()
     c.create_table('air', df)
@@ -20,7 +20,7 @@ class SqlTestCase(DaskTestCase):
     self.assertEqual(len(result), 100)
 
   def test_agg_small(self):
-    df = to_dd(self.air_small)
+    df = read_xarray(self.air_small)
 
     c = Context()
     c.create_table('air', df)
@@ -41,7 +41,7 @@ class SqlTestCase(DaskTestCase):
     self.assertEqual(len(result), expected)
 
   def slow_test_agg_regular(self):
-    df = to_dd(self.air)
+    df = read_xarray(self.air)
 
     c = Context()
     c.create_table('air', df)
