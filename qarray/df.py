@@ -16,7 +16,7 @@ Chunks = t.Dict[str, int]
 # Turn on Dask-Expr
 dask.config.set({'dataframe.query-planning-warning': False})
 dask.config.set({"dataframe.query-planning": True})
-
+pd.options.mode.copy_on_write = True
 
 # Borrowed from Xarray
 def _get_chunk_slicer(dim: t.Hashable, chunk_index: t.Mapping,
