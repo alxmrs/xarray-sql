@@ -1,6 +1,7 @@
 import itertools
 import typing as t
 
+import dask
 import dask.dataframe as dd
 import numpy as np
 import pandas as pd
@@ -11,6 +12,10 @@ from . import core
 
 Block = t.Dict[str, slice]
 Chunks = t.Dict[str, int]
+
+# Turn on Dask-Expr
+dask.config.set({'dataframe.query-planning-warning': False})
+dask.config.set({"dataframe.query-planning": True})
 
 
 # Borrowed from Xarray
@@ -123,6 +128,3 @@ def to_dd(ds: xr.Dataset, chunks: t.Optional[Chunks] = None) -> dd.DataFrame:
     divisions=divisions,
     token=token,
   )
-
-# TODO(alxmrs): Try dask expressions dataframe:
-#  https://github.com/dask-contrib/dask-expr
