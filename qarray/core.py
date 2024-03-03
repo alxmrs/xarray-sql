@@ -46,30 +46,3 @@ def unbounded_unravel(ds: xr.Dataset) -> np.ndarray:
     out[d] = coords[:, i]
 
   return out
-
-
-def _index_to_position(index: int, dimensions: t.List[int]) -> t.List[int]:
-  """Converts a table index into a position within an nd-array."""
-  # Authored by ChatGPT from the following prompt:
-  #   """
-  #   Lets say I have an integer “index”. It represents the index of an array
-  #   where the last index value is the product of the dimensions of the array.
-  #   Each index value corresponds to a cell in the array. The array can be D
-  #   dimensions, and usually D is 3 or 4. In Python, how do I convert the
-  #   integer “index” into the position of the cell in the array (i.e. a list
-  #   of integers of length D where each value represents the position along
-  #   the dimension)?
-  #   """
-  position = []
-  for dim in reversed(dimensions):
-    position.insert(0, index % dim)
-    index //= dim
-  return position
-
-
-def _unbox(array):
-  """When a numpy array is a scalar, it extracts the value."""
-  try:
-    return array.item()
-  except ValueError:
-    return array
