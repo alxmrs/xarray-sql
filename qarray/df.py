@@ -71,17 +71,6 @@ def explode(
   yield from (ds.isel(b) for b in block_slices(ds, chunks=chunks))
 
 
-def to_pd(ds: xr.Dataset, bounded=True) -> pd.DataFrame:
-  columns = core.get_columns(ds)
-  if bounded:
-    df = pd.DataFrame(core.unravel(ds), columns=columns)
-    for c in columns:
-      df[c] = df[c].astype(ds[c].dtype)
-    return df
-  else:
-    return core.unravel_to_pd(ds)
-
-
 def _block_len(block: Block) -> int:
   return np.prod([v.stop - v.start for v in block.values()])
 
@@ -103,8 +92,8 @@ def to_dd(ds: xr.Dataset, chunks: t.Optional[Chunks] = None) -> dd.DataFrame:
   block_lengths = [_block_len(b) for b in blocks]
   divisions = tuple(np.cumsum([0] + block_lengths))  # 0 ==> start partition.
 
-  def f(b: Block) -> pd.DataFrame:
-    return to_pd(ds.isel(b), bounded=False)
+  def pivot(b: Block) -> pd.DataFrame:
+    return ds.isel(b).to_dataframe().reset_index()
 
   # Token is needed to prevent Dask from spending too many cycles calculating
   # it's own token from the constituent parts.
@@ -123,7 +112,7 @@ def to_dd(ds: xr.Dataset, chunks: t.Optional[Chunks] = None) -> dd.DataFrame:
   }
 
   return from_map(
-    f,
+    pivot,
     blocks,
     meta=meta,
     divisions=divisions,
