@@ -1,17 +1,14 @@
 import unittest
 
-from dask_sql import Context
 
-from . import read_xarray
+from . import Context
 from .df_test import DaskTestCase
 
 
 class SqlTestCase(DaskTestCase):
   def test_sanity(self):
-    df = read_xarray(self.air_small)
-
     c = Context()
-    c.create_table('air', df)
+    c.create_table('air', self.air_small)
 
     query = c.sql('SELECT "lat", "lon", "time", "air" FROM "air" LIMIT 100')
 
@@ -20,10 +17,8 @@ class SqlTestCase(DaskTestCase):
     self.assertEqual(len(result), 100)
 
   def test_agg_small(self):
-    df = read_xarray(self.air_small)
-
     c = Context()
-    c.create_table('air', df)
+    c.create_table('air', self.air_small)
 
     query = c.sql('''
     SELECT
@@ -40,15 +35,13 @@ class SqlTestCase(DaskTestCase):
     expected = self.air_small.dims['lat'] * self.air_small.dims['lon']
     self.assertEqual(len(result), expected)
 
-  def slow_test_agg_regular(self):
-    df = read_xarray(self.air)
-
+  def test_agg_regular(self):
     c = Context()
-    c.create_table('air', df)
+    c.create_table('air', self.air)
 
     query = c.sql('''
     SELECT
-      "lat", "lon", SUM("air") as air_total
+      "lat", "lon", AVG("air") as air_total
     FROM 
       "air" 
     GROUP BY
