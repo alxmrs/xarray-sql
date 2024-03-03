@@ -81,6 +81,12 @@ def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> dd.DataFrame:
   Returns:
     A Dask Dataframe, which is a table representation of the input Dataset.
   """
+  fst = next(iter(ds.values())).dims
+  assert all(da.dims == fst for da in ds.values()), ('All dimensions must be '
+                                                     'equal. Please filter '
+                                                     'data_vars in the '
+                                                     'Dataset.')
+
   blocks = list(block_slices(ds, chunks))
 
   block_lengths = [_block_len(b) for b in blocks]
