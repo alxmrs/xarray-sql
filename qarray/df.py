@@ -79,8 +79,7 @@ def to_pd(ds: xr.Dataset, bounded=True) -> pd.DataFrame:
       df[c] = df[c].astype(ds[c].dtype)
     return df
   else:
-    data = core.unbounded_unravel(ds)
-    return pd.DataFrame.from_records(data)
+    return core.unravel_to_pd(ds)
 
 
 def _block_len(block: Block) -> int:

@@ -2,6 +2,7 @@ import itertools
 import typing as t
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 
 Row = t.List[t.Any]
@@ -44,3 +45,15 @@ def unbounded_unravel(ds: xr.Dataset) -> np.ndarray:
     out[d] = coords[:, i]
 
   return out
+
+
+def unravel_to_pd(ds: xr.Dataset) -> pd.DataFrame:
+  data = {name: da.values.ravel() for name, da in ds.items()}
+
+  coord_vals = (ds.coords[k].values for k in ds.dims.keys())
+  coords = pd.MultiIndex.from_product(coord_vals, names=ds.dims.keys())
+
+  # TODO(alxmrs): The reset index takes a lot of time! Maybe it's still OK.
+  return pd.DataFrame(data, index=coords).reset_index()
+
+
