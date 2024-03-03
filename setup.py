@@ -5,7 +5,7 @@ setuptools.setup(
     version='0.0.0',
     license='Apache 2.0',
     packages=setuptools.find_packages(exclude=['demo', 'perf_tests']),
-    install_requires=['xarray', 'sqlglot'],
+    install_requires=['xarray'],
     extras_require={
         'dev': ['pyink', 'py-spy'],
         'test': ['dask-sql', 'zarr', 'gcsfs'],
