@@ -13,7 +13,7 @@ if __name__ == '__main__':
     time=slice(0, 12), lat=slice(0, 11), lon=slice(0, 10)
   ).chunk(chunks)
 
-  df = qr.to_dd(air_small)
+  df = qr.read_xarray(air_small)
 
   c = Context()
   c.create_table('air', df)

@@ -8,6 +8,6 @@ if __name__ == '__main__':
   chunks = {'time': 240}
   air = air.chunk(chunks)
 
-  df = qr.to_dd(air).compute()
+  df = qr.read_xarray(air).compute()
 
   print(len(df))

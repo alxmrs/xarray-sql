@@ -10,7 +10,7 @@ if __name__ == '__main__':
   chunks = {'time': 240}
   air = air.chunk(chunks)
 
-  df = qr.to_dd(air)
+  df = qr.read_xarray(air)
 
   c = Context()
   c.create_table('air', df)
