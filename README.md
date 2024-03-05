@@ -14,6 +14,7 @@ ds = xr.tutorial.open_dataset('air_temperature')
 
 # The same as a dask-sql Context; i.e. an Apache DataFusion Context.
 c = qr.Context(ds)
+c.create_table('air', ds)
 
 df = c.sql('''
   SELECT
@@ -54,6 +55,17 @@ This is a light-weight way to prove the value of the interface.
 All chunks in an Xarray Dataset are transformed into a Dask DataFrame via
 `from_map()` and `to_dataframe()`. For SQL support, we just use `dask-sql`.
 That's it!
+
+## Why does this work?
+
+Underneath Xarray, Dask, and Pandas, there are NumPy arrays. These are
+paged in chucks and represented contiguously in memory. It is only a 
+matter of metadata that breaks them up into ndarrays. `to_dataframe()`
+just changes this metadata (via a `ravel()`/`reshape()`), back into a
+column amenable to a Dataframe. 
+
+There is added overhead from duplicating dimensions as columns, which
+we see as worth the convenience of DataFrames. 
 
 ## What are the current limitations?
 
