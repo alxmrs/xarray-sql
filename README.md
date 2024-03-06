@@ -4,7 +4,7 @@ _Query Xarray via SQL_
 
 ## What is this?
 
-This is an experiment that provides an SQL interface for raster data.
+This experiment provides a SQL interface for raster data.
 
 ```python
 import xarray as xr
@@ -33,7 +33,7 @@ df = qr.read_xarray(ds)
 df.head()
 ```
 
-To put it succinctly, we "pivot" Xarray Datasets so we can treat them like
+Succinctly, we "pivot" Xarray Datasets to treat them like
 tables so we can run SQL queries against them.
 
 ## Why build this?
@@ -42,11 +42,12 @@ A few reasons:
 
 * Even though SQL is the lingua franca of data, scientific datasets are often
   inaccessible to non-scientists.
-* Joining tabular data with raster data is both common and difficult when it
+* Joining tabular data with raster data is common yet difficult. It
   could be easy.
-* There are many Xarray-openeable datasets that would be nice to query via SQL,
-  e.g. from [Google Earth Engine](https://github.com/google/Xee)
-  or [Pangeo Forge](https://pangeo-forge.org/).
+* There are many cloud-native, Xarray-openable datasets, 
+  from [Google Earth Engine](https://github.com/google/Xee)
+  to [Pangeo Forge](https://pangeo-forge.org/). Wouldn’t it be great if these
+  were also SQL-accessible? How can the bridge be built with minimal effort? 
 
 This is a light-weight way to prove the value of the interface.
 
@@ -62,7 +63,7 @@ Underneath Xarray, Dask, and Pandas, there are NumPy arrays. These are
 paged in chucks and represented contiguously in memory. It is only a 
 matter of metadata that breaks them up into ndarrays. `to_dataframe()`
 just changes this metadata (via a `ravel()`/`reshape()`), back into a
-column amenable to a Dataframe. 
+column amenable to a DataFrame. 
 
 There is added overhead from duplicating dimensions as columns, which
 we see as worth the convenience of DataFrames. 
