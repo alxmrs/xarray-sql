@@ -82,12 +82,11 @@ supported ([geopandas/dask-geopandas#72](https://github.com/geopandas/dask-geopa
 
 ## What would a deeper integration look like?
 
-I have a few ideas so far. One approach involves parsing SQL to apply operations
-directly on the Xarray Dataset. This approach is being
-pursued [here](https://github.com/google/weather-tools/tree/main/xql), as `xql`.
+I have a few ideas so far. One approach involves applying operations directly on
+Xarray Datasets. This approach is being pursued 
+[here](https://github.com/google/weather-tools/tree/main/xql), as `xql`.
 
-Deeper still: I was thinking we could make like a virtual filesystem for parquet
-that would internally map data to ([virtual](https://fsspec.github.io/kerchunk/)
-?) Zarr. Raster-backed virtual parquet would open up integrations to numerous
-tools, including dask, pyarrow, duckdb, and BigQuery. More thoughts on this
-in [#4](https://github.com/alxmrs/qarray/issues/4).
+Deeper still: I was thinking we could make a [virtual](https://fsspec.github.io/kerchunk/)
+filesystem for parquet that would internally map to Zarr. Raster-backed virtual
+parquet would open up integrations to numeroustools like dask, pyarrow, duckdb,
+and BigQuery. More thoughts on this in [#4](https://github.com/alxmrs/qarray/issues/4).
