@@ -4,7 +4,7 @@ _Query Xarray via SQL_
 
 ## What is this?
 
-This experiment provides a SQL interface for raster data.
+This is an experiment to provide a SQL interface for raster data.
 
 ```python
 import xarray as xr
