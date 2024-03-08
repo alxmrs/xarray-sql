@@ -51,6 +51,10 @@ A few reasons:
 
 This is a light-weight way to prove the value of the interface.
 
+The larger goal is to explore the hypothesis that [Pangeo](https://pangeo.io/)
+is a scientific database. Here, Qarray can be thought of as a missing DB front
+end.
+
 ## How does it work?
 
 All chunks in an Xarray Dataset are transformed into a Dask DataFrame via
