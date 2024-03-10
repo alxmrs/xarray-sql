@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import xarray as xr
-import qarray as qr
+import xarray_sql as qr
 
 if __name__ == '__main__':
   air = xr.tutorial.open_dataset('air_temperature')

@@ -13,7 +13,7 @@ So far, this includes statistical profiles via py-spy.
 
    This will open a flame graph in the browser.
 
-2. After tuning code in qarray, run another profile to generate a SVG.
+2. After tuning code in xarray-sql, run another profile to generate a SVG.
 
 3. Please commit the "after" profile SVG along with the performance improvements.
 

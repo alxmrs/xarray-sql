@@ -51,10 +51,10 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
         cache: 'pip'
-    - name: Install qarray
+    - name: Install xarray_sql
       run: |
         pip install -e .[test]
     - uses: 'actions/checkout@v4'
     - name: Run unit tests
       run: |
-        pytest qarray
+        pytest xarray_sql
