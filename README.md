@@ -5,6 +5,9 @@ _Query Xarray with SQL_
 [![ci](https://github.com/alxmrs/xarray-sql/actions/workflows/ci.yml/badge.svg)](https://github.com/alxmrs/xarray-sql/actions/workflows/ci.yml)
 [![lint](https://github.com/alxmrs/xarray-sql/actions/workflows/lint.yml/badge.svg)](https://github.com/alxmrs/xarray-sql/actions/workflows/lint.yml)
 
+```shell
+pip install xarray-sql
+```
 
 ## What is this?
 
