@@ -8,7 +8,7 @@ if __name__ == '__main__':
   chunks = {'time': 240, 'lat': 5, 'lon': 7}
 
   air_small = air.isel(
-    time=slice(0, 12), lat=slice(0, 11), lon=slice(0, 10)
+      time=slice(0, 12), lat=slice(0, 11), lon=slice(0, 10)
   ).chunk(chunks)
 
   df = qr.read_xarray(air_small).compute()
