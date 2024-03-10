@@ -2,6 +2,10 @@
 
 _Query Xarray via SQL_
 
+[![ci](https://github.com/alxmrs/qarray/actions/workflows/ci.yml/badge.svg)](https://github.com/alxmrs/qarray/actions/workflows/ci.yml)
+[![lint](https://github.com/alxmrs/qarray/actions/workflows/lint.yml/badge.svg)](https://github.com/alxmrs/qarray/actions/workflows/lint.yml)
+
+
 ## What is this?
 
 This is an experiment to provide a SQL interface for raster data.
