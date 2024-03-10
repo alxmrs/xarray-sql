@@ -101,6 +101,16 @@ parquet would open up integrations to numeroustools like dask, pyarrow, duckdb,
 and BigQuery. More thoughts on this
 in [#4](https://github.com/alxmrs/qarray/issues/4).
 
+## Sponsors & Contributors
+
+I want to give a special thanks to the following folks and institutions:
+
+- Pramod Gupta and the Anthromet Team at Google Research for the problem
+  formation and design inspiration.
+- Jake Wall and AI2/Ecoscope for compute resources and key use cases.
+- Charles Stern, Stephan Hoyer, and Qiusheng Wu for the early review and
+  discussion of this project.
+
 ## License
 
 ```
@@ -121,6 +131,6 @@ limitations under the License.
 
 Some sources are re-distributed from Google LLC
 via https://github.com/google/Xee (also Apache-2.0 License) with and without
-modification. These files are subject to the original copyright; they include
-the original license header comment as well as a note to indicate
-modifications (when appropriate).
+modification (specifically, Github Actions workflows). These files are subject
+to the original copyright; they include the original license header comment as
+well as a note to indicate modifications (when appropriate).
