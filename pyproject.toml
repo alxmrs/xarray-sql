@@ -33,8 +33,7 @@ dependencies = [
 [project.optional-dependencies]
 test = [
   "pytest",
-  "pooch",
-  "zarr",
+  "xarray[io]",
   "gcsfs",
 ]
 dev = [
