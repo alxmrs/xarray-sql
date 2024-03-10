@@ -1,5 +1,62 @@
+[project]
+name = "qarray"
+dynamic = ["version"]
+description = "Querry Xarray with SQL."
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "Apache-2.0"}
+authors = [
+  {name = "Alexander Merose", email = "al@merose.com"},
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Information Technology",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: MacOS :: MacOS X",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Atmospheric Science",
+  "Topic :: Database :: Front-Ends",
+]
+dependencies = [
+  "xarray",
+  "dask-sql",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest",
+  "zarr",
+  "gcsfs",
+]
+dev = [
+  "qarray[test]",
+  "pyink",
+  "py-spy"
+]
+
+[project.urls]
+Homepage = "https://github.com/alxmrs/qarray"
+Issues = "https://github.com/alxmrs/qarray/issues"
+
+[build-system]
+requires = ["setuptools>=64", "setuptools_scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+exclude = ["demo", "perf_tests"]
+
 [tool.pyink]
 line-length = 80
 preview = true
 pyink-indentation = 2
 pyink-use-majority-quotes = true
+
+[tool.setuptools_scm]
