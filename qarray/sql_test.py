@@ -6,6 +6,7 @@ from .df_test import DaskTestCase
 
 
 class SqlTestCase(DaskTestCase):
+
   def test_sanity(self):
     c = Context()
     c.create_table('air', self.air_small)
@@ -20,14 +21,14 @@ class SqlTestCase(DaskTestCase):
     c = Context()
     c.create_table('air', self.air_small)
 
-    query = c.sql('''
+    query = c.sql("""
     SELECT
       "lat", "lon", SUM("air") as air_total
     FROM 
       "air" 
     GROUP BY
      "lat", "lon"
-    ''')
+    """)
 
     result = query.compute()
     self.assertIsNotNone(result)
@@ -39,14 +40,14 @@ class SqlTestCase(DaskTestCase):
     c = Context()
     c.create_table('air', self.air)
 
-    query = c.sql('''
+    query = c.sql("""
     SELECT
       "lat", "lon", AVG("air") as air_total
     FROM 
       "air" 
     GROUP BY
      "lat", "lon"
-    ''')
+    """)
 
     result = query.compute()
     self.assertIsNotNone(result)
