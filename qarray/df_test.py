@@ -9,13 +9,14 @@ from .df import explode, read_xarray, block_slices
 
 
 class DaskTestCase(unittest.TestCase):
+
   def setUp(self) -> None:
     self.air = xr.tutorial.open_dataset('air_temperature')
     self.chunks = {'time': 240}
     self.air = self.air.chunk(self.chunks)
 
     self.air_small = self.air.isel(
-      time=slice(0, 12), lat=slice(0, 11), lon=slice(0, 10)
+        time=slice(0, 12), lat=slice(0, 11), lon=slice(0, 10)
     ).chunk(self.chunks)
 
 
@@ -23,8 +24,9 @@ class ExplodeTest(DaskTestCase):
 
   def test_cardinality(self):
     dss = explode(self.air)
-    self.assertEqual(len(list(dss)),
-                     np.prod([len(c) for c in self.air.chunks.values()]))
+    self.assertEqual(
+        len(list(dss)), np.prod([len(c) for c in self.air.chunks.values()])
+    )
 
   def test_dim_sizes__one(self):
     ds = next(iter(explode(self.air)))
@@ -35,8 +37,10 @@ class ExplodeTest(DaskTestCase):
   def skip_test_dim_sizes__all(self):
     # TODO(alxmrs): Why is this test slow?
     dss = explode(self.air)
-    self.assertEqual([tuple(ds.dims.values()) for ds in dss],
-                     list(itertools.product(*self.air.chunksizes.values())))
+    self.assertEqual(
+        [tuple(ds.dims.values()) for ds in dss],
+        list(itertools.product(*self.air.chunksizes.values())),
+    )
 
   def test_data_equal__one__first(self):
     ds = next(iter(explode(self.air)))

@@ -15,18 +15,20 @@ Chunks = t.Optional[t.Dict[str, int]]
 
 # Turn on Dask-Expr
 dask.config.set({'dataframe.query-planning-warning': False})
-dask.config.set({"dataframe.query-planning": True})
+dask.config.set({'dataframe.query-planning': True})
 # Turn on Copy-On-Write (needs Pandas 2.0).
 pd.options.mode.copy_on_write = True
 
 
 # Borrowed from Xarray
-def _get_chunk_slicer(dim: t.Hashable, chunk_index: t.Mapping,
-                      chunk_bounds: t.Mapping):
+def _get_chunk_slicer(
+    dim: t.Hashable, chunk_index: t.Mapping, chunk_bounds: t.Mapping
+):
   if dim in chunk_index:
     which_chunk = chunk_index[dim]
-    return slice(chunk_bounds[dim][which_chunk],
-                 chunk_bounds[dim][which_chunk + 1])
+    return slice(
+        chunk_bounds[dim][which_chunk], chunk_bounds[dim][which_chunk + 1]
+    )
   return slice(None)
 
 
@@ -42,20 +44,16 @@ def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> t.Iterator[Block]:
 
   assert chunks, 'Dataset `ds` must be chunked or `chunks` must be provided.'
 
-  chunk_bounds = {
-    dim: np.cumsum((0,) + c) for dim, c in chunks.items()
-  }
+  chunk_bounds = {dim: np.cumsum((0,) + c) for dim, c in chunks.items()}
   ichunk = {dim: range(len(c)) for dim, c in chunks.items()}
   ick, icv = zip(*ichunk.items())  # Makes same order of keys and val.
-  chunk_idxs = (
-    dict(zip(ick, i)) for i in itertools.product(*icv)
-  )
+  chunk_idxs = (dict(zip(ick, i)) for i in itertools.product(*icv))
   blocks = (
-    {
-      dim: _get_chunk_slicer(dim, chunk_index, chunk_bounds)
-      for dim in ds.dims
-    }
-    for chunk_index in chunk_idxs
+      {
+          dim: _get_chunk_slicer(dim, chunk_index, chunk_bounds)
+          for dim in ds.dims
+      }
+      for chunk_index in chunk_idxs
   )
   yield from blocks
 
@@ -82,10 +80,9 @@ def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> dd.DataFrame:
     A Dask Dataframe, which is a table representation of the input Dataset.
   """
   fst = next(iter(ds.values())).dims
-  assert all(da.dims == fst for da in ds.values()), ('All dimensions must be '
-                                                     'equal. Please filter '
-                                                     'data_vars in the '
-                                                     'Dataset.')
+  assert all(
+      da.dims == fst for da in ds.values()
+  ), 'All dimensions must be equal. Please filter data_vars in the Dataset.'
 
   blocks = list(block_slices(ds, chunks))
 
@@ -98,23 +95,21 @@ def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> dd.DataFrame:
   # Token is needed to prevent Dask from spending too many cycles calculating
   # it's own token from the constituent parts.
   token = (
-    f'xarray-Dataset-' 
-    f'{"_".join(list(ds.dims.keys()))}'
-    f'__'
-    f'{"_".join(list(ds.data_vars.keys()))}'
+      'xarray-Dataset-'
+      f'{"_".join(list(ds.dims.keys()))}'
+      '__'
+      f'{"_".join(list(ds.data_vars.keys()))}'
   )
 
   columns = core.get_columns(ds)
 
   # TODO(#18): Is it possible to pass the length (known now) here?
-  meta = {
-    c: ds[c].dtype for c in columns
-  }
+  meta = {c: ds[c].dtype for c in columns}
 
   return from_map(
-    pivot,
-    blocks,
-    meta=meta,
-    divisions=divisions,
-    token=token,
+      pivot,
+      blocks,
+      meta=meta,
+      divisions=divisions,
+      token=token,
   )
