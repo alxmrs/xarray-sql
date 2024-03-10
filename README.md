@@ -1,9 +1,9 @@
-# qarray
+# xarray-sql
 
-_Query Xarray via SQL_
+_Query Xarray with SQL_
 
-[![ci](https://github.com/alxmrs/qarray/actions/workflows/ci.yml/badge.svg)](https://github.com/alxmrs/qarray/actions/workflows/ci.yml)
-[![lint](https://github.com/alxmrs/qarray/actions/workflows/lint.yml/badge.svg)](https://github.com/alxmrs/qarray/actions/workflows/lint.yml)
+[![ci](https://github.com/alxmrs/xarray-sql/actions/workflows/ci.yml/badge.svg)](https://github.com/alxmrs/xarray-sql/actions/workflows/ci.yml)
+[![lint](https://github.com/alxmrs/xarray-sql/actions/workflows/lint.yml/badge.svg)](https://github.com/alxmrs/xarray-sql/actions/workflows/lint.yml)
 
 
 ## What is this?
@@ -12,7 +12,7 @@ This is an experiment to provide a SQL interface for raster data.
 
 ```python
 import xarray as xr
-import qarray as qr
+import xarray_sql as qr
 
 ds = xr.tutorial.open_dataset('air_temperature')
 
@@ -56,8 +56,8 @@ A few reasons:
 This is a light-weight way to prove the value of the interface.
 
 The larger goal is to explore the hypothesis that [Pangeo](https://pangeo.io/)
-is a scientific database. Here, Qarray can be thought of as a missing DB front
-end.
+is a scientific database. Here, xarray-sql can be thought of as a missing DB 
+front end.
 
 ## How does it work?
 
@@ -99,7 +99,7 @@ a [virtual](https://fsspec.github.io/kerchunk/)
 filesystem for parquet that would internally map to Zarr. Raster-backed virtual
 parquet would open up integrations to numeroustools like dask, pyarrow, duckdb,
 and BigQuery. More thoughts on this
-in [#4](https://github.com/alxmrs/qarray/issues/4).
+in [#4](https://github.com/alxmrs/xarray-sql/issues/4).
 
 ## Sponsors & Contributors
 

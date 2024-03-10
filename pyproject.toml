@@ -1,5 +1,5 @@
 [project]
-name = "qarray"
+name = "xarray_sql"
 dynamic = ["version"]
 description = "Querry Xarray with SQL."
 readme = "README.md"
@@ -37,14 +37,14 @@ test = [
   "gcsfs",
 ]
 dev = [
-  "qarray[test]",
+  "xarray_sql[test]",
   "pyink",
   "py-spy"
 ]
 
 [project.urls]
-Homepage = "https://github.com/alxmrs/qarray"
-Issues = "https://github.com/alxmrs/qarray/issues"
+Homepage = "https://github.com/alxmrs/xarray-sql"
+Issues = "https://github.com/alxmrs/xarray-sql/issues"
 
 [build-system]
 requires = ["setuptools>=64", "setuptools_scm>=8"]

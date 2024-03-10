@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import xarray as xr
-import qarray as qr
+import xarray_sql as qr
 from dask_sql import Context
 
 

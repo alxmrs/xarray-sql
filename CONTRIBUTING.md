@@ -18,5 +18,5 @@ reading [Xarray's contributing guide](https://docs.xarray.dev/en/stable/contribu
    or [Mamba](https://mamba.readthedocs.io/en/latest/)
    is preferred.
 1. Clone the repository (bonus: [via SSH](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account))
-   and `cd qarray` (the project root).
+   and `cd xarray_sql` (the project root).
 1. Install dev dependencies via: `pip install -e ".[dev]` 
