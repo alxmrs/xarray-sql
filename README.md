@@ -111,8 +111,8 @@ I want to give a special thanks to the following folks and institutions:
 - Pramod Gupta and the Anthromet Team at Google Research for the problem
   formation and design inspiration.
 - Jake Wall and AI2/Ecoscope for compute resources and key use cases.
-- Charles Stern, Stephan Hoyer, and Qiusheng Wu for the early review and
-  discussion of this project.
+- Charles Stern, Stephan Hoyer, Alexander Kmoch, Wei Ji, and Qiusheng Wu
+  for the early review and discussion of this project.
 
 ## License
 
