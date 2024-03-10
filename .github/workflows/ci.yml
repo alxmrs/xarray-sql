@@ -39,8 +39,6 @@ jobs:
           "3.11",
           "3.12",
         ]
-    permissions:
-      id-token: write  # This is required for requesting the JWT.
     steps:
     - name: Cancel previous
       uses: styfle/cancel-workflow-action@0.7.0
@@ -57,12 +55,6 @@ jobs:
       run: |
         pip install -e .[test]
     - uses: 'actions/checkout@v4'
-    - id: 'auth'
-      name: 'Authenticate to Google Cloud'
-      uses: 'google-github-actions/auth@v1'
-      with:
-        service_account: ${{ secrets.SERVICE_ACCOUNT }}
-        workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
     - name: Run unit tests
       run: |
         pytest qarray
