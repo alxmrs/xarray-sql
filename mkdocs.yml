@@ -75,8 +75,5 @@ nav:
   - Report Issues: https://github.com/alxmrs/xarray-sql/issues
   - API Reference:
       - core module: core.md
-      - df_integrationtest module: df_integrationtest.md
-      - df_test module: df_test.md
       - df module: df.md
-      - sql_test module: sql_test.md
       - sql module: sql.md
