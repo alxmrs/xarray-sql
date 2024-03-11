@@ -1,0 +1,82 @@
+site_name: xarray-sql
+site_description: Query Xarray with SQL
+site_author: Alex Merose
+site_url: https://alxmrs.github.io/xarray-sql
+
+repo_url: https://github.com/alxmrs/xarray-sql
+
+copyright: "Copyright &copy; 2024 Alexander Merose"
+
+theme:
+  palette:
+    - scheme: default
+      toggle:
+        icon: material/toggle-switch-off-outline
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/toggle-switch
+        name: Switch to light mode
+  name: material
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - search.highlight
+    - search.share
+  custom_dir: "docs/overrides"
+  font:
+    text: Google Sans
+    code: Regular
+
+plugins:
+  - search
+  - mkdocstrings
+  - git-revision-date
+  - git-revision-date-localized:
+      enable_creation_date: true
+      type: timeago
+  - mkdocs-jupyter:
+      include_source: True
+      ignore_h1_titles: True
+      allow_errors: false
+      ignore: ["conf.py"]
+      execute: False
+      execute_ignore: ["changelog_update.py"]
+
+markdown_extensions:
+  - admonition
+  - abbr
+  - attr_list
+  - def_list
+  - footnotes
+  - meta
+  - md_in_html
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      linenums: true
+  - toc:
+      permalink: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/alxmrs
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - FAQ: faq.md
+  - Changelog: changelog.md
+  - Report Issues: https://github.com/alxmrs/xarray-sql/issues
+  - API Reference:
+      - core module: core.md
+      - df_integrationtest module: df_integrationtest.md
+      - df_test module: df_test.md
+      - df module: df.md
+      - sql_test module: sql_test.md
+      - sql module: sql.md
