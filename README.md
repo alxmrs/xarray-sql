@@ -48,7 +48,7 @@ SQL queries against them.
 A few reasons:
 
 * Even though SQL is the lingua franca of data, scientific datasets are often
-  inaccessible to non-scientists.
+  inaccessible to non-scientists (SQL users).
 * Joining tabular data with raster data is common yet difficult. It could be
   easy.
 * There are many cloud-native, Xarray-openable datasets,
