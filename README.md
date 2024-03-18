@@ -71,7 +71,7 @@ That's it!
 ## Why does this work?
 
 Underneath Xarray, Dask, and Pandas, there are NumPy arrays. These are paged in
-chucks and represented contiguously in memory. It is only a matter of metadata
+chuncks and represented contiguously in memory. It is only a matter of metadata
 that breaks them up into ndarrays. `to_dataframe()`
 just changes this metadata (via a `ravel()`/`reshape()`), back into a column
 amenable to a DataFrame.
