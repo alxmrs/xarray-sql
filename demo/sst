@@ -9,7 +9,16 @@ gcloud auth application-default login
 import xarray as xr
 import xarray_sql as qr
 
-# TODO(alxmrs): Add coiled or dask cluster code. 
+from coiled import Cluster
+
+cluster = Cluster(
+  region='us-central1',
+  worker_memory='16 GiB',
+  spot_policy='spot_with_fallback',
+  arm=True,
+)
+client = cluster.get_client()
+cluster.adapt(minimum=1, maximum=100)
 
 era5_ds = xr.open_zarr(
   'gs://gcp-public-data-arco-era5/ar/'
@@ -22,7 +31,7 @@ era5_sst_ds = era5_ds[['sea_surface_temperature']].sel(
   level=1000,  # surface level only.
 )
 
-# chunk sizes determined from VM memory limit of 16 GB.
+# chunk sizes determined from VM memory limit of 16 GiB.
 c = qr.Context()
 c.create_table('era5', era5_sst_ds, chunks=dict(time=24))
 
