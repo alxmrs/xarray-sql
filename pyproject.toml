@@ -37,6 +37,9 @@ test = [
   "xarray[io]",
   "gcsfs",
 ]
+demo = [
+    "coiled"
+]
 
 [project.urls]
 Homepage = "https://github.com/alxmrs/xarray-sql"
