@@ -101,7 +101,7 @@ def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> dd.DataFrame:
       f'{"_".join(list(ds.data_vars.keys()))}'
   )
 
-  columns = core.get_columns(ds)
+  columns = pivot(blocks[0]).columns
 
   # TODO(#18): Is it possible to pass the length (known now) here?
   meta = {c: ds[c].dtype for c in columns}

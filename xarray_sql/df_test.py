@@ -3,9 +3,35 @@ import unittest
 
 import dask.dataframe as dd
 import numpy as np
+import pandas as pd
 import xarray as xr
 
 from .df import explode, read_xarray, block_slices
+
+
+def rand_wx(start: str, end: str) -> xr.Dataset:
+  np.random.seed(42)
+  lat = np.linspace(-90, 90, num=720)
+  lon = np.linspace(-180, 180, num=1440)
+  time = pd.date_range(start, end, freq='H')
+  level = np.array([1000, 500], dtype=np.int32)
+  reference_time = pd.Timestamp(start)
+  temperature = 15 + 8 * np.random.randn(720, 1440, len(time), len(level))
+  precipitation = 10 * np.random.rand(720, 1440, len(time), len(level))
+  return xr.Dataset(
+    data_vars=dict(
+      temperature=(['lat', 'lon', 'time', 'level'], temperature),
+      precipitation=(['lat', 'lon', 'time', 'level'], precipitation),
+    ),
+    coords=dict(
+      lat=lat,
+      lon=lon,
+      time=time,
+      level=level,
+      reference_time=reference_time,
+    ),
+    attrs=dict(description='Random weather.')
+  )
 
 
 class DaskTestCase(unittest.TestCase):
@@ -18,6 +44,7 @@ class DaskTestCase(unittest.TestCase):
     self.air_small = self.air.isel(
         time=slice(0, 12), lat=slice(0, 11), lon=slice(0, 10)
     ).chunk(self.chunks)
+    self.randwx = rand_wx('1995-01-13T00', '1995-01-13T01')
 
 
 class ExplodeTest(DaskTestCase):
@@ -83,6 +110,13 @@ class DaskDataframeTest(DaskTestCase):
     df = read_xarray(self.air, chunks=dict(time=6)).compute()
     self.assertIsNotNone(df)
     self.assertEqual(len(df), np.prod(list(self.air.dims.values())))
+
+  def test_column_metadata_preserved(self):
+    try:
+      _ = read_xarray(self.randwx, chunks=dict(time=24)).compute()
+    except ValueError as e:
+      if 'The columns in the computed data do not match the columns in the provided metadata' in str(e):
+        self.fail('Column metadata is incorrect.')
 
 
 if __name__ == '__main__':
