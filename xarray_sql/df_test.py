@@ -19,18 +19,18 @@ def rand_wx(start: str, end: str) -> xr.Dataset:
   temperature = 15 + 8 * np.random.randn(720, 1440, len(time), len(level))
   precipitation = 10 * np.random.rand(720, 1440, len(time), len(level))
   return xr.Dataset(
-    data_vars=dict(
-      temperature=(['lat', 'lon', 'time', 'level'], temperature),
-      precipitation=(['lat', 'lon', 'time', 'level'], precipitation),
-    ),
-    coords=dict(
-      lat=lat,
-      lon=lon,
-      time=time,
-      level=level,
-      reference_time=reference_time,
-    ),
-    attrs=dict(description='Random weather.')
+      data_vars=dict(
+          temperature=(['lat', 'lon', 'time', 'level'], temperature),
+          precipitation=(['lat', 'lon', 'time', 'level'], precipitation),
+      ),
+      coords=dict(
+          lat=lat,
+          lon=lon,
+          time=time,
+          level=level,
+          reference_time=reference_time,
+      ),
+      attrs=dict(description='Random weather.'),
   )
 
 
@@ -115,7 +115,11 @@ class DaskDataframeTest(DaskTestCase):
     try:
       _ = read_xarray(self.randwx, chunks=dict(time=24)).compute()
     except ValueError as e:
-      if 'The columns in the computed data do not match the columns in the provided metadata' in str(e):
+      if (
+          'The columns in the computed data do not match the columns in the'
+          ' provided metadata'
+          in str(e)
+      ):
         self.fail('Column metadata is incorrect.')
 
 
