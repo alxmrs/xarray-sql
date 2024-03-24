@@ -15,14 +15,16 @@ if __name__ == '__main__':
   c = Context()
   c.create_table('air', df)
 
-  query = c.sql("""
+  query = c.sql(
+      """
       SELECT
         "lat", "lon", SUM("air") as air_total
       FROM 
         "air" 
       GROUP BY
        "lat", "lon"
-      """)
+      """
+  )
 
   result = query.compute()
 
