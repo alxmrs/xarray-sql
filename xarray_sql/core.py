@@ -7,6 +7,7 @@ import xarray as xr
 Row = t.List[t.Any]
 
 
+# deprecated
 def get_columns(ds: xr.Dataset) -> t.List[str]:
   return list(ds.dims.keys()) + list(ds.data_vars.keys())
 
