@@ -117,8 +117,7 @@ class DaskDataframeTest(DaskTestCase):
     except ValueError as e:
       if (
           'The columns in the computed data do not match the columns in the'
-          ' provided metadata'
-          in str(e)
+          ' provided metadata' in str(e)
       ):
         self.fail('Column metadata is incorrect.')
 
