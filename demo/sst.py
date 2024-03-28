@@ -12,7 +12,7 @@ import xarray as xr
 import xarray_sql as qr
 
 
-def local_data(start: str, end: str) -> xr.Dataset:
+def rand_wx(start: str, end: str) -> xr.Dataset:
   import numpy as np
   import pandas as pd
 
@@ -59,6 +59,11 @@ parser.add_argument(
     help='deploy on coiled cluster, default: local cluster',
 )
 parser.add_argument(
+    '--memory-opt-cluster',
+    action='store_true',
+    help='deploy on memory-optimized coiled cluster, default: local cluster',
+)
+parser.add_argument(
     '--fake',
     action='store_true',
     help='use local dummy data, default: ARCO-ERA5 data',
@@ -75,8 +80,21 @@ if args.cluster:
       spot_policy='spot_with_fallback',
       arm=True,
   )
+
   client = cluster.get_client()
   cluster.adapt(minimum=1, maximum=100)
+elif args.mem_opt_cluster:
+    from coiled import Cluster
+
+    cluster = Cluster(
+        region='us-central1',
+        spot_policy='spot_with_fallback',
+        worker_vm_types=['m3-ultramem-32'],
+        arm=True,
+    )
+
+    client = cluster.get_client()
+    cluster.adapt(minimum=1, maximum=50)
 else:
   from dask.distributed import LocalCluster
 
@@ -84,7 +102,7 @@ else:
   client = cluster.get_client()
 
 if args.fake:
-  era5_ds = local_data(args.start, args.end).chunk({'time': 240, 'level': 1})
+  era5_ds = rand_wx(args.start, args.end).chunk({'time': 240, 'level': 1})
 else:
   era5_ds = xr.open_zarr(
       'gs://gcp-public-data-arco-era5/ar/'
