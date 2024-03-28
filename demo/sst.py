@@ -8,21 +8,20 @@ coiled setup
 ```
 """
 import argparse
+
+import numpy as np
 import xarray as xr
 import xarray_sql as qr
 
 
-def rand_wx(start: str, end: str) -> xr.Dataset:
-  import numpy as np
-  import pandas as pd
-
+def rand_wx(start_time: str, end_time: str) -> xr.Dataset:
+  """Produce a random ARCO-ERA5-like weather dataset."""
   np.random.seed(42)
 
   lat = np.linspace(-90, 90, num=720)
   lon = np.linspace(-180, 180, num=1440)
-  time = pd.date_range(start, end, freq='H')
+  time = xr.date_range(start_time, end_time, freq='H')
   level = np.array([1000, 500], dtype=np.int32)
-  reference_time = pd.Timestamp(start)
 
   temperature = 15 + 8 * np.random.randn(720, 1440, len(time), len(level))
   precipitation = 10 * np.random.rand(720, 1440, len(time), len(level))
@@ -40,18 +39,22 @@ def rand_wx(start: str, end: str) -> xr.Dataset:
           lon=lon,
           time=time,
           level=level,
-          reference_time=reference_time,
       ),
       attrs=dict(description='Random weather.'),
   )
 
 
+def tfmt(time: np.datetime64, unit='h') -> str:
+  """Returns a bucket-friendly date string from a numpy datetime."""
+  return np.datetime_as_string(time, unit=unit).replace(':', '')
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument(
-    '--start', type=str, default='2020-01-01', help='start time ISO string'
+    '--start', type=str, default='1940-01-01', help='start time ISO string'
 )
 parser.add_argument(
-    '--end', type=str, default='2020-01-02', help='end time ISO string'
+    '--end', type=str, default='1940-01-02', help='end time ISO string'
 )
 parser.add_argument(
     '--cluster',
@@ -76,25 +79,23 @@ if args.cluster:
 
   cluster = Cluster(
       region='us-central1',
-      worker_memory='16 GiB',
       spot_policy='spot_with_fallback',
-      arm=True,
+      worker_mv_types=['t2a-standard-16'],  # 4 GiBs RAM per CPU, ARM.
   )
 
   client = cluster.get_client()
   cluster.adapt(minimum=1, maximum=100)
 elif args.mem_opt_cluster:
-    from coiled import Cluster
+  from coiled import Cluster
 
-    cluster = Cluster(
-        region='us-central1',
-        spot_policy='spot_with_fallback',
-        worker_vm_types=['m3-ultramem-32'],
-        arm=True,
-    )
+  cluster = Cluster(
+      region='us-central1',
+      spot_policy='spot_with_fallback',
+      worker_vm_types=['m3-ultramem-32'],  # 30.5 GiBs RAM per CPU, x86.
+  )
 
-    client = cluster.get_client()
-    cluster.adapt(minimum=1, maximum=50)
+  client = cluster.get_client()
+  cluster.adapt(minimum=1, maximum=25)
 else:
   from dask.distributed import LocalCluster
 
@@ -105,20 +106,37 @@ if args.fake:
   era5_ds = rand_wx(args.start, args.end).chunk({'time': 240, 'level': 1})
 else:
   era5_ds = xr.open_zarr(
-      'gs://gcp-public-data-arco-era5/ar/'
-      '1959-2022-full_37-1h-0p25deg-chunk-1.zarr-v2',
+      'gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3/',
       chunks={'time': 240, 'level': 1},
   )
 
+  assert np.datetime64(args.start) >= np.datetime64(
+      '1940-01-01'
+  ), 'ARCO-ERA5 does not go back before 1940-01-01!'
+
+  assert (
+      np.datetime64(args.end) <= era5_ds.time[-1].values
+  ), f'ARCO-ERA5 does not run until {args.end}!'
+
 print('dataset opened.')
-era5_sst_ds = era5_ds[['sea_surface_temperature']].sel(
+
+era5_sst_ds = era5_ds.sel(
     time=slice(args.start, args.end),
     level=1000,  # surface level only.
-)
+).sea_surface_temperature
+
+print(f'sst_size={era5_sst_ds.nbytes / 2**40}TiBs')
 
 c = qr.Context()
-# chunk sizes determined from VM memory limit of 16 GiB.
-c.create_table('era5', era5_sst_ds, chunks=dict(time=24))
+# `time=48` produces 190 MiB chunks
+# `time=96` produces 380 MiB chunks
+# `time=192` produces 760 MiB chunks
+# `time=240` produces 950 MiB chunks
+# `time=720` produces 2851 MiB chunks --> utilizes 30 GiBs memory per CPU.
+time_chunks = 96  # four day chunks.
+if args.mem_opt_cluster:
+  time_chunks = 720  # one month chunks.
+c.create_table('era5', era5_sst_ds, chunks=dict(time=time_chunks))
 
 print('beginning query.')
 # TODO(alxmrs): `DATE` function is not supported in Apache Calcite out-of-the-box.
@@ -134,4 +152,11 @@ GROUP BY
 """
 )
 
-df.to_csv(f'global_avg_sst_{args.start}_to_{args.end}_*.cvs')
+# Store the results for visualization later on.
+start, end = tfmt(era5_sst_ds.time[0].values), tfmt(era5_sst_ds.time[-1].values)
+now = tfmt(np.datetime64('now'), 's')
+results_name = f'global_avg_sst_{start}_to_{end}.{now}'
+if args.cluster or args.mem_opt_cluster:
+  df.to_parquet(f'gs://xarray-sql-experiments/{results_name}/')
+else:
+  df.to_csv(results_name + '_*.csv')
