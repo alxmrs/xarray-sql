@@ -80,7 +80,7 @@ if args.cluster:
   cluster = Cluster(
       region='us-central1',
       spot_policy='spot_with_fallback',
-      worker_mv_types=['t2a-standard-16'],  # 4 GiBs RAM per CPU, ARM.
+      worker_vm_types='t2a-standard-16',  # 4 GiBs RAM per CPU, ARM.
   )
 
   client = cluster.get_client()
@@ -91,7 +91,7 @@ elif args.memory_opt_cluster:
   cluster = Cluster(
       region='us-central1',
       spot_policy='spot_with_fallback',
-      worker_vm_types=['m3-ultramem-32'],  # 30.5 GiBs RAM per CPU, x86.
+      worker_vm_types='m3-ultramem-32',  # 30.5 GiBs RAM per CPU, x86.
   )
 
   client = cluster.get_client()
