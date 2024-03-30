@@ -13,14 +13,25 @@ import numpy as np
 import xarray as xr
 import xarray_sql as qr
 
+# Instead of letting users choose arbitrary time frames, we only allow
+# the following choices. This design prevents users from accidentally
+# processing way more data than they might have meant to. We don't
+# want to bankrupt folks because they were off a few digits.
+TIMEFRAMES = {
+    'day': slice('1940-01-01', '1940-01-02'),
+    'month': slice('1940-01-01', '1940-02-01'),
+    'year': slice('1940-01-01', '1941-01-01'),
+    'all': slice('1940-01-01', '2023-11-01'),
+}
 
-def rand_wx(start_time: str, end_time: str) -> xr.Dataset:
+
+def rand_wx(times) -> xr.Dataset:
   """Produce a random ARCO-ERA5-like weather dataset."""
   np.random.seed(42)
 
   lat = np.linspace(-90, 90, num=720)
   lon = np.linspace(-180, 180, num=1440)
-  time = xr.date_range(start_time, end_time, freq='H')
+  time = xr.date_range(times.start, times.stop, freq='H')
   level = np.array([1000, 500], dtype=np.int32)
 
   temperature = 15 + 8 * np.random.randn(720, 1440, len(time), len(level))
@@ -44,18 +55,8 @@ def rand_wx(start_time: str, end_time: str) -> xr.Dataset:
   )
 
 
-def tfmt(time: np.datetime64, unit='h') -> str:
-  """Returns a bucket-friendly date string from a numpy datetime."""
-  return np.datetime_as_string(time, unit=unit).replace(':', '')
-
-
 parser = argparse.ArgumentParser()
-parser.add_argument(
-    '--start', type=str, default='1940-01-01', help='start time ISO string'
-)
-parser.add_argument(
-    '--end', type=str, default='1940-01-02', help='end time ISO string'
-)
+parser.add_argument('--timeframe', choices=TIMEFRAMES.keys(), default='day')
 parser.add_argument(
     '--cluster',
     action='store_true',
@@ -73,6 +74,7 @@ parser.add_argument(
 )
 
 args = parser.parse_args()
+timeframe = TIMEFRAMES[args.timeframe]
 
 if args.cluster:
   from coiled import Cluster
@@ -103,29 +105,20 @@ else:
   client = cluster.get_client()
 
 if args.fake:
-  era5_ds = rand_wx(args.start, args.end).chunk({'time': 240, 'level': 1})
+  era5_ds = rand_wx(timeframe).chunk({'time': 240, 'level': 1})
 else:
   era5_ds = xr.open_zarr(
       'gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3/',
       chunks={'time': 240, 'level': 1},
   )
 
-  assert np.datetime64(args.start) >= np.datetime64(
-      '1940-01-01'
-  ), 'ARCO-ERA5 does not go back before 1940-01-01!'
-
-  assert (
-      np.datetime64(args.end) <= era5_ds.time[-1].values
-  ), f'ARCO-ERA5 does not run until {args.end}!'
-
 print('dataset opened.')
 
 era5_sst_ds = era5_ds[['sea_surface_temperature']].sel(
-    time=slice(args.start, args.end),
-    level=1000,  # surface level only.
+    time=timeframe, level=1000
 )
 
-print(f'sst_size={era5_sst_ds.nbytes / 2**40}TiBs')
+print(f'sst_size={era5_sst_ds.nbytes / 2**40:.5f}TiBs')
 
 c = qr.Context()
 # `time=48` produces 190 MiB chunks
@@ -153,9 +146,8 @@ GROUP BY
 )
 
 # Store the results for visualization later on.
-start, end = tfmt(era5_sst_ds.time[0].values), tfmt(era5_sst_ds.time[-1].values)
-now = tfmt(np.datetime64('now'), 's')
-results_name = f'global_avg_sst_{start}_to_{end}.{now}'
+now = np.datetime_as_string(np.datetime64('now'), unit='s').replace(':', '')
+results_name = f'global_avg_sst_{timeframe.start}_to_{timeframe.stop}.{now}'
 if args.cluster or args.memory_opt_cluster:
   df.to_parquet(f'gs://xarray-sql-experiments/{results_name}/')
 else:
