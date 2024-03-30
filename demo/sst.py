@@ -47,7 +47,7 @@ def rand_wx(times) -> xr.Dataset:
   return xr.Dataset(
       data_vars=dict(
           sea_surface_temperature=(
-              ['lat', 'lon', 'time', 'level'],
+              ['lat', 'lon', 'time'],
               temperature,
           ),
           precipitation=(['lat', 'lon', 'time', 'level'], precipitation),
@@ -129,10 +129,10 @@ else:
 print('dataset opened.')
 
 era5_sst_ds = era5_ds[['sea_surface_temperature']].sel(
-    time=timeframe, level=1000
+    time=timeframe
 )
 
-print(f'sst_size={era5_sst_ds.nbytes / 2**40:.5f}TiBs')
+print(f'sst_size={era5_sst_ds.nbytes / 2**30:.5f} GiBs')
 
 c = qr.Context()
 # `time=48` produces 190 MiB chunks
