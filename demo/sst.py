@@ -4,7 +4,12 @@
 Please run the following to set up cloud resources:
 ```
 gcloud auth application-default login
-coiled setup
+coiled login
+coiled setup gcp --region us-central1
+```
+To run the demo:
+```
+./demo/sst.py --timeframe month --cluster small
 ```
 """
 import argparse
@@ -24,7 +29,7 @@ TIMEFRAMES = {
     'all': slice('1940-01-01', '2023-11-01'),
 }
 
-CLUSTERS = ['local', 'arm', 'mem-opt']
+CLUSTERS = ['local', 'small', 'arm', 'mem-opt']
 
 
 def rand_wx(times) -> xr.Dataset:
@@ -75,13 +80,23 @@ parser.add_argument(
 args = parser.parse_args()
 timeframe = TIMEFRAMES[args.timeframe]
 
-if args.cluster == 'arm':
+if args.cluster == 'small':
   from coiled import Cluster
 
   cluster = Cluster(
       region='us-central1',
       spot_policy='spot_with_fallback',
-      worker_vm_types='t2a-standard-16',  # 4 GiBs RAM per CPU, ARM.
+      n_workers=8,
+  )
+
+  client = cluster.get_client()
+elif args.cluster == 'arm':
+  from coiled import Cluster
+
+  cluster = Cluster(
+    region='us-central1',
+    spot_policy='spot_with_fallback',
+    arm=True,
   )
 
   client = cluster.get_client()
