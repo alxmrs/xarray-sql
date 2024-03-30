@@ -85,7 +85,7 @@ if args.cluster:
 
   client = cluster.get_client()
   cluster.adapt(minimum=1, maximum=100)
-elif args.mem_opt_cluster:
+elif args.memory_opt_cluster:
   from coiled import Cluster
 
   cluster = Cluster(
@@ -120,10 +120,10 @@ else:
 
 print('dataset opened.')
 
-era5_sst_ds = era5_ds.sel(
+era5_sst_ds = era5_ds[['sea_surface_temperature']].sel(
     time=slice(args.start, args.end),
     level=1000,  # surface level only.
-).sea_surface_temperature
+)
 
 print(f'sst_size={era5_sst_ds.nbytes / 2**40}TiBs')
 
@@ -134,7 +134,7 @@ c = qr.Context()
 # `time=240` produces 950 MiB chunks
 # `time=720` produces 2851 MiB chunks --> utilizes 30 GiBs memory per CPU.
 time_chunks = 96  # four day chunks.
-if args.mem_opt_cluster:
+if args.memory_opt_cluster:
   time_chunks = 720  # one month chunks.
 c.create_table('era5', era5_sst_ds, chunks=dict(time=time_chunks))
 
@@ -156,7 +156,7 @@ GROUP BY
 start, end = tfmt(era5_sst_ds.time[0].values), tfmt(era5_sst_ds.time[-1].values)
 now = tfmt(np.datetime64('now'), 's')
 results_name = f'global_avg_sst_{start}_to_{end}.{now}'
-if args.cluster or args.mem_opt_cluster:
+if args.cluster or args.memory_opt_cluster:
   df.to_parquet(f'gs://xarray-sql-experiments/{results_name}/')
 else:
   df.to_csv(results_name + '_*.csv')
