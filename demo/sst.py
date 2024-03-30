@@ -24,6 +24,8 @@ TIMEFRAMES = {
     'all': slice('1940-01-01', '2023-11-01'),
 }
 
+CLUSTERS = ['local', 'arm', 'mem-opt']
+
 
 def rand_wx(times) -> xr.Dataset:
   """Produce a random ARCO-ERA5-like weather dataset."""
@@ -59,13 +61,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--timeframe', choices=TIMEFRAMES.keys(), default='day')
 parser.add_argument(
     '--cluster',
-    action='store_true',
-    help='deploy on coiled cluster, default: local cluster',
-)
-parser.add_argument(
-    '--memory-opt-cluster',
-    action='store_true',
-    help='deploy on memory-optimized coiled cluster, default: local cluster',
+    choices=CLUSTERS,
+    default='local',
+    help='Choose the Dask cluster type. '
+    'Either: a local cluster, ARM VMs or memory-optimized VMs in GCP via Coiled.',
 )
 parser.add_argument(
     '--fake',
@@ -76,7 +75,7 @@ parser.add_argument(
 args = parser.parse_args()
 timeframe = TIMEFRAMES[args.timeframe]
 
-if args.cluster:
+if args.cluster == 'arm':
   from coiled import Cluster
 
   cluster = Cluster(
@@ -87,7 +86,7 @@ if args.cluster:
 
   client = cluster.get_client()
   cluster.adapt(minimum=1, maximum=100)
-elif args.memory_opt_cluster:
+elif args.cluster == 'mem-opt':
   from coiled import Cluster
 
   cluster = Cluster(
@@ -127,7 +126,7 @@ c = qr.Context()
 # `time=240` produces 950 MiB chunks
 # `time=720` produces 2851 MiB chunks --> utilizes 30 GiBs memory per CPU.
 time_chunks = 96  # four day chunks.
-if args.memory_opt_cluster:
+if args.cluster == 'mem-opt':
   time_chunks = 720  # one month chunks.
 c.create_table('era5', era5_sst_ds, chunks=dict(time=time_chunks))
 
@@ -146,9 +145,9 @@ GROUP BY
 )
 
 # Store the results for visualization later on.
-now = np.datetime_as_string(np.datetime64('now'), unit='s').replace(':', '')
-results_name = f'global_avg_sst_{timeframe.start}_to_{timeframe.stop}.{now}'
-if args.cluster or args.memory_opt_cluster:
-  df.to_parquet(f'gs://xarray-sql-experiments/{results_name}/')
-else:
+now = np.datetime64('now', 's').astype(int)
+results_name = f'global_avg_sst_{args.timeframe}_{now}'
+if args.cluster == 'local':
   df.to_csv(results_name + '_*.csv')
+else:
+  df.to_parquet(f'gs://xarray-sql-experiments/{results_name}/')
