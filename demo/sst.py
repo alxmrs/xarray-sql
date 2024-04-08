@@ -162,6 +162,8 @@ GROUP BY
 # Store the results for visualization later on.
 now = np.datetime64('now', 's').astype(int)
 results_name = f'global_avg_sst_{args.timeframe}_{now}'
+if args.fake:
+  results_name = 'fake_' + results_name
 if args.cluster == 'local':
   df.to_csv(results_name + '_*.csv')
 else:
