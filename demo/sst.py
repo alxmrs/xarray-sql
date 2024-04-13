@@ -3,6 +3,7 @@
 
 Please run the following to set up cloud resources:
 ```
+pip install ".[demo]"
 gcloud auth application-default login
 coiled login
 coiled setup gcp --region us-central1
@@ -62,6 +63,7 @@ def rand_wx(times) -> xr.Dataset:
   )
 
 
+# TODO(alxmrs): Make spot instances a flag.
 parser = argparse.ArgumentParser()
 parser.add_argument('--timeframe', choices=TIMEFRAMES.keys(), default='day')
 parser.add_argument(

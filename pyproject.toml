@@ -32,12 +32,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = [
-  "pytest",
-  "xarray[io]",
-  "gcsfs",
+io = [
+    "xarray[io]",
+    "gcsfs",
 ]
+test = [
+    "xarray_sql[io]",
+    "pytest",
+]
+
 demo = [
+    "xarray_sql[io]",
     "coiled"
 ]
 
