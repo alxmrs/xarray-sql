@@ -96,9 +96,9 @@ elif args.cluster == 'arm':
   from coiled import Cluster
 
   cluster = Cluster(
-    region='us-central1',
-    spot_policy='spot_with_fallback',
-    arm=True,
+      region='us-central1',
+      spot_policy='spot_with_fallback',
+      arm=True,
   )
 
   client = cluster.get_client()
@@ -130,9 +130,7 @@ else:
 
 print('dataset opened.')
 
-era5_sst_ds = era5_ds[['sea_surface_temperature']].sel(
-    time=timeframe
-)
+era5_sst_ds = era5_ds[['sea_surface_temperature']].sel(time=timeframe)
 
 print(f'sst_size={era5_sst_ds.nbytes / 2**30:.5f} GiBs')
 
