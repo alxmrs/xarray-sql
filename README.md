@@ -100,7 +100,7 @@ Xarray Datasets. This approach is being pursued
 Deeper still: I was thinking we could make
 a [virtual](https://fsspec.github.io/kerchunk/)
 filesystem for parquet that would internally map to Zarr. Raster-backed virtual
-parquet would open up integrations to numeroustools like dask, pyarrow, duckdb,
+parquet would open up integrations to numerous tools like dask, pyarrow, duckdb,
 and BigQuery. More thoughts on this
 in [#4](https://github.com/alxmrs/xarray-sql/issues/4).
 
