@@ -71,7 +71,7 @@ That's it!
 ## Why does this work?
 
 Underneath Xarray, Dask, and Pandas, there are NumPy arrays. These are paged in
-chuncks and represented contiguously in memory. It is only a matter of metadata
+chunks and represented contiguously in memory. It is only a matter of metadata
 that breaks them up into ndarrays. `to_dataframe()`
 just changes this metadata (via a `ravel()`/`reshape()`), back into a column
 amenable to a DataFrame.
@@ -100,7 +100,7 @@ Xarray Datasets. This approach is being pursued
 Deeper still: I was thinking we could make
 a [virtual](https://fsspec.github.io/kerchunk/)
 filesystem for parquet that would internally map to Zarr. Raster-backed virtual
-parquet would open up integrations to numeroustools like dask, pyarrow, duckdb,
+parquet would open up integrations to numerous tools like dask, pyarrow, duckdb,
 and BigQuery. More thoughts on this
 in [#4](https://github.com/alxmrs/xarray-sql/issues/4).
 
