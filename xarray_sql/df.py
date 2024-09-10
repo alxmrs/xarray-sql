@@ -15,7 +15,7 @@ Chunks = t.Optional[t.Dict[str, int]]
 
 # Turn on Dask-Expr
 dask.config.set({'dataframe.query-planning-warning': False})
-dask.config.set({'dataframe.query-planning': True})
+dask.config.set({'dataframe.query-planning': False})
 # Turn on Copy-On-Write (needs Pandas 2.0).
 pd.options.mode.copy_on_write = True
 

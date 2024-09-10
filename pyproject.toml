@@ -31,15 +31,22 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = [
-  "pytest",
+io = [
   "xarray[io]",
   "gcsfs",
+]
+test = [
+  "xarray_sql[io]",
+  "pytest",
 ]
 dev = [
   "xarray_sql[test]",
   "pyink",
   "py-spy"
+]
+demo = [
+  "xarray_sql[io]",
+  "coiled",
 ]
 
 [project.urls]
