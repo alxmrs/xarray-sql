@@ -41,6 +41,9 @@ dev = [
   "pyink",
   "py-spy"
 ]
+demo = [
+  "coiled"
+]
 
 [project.urls]
 Homepage = "https://github.com/alxmrs/xarray-sql"
