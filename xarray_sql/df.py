@@ -6,9 +6,12 @@ import dask.dataframe as dd
 import numpy as np
 import pandas as pd
 import xarray as xr
-from dask.dataframe.io import from_map
 
-from . import core
+try:
+  from dask.dataframe.io import from_map
+except ImportError:
+  from dask.dataframe import from_map
+
 
 Block = t.Dict[str, slice]
 Chunks = t.Optional[t.Dict[str, int]]
