@@ -1,2 +1,2 @@
-from .df import read_xarray
-from .sql import Context
+from .df import read_xarray, from_map
+from .sql import XarrayContext

@@ -9,12 +9,12 @@ Row = t.List[t.Any]
 
 # deprecated
 def get_columns(ds: xr.Dataset) -> t.List[str]:
-  return list(ds.dims.keys()) + list(ds.data_vars.keys())
+  return list(ds.sizes.keys()) + list(ds.data_vars.keys())
 
 
 # Deprecated
 def unravel(ds: xr.Dataset) -> t.Iterator[Row]:
-  dim_keys, dim_vals = zip(*ds.dims.items())
+  dim_keys, dim_vals = zip(*ds.sizes.items())
 
   for idx in itertools.product(*(range(d) for d in dim_vals)):
     coord_idx = dict(zip(dim_keys, idx))
@@ -27,7 +27,7 @@ def unravel(ds: xr.Dataset) -> t.Iterator[Row]:
 # Deprecated
 def unbounded_unravel(ds: xr.Dataset) -> np.ndarray:
   """Unravel with unbounded memory (as a NumPy Array)."""
-  dim_keys, dim_vals = zip(*ds.dims.items())
+  dim_keys, dim_vals = zip(*ds.sizes.items())
   columns = get_columns(ds)
 
   N = np.prod([d for d in dim_vals])

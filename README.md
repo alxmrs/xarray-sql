@@ -20,8 +20,8 @@ import xarray_sql as qr
 ds = xr.tutorial.open_dataset('air_temperature')
 
 # The same as a dask-sql Context; i.e. an Apache DataFusion Context.
-c = qr.Context(ds)
-c.create_table('air', ds, chunks=dict(time=24))
+c = qr.XarrayContext()
+c.from_dataset('air', ds, chunks=dict(time=24))
 
 df = c.sql('''
   SELECT
@@ -33,10 +33,10 @@ df = c.sql('''
 ''')
 
 # A table of the average temperature for each location across time.
-df.compute()
+df.to_pandas()
 
 # Alternatively, you can just create the DataFrame from the Dataset:
-df = qr.read_xarray(ds)
+df = qr.read_xarray(ds).to_pandas()
 df.head()
 ```
 
@@ -68,6 +68,9 @@ All chunks in an Xarray Dataset are transformed into a Dask DataFrame via
 `from_map()` and `to_dataframe()`. For SQL support, we just use `dask-sql`.
 That's it!
 
+_2025 update_: This library now implements a dask-like `from_map` interface in 
+pure `datafusion` and `pyarrow`, but works with the same principle!
+
 ## Why does this work?
 
 Underneath Xarray, Dask, and Pandas, there are NumPy arrays. These are paged in
@@ -81,15 +84,7 @@ worth the convenience of DataFrames.
 
 ## What are the current limitations?
 
-Dask doesn't support
-`MultiIndex`s ([dask/dask#1493](https://github.com/dask/dask/issues/1493)). If
-it did, I suspect performance for many types of queries would greatly improve.
-
-Further, while this does play well with `dask-geopandas` (for geospatial query
-support), certain types of operations don't quite match standard geopandas.
-Spatial joins come to mind as a killer feature, but only inner joins are
-supported ([geopandas/dask-geopandas#72](https://github.com/geopandas/dask-geopandas/issues/72))
-.
+_2025 update_: TBD, `datafusion` provides a whole new world!
 
 ## What would a deeper integration look like?
 

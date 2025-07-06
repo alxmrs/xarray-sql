@@ -1,23 +1,13 @@
 import itertools
 import typing as t
 
-import dask
-import dask.dataframe as dd
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import xarray as xr
-from dask.dataframe.io import from_map
-
-from . import core
 
 Block = t.Dict[str, slice]
 Chunks = t.Optional[t.Dict[str, int]]
-
-# Turn on Dask-Expr
-dask.config.set({'dataframe.query-planning-warning': False})
-dask.config.set({'dataframe.query-planning': True})
-# Turn on Copy-On-Write (needs Pandas 2.0).
-pd.options.mode.copy_on_write = True
 
 
 # Borrowed from Xarray
@@ -42,7 +32,7 @@ def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> t.Iterator[Block]:
   else:
     chunks = ds.chunks
 
-  assert chunks, 'Dataset `ds` must be chunked or `chunks` must be provided.'
+  assert chunks, "Dataset `ds` must be chunked or `chunks` must be provided."
 
   chunk_bounds = {dim: np.cumsum((0,) + c) for dim, c in chunks.items()}
   ichunk = {dim: range(len(c)) for dim, c in chunks.items()}
@@ -67,8 +57,60 @@ def _block_len(block: Block) -> int:
   return np.prod([v.stop - v.start for v in block.values()])
 
 
-def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> dd.DataFrame:
-  """Pivots an Xarray Dataset into a Dask Dataframe, partitioned by chunks.
+def from_map(
+    func: t.Callable, *iterables, args: t.Optional[t.Tuple] = None, **kwargs
+) -> pa.Table:
+  """Create a PyArrow Table by mapping a function over iterables.
+
+  This is equivalent to dask's from_map but returns a PyArrow Table
+  that can be used with DataFusion instead of a Dask DataFrame.
+
+  Args:
+    func: Function to apply to each element of the iterables.
+    *iterables: Iterable objects to map the function over.
+    args: Additional positional arguments to pass to func.
+    **kwargs: Additional keyword arguments to pass to func.
+
+  Returns:
+    A PyArrow Table containing the concatenated results.
+  """
+  if args is None:
+    args = ()
+
+  # Apply the function to each combination of iterable elements
+  results = []
+  for items in zip(*iterables) if len(iterables) > 1 else iterables[0]:
+    if isinstance(items, tuple):
+      result = func(*items, *args, **kwargs)
+    else:
+      result = func(items, *args, **kwargs)
+
+    # Convert result to PyArrow Table
+    if isinstance(result, pd.DataFrame):
+      pa_table = pa.Table.from_pandas(result)
+    elif isinstance(result, pa.Table):
+      pa_table = result
+    else:
+      # Try to convert to pandas first, then to PyArrow
+      try:
+        df = pd.DataFrame(result)
+        pa_table = pa.Table.from_pandas(df)
+      except Exception as e:
+        raise ValueError(
+            f"Cannot convert function result to PyArrow Table: {e}"
+        )
+
+    results.append(pa_table)
+
+  # Concatenate all results
+  if not results:
+    raise ValueError("No results to concatenate")
+
+  return pa.concat_tables(results)
+
+
+def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.Table:
+  """Pivots an Xarray Dataset into a PyArrow Table, partitioned by chunks.
 
   Args:
     ds: An Xarray Dataset. All `data_vars` mush share the same dimensions.
@@ -77,39 +119,16 @@ def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> dd.DataFrame:
      dataframe partition.
 
   Returns:
-    A Dask Dataframe, which is a table representation of the input Dataset.
+    A PyArrow Table, which is a table representation of the input Dataset.
   """
   fst = next(iter(ds.values())).dims
   assert all(
       da.dims == fst for da in ds.values()
-  ), 'All dimensions must be equal. Please filter data_vars in the Dataset.'
+  ), "All dimensions must be equal. Please filter data_vars in the Dataset."
 
   blocks = list(block_slices(ds, chunks))
-
-  block_lengths = [_block_len(b) for b in blocks]
-  divisions = tuple(np.cumsum([0] + block_lengths))  # 0 ==> start partition.
 
   def pivot(b: Block) -> pd.DataFrame:
     return ds.isel(b).to_dataframe().reset_index()
 
-  # Token is needed to prevent Dask from spending too many cycles calculating
-  # it's own token from the constituent parts.
-  token = (
-      'xarray-Dataset-'
-      f'{"_".join(list(ds.dims.keys()))}'
-      '__'
-      f'{"_".join(list(ds.data_vars.keys()))}'
-  )
-
-  columns = pivot(blocks[0]).columns
-
-  # TODO(#18): Is it possible to pass the length (known now) here?
-  meta = {c: ds[c].dtype for c in columns}
-
-  return from_map(
-      pivot,
-      blocks,
-      meta=meta,
-      divisions=divisions,
-      token=token,
-  )
+  return from_map(pivot, blocks)
