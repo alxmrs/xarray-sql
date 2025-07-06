@@ -72,7 +72,6 @@ def from_map(
     func: Function to apply to each element of the iterables.
     *iterables: Iterable objects to map the function over.
     args: Additional positional arguments to pass to func.
-    meta: Metadata about the expected output schema (optional).
     **kwargs: Additional keyword arguments to pass to func.
     
   Returns:
