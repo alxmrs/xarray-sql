@@ -95,15 +95,6 @@ def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> dd.DataFrame:
   def pivot(b: Block) -> pd.DataFrame:
     return ds.isel(b).to_dataframe().reset_index()
 
-  # Token is needed to prevent Dask from spending too many cycles calculating
-  # it's own token from the constituent parts.
-  token = (
-      'xarray-Dataset-'
-      f'{"_".join(list(ds.dims.keys()))}'
-      '__'
-      f'{"_".join(list(ds.data_vars.keys()))}'
-  )
-
   columns = pivot(blocks[0]).columns
 
   # TODO(#18): Is it possible to pass the length (known now) here?
@@ -114,5 +105,4 @@ def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> dd.DataFrame:
       blocks,
       meta=meta,
       divisions=divisions,
-      token=token,
   )
