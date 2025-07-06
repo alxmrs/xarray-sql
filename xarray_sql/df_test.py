@@ -1,12 +1,12 @@
 import itertools
 import unittest
 
-import dask.dataframe as dd
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import xarray as xr
 
-from .df import explode, read_xarray, block_slices
+from .df import explode, read_xarray, block_slices, from_map
 
 
 def rand_wx(start: str, end: str) -> xr.Dataset:
@@ -81,46 +81,96 @@ class ExplodeTest(DaskTestCase):
     self.assertEqual(self.air.isel(iselection), ds)
 
 
-class DaskDataframeTest(DaskTestCase):
+class PyArrowTableTest(DaskTestCase):
 
   def test_sanity(self):
-    df = read_xarray(self.air_small).compute()
-    self.assertIsNotNone(df)
-    self.assertEqual(len(df), np.prod(list(self.air_small.dims.values())))
+    table = read_xarray(self.air_small)
+    self.assertIsNotNone(table)
+    self.assertIsInstance(table, pa.Table)
+    self.assertEqual(len(table), np.prod(list(self.air_small.dims.values())))
 
   def test_columns(self):
-    df = read_xarray(self.air_small).compute()
-    cols = list(df.columns)
+    table = read_xarray(self.air_small)
+    cols = table.column_names
     self.assertEqual(cols, ['lat', 'time', 'lon', 'air'])
 
   def test_dtypes(self):
-    df: dd.DataFrame = read_xarray(self.air_small).compute()
+    table = read_xarray(self.air_small)
+    # Convert to pandas to check dtypes
+    df = table.to_pandas()
     types = list(df.dtypes)
     self.assertEqual([self.air_small[c].dtype for c in df.columns], types)
 
-  def test_partitions_dont_match_dataset_chunks(self):
-    standard_blocks = list(block_slices(self.air_small))
-    default: dd.DataFrame = read_xarray(self.air_small)
-    chunked: dd.DataFrame = read_xarray(self.air_small, dict(time=5))
-
-    self.assertEqual(default.npartitions, len(standard_blocks))
-    self.assertNotEqual(chunked.npartitions, len(standard_blocks))
+  def test_different_chunk_sizes(self):
+    default_table = read_xarray(self.air_small)
+    chunked_table = read_xarray(self.air_small, dict(time=5))
+    
+    # Both should produce valid tables
+    self.assertIsInstance(default_table, pa.Table)
+    self.assertIsInstance(chunked_table, pa.Table)
+    # Should have same number of rows
+    self.assertEqual(len(default_table), len(chunked_table))
 
   def test_chunk_perf(self):
-    df = read_xarray(self.air, chunks=dict(time=6)).compute()
-    self.assertIsNotNone(df)
-    self.assertEqual(len(df), np.prod(list(self.air.dims.values())))
+    table = read_xarray(self.air, chunks=dict(time=6))
+    self.assertIsNotNone(table)
+    self.assertEqual(len(table), np.prod(list(self.air.dims.values())))
 
   def test_column_metadata_preserved(self):
     try:
-      _ = read_xarray(self.randwx, chunks=dict(time=24)).compute()
-    except ValueError as e:
-      if (
-          'The columns in the computed data do not match the columns in the'
-          ' provided metadata' in str(e)
-      ):
-        self.fail('Column metadata is incorrect.')
+      table = read_xarray(self.randwx, chunks=dict(time=24))
+      self.assertIsInstance(table, pa.Table)
+    except Exception as e:
+      self.fail(f'Unexpected error: {e}')
 
+
+class FromMapTest(unittest.TestCase):
+  
+  def test_basic_from_map(self):
+    """Test basic from_map functionality with pandas DataFrames."""
+    def make_df(x):
+      return pd.DataFrame({'value': [x, x*2], 'index': [0, 1]})
+    
+    result = from_map(make_df, [1, 2, 3])
+    self.assertIsInstance(result, pa.Table)
+    self.assertEqual(len(result), 6)  # 3 inputs * 2 rows each
+    self.assertEqual(result.column_names, ['value', 'index'])
+    
+  def test_from_map_with_multiple_iterables(self):
+    """Test from_map with multiple iterables."""
+    def add_values(x, y):
+      return pd.DataFrame({'sum': [x + y], 'x': [x], 'y': [y]})
+    
+    result = from_map(add_values, [1, 2], [10, 20])
+    self.assertIsInstance(result, pa.Table)
+    self.assertEqual(len(result), 2)
+    
+    # Convert to pandas to check values
+    df = result.to_pandas()
+    self.assertEqual(list(df['sum']), [11, 22])
+    
+  def test_from_map_with_args(self):
+    """Test from_map with additional arguments."""
+    def multiply_and_add(x, multiplier, add_value):
+      return pd.DataFrame({'result': [x * multiplier + add_value]})
+    
+    result = from_map(multiply_and_add, [1, 2, 3], args=(2, 10))
+    self.assertIsInstance(result, pa.Table)
+    self.assertEqual(len(result), 3)
+    
+    df = result.to_pandas()
+    self.assertEqual(list(df['result']), [12, 14, 16])  # (1*2+10, 2*2+10, 3*2+10)
+    
+  def test_from_map_with_pyarrow_tables(self):
+    """Test from_map when function returns PyArrow tables."""
+    def make_arrow_table(x):
+      df = pd.DataFrame({'value': [x]})
+      return pa.Table.from_pandas(df)
+    
+    result = from_map(make_arrow_table, [1, 2, 3])
+    self.assertIsInstance(result, pa.Table)
+    self.assertEqual(len(result), 3)
+    
 
 if __name__ == '__main__':
   unittest.main()

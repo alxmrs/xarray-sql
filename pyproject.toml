@@ -26,7 +26,8 @@ classifiers = [
   "Topic :: Database :: Front-Ends",
 ]
 dependencies = [
-    "dask-sql>=2024.5.0",
+    "dask>=2024.8.0",
+    "datafusion>=47.0.0",
     "xarray>=2024.7.0",
 ]
 
