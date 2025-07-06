@@ -35,7 +35,7 @@ class SqlTestCase(DaskTestCase):
     result = query.to_pandas()
     self.assertIsNotNone(result)
 
-    expected = self.air_small.dims['lat'] * self.air_small.dims['lon']
+    expected = self.air_small.sizes['lat'] * self.air_small.sizes['lon']
     self.assertEqual(len(result), expected)
 
   def test_agg_regular(self):
@@ -56,7 +56,7 @@ class SqlTestCase(DaskTestCase):
     result = query.to_pandas()
     self.assertIsNotNone(result)
 
-    expected = self.air.dims['lat'] * self.air.dims['lon']
+    expected = self.air.sizes['lat'] * self.air.sizes['lon']
     self.assertEqual(len(result), expected)
 
 

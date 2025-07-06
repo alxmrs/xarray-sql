@@ -13,7 +13,7 @@ def rand_wx(start: str, end: str) -> xr.Dataset:
   np.random.seed(42)
   lat = np.linspace(-90, 90, num=720)
   lon = np.linspace(-180, 180, num=1440)
-  time = pd.date_range(start, end, freq='H')
+  time = pd.date_range(start, end, freq='h')
   level = np.array([1000, 500], dtype=np.int32)
   reference_time = pd.Timestamp(start)
   temperature = 15 + 8 * np.random.randn(720, 1440, len(time), len(level))
@@ -59,7 +59,7 @@ class ExplodeTest(DaskTestCase):
     ds = next(iter(explode(self.air)))
     for k, v in self.chunks.items():
       self.assertIn(k, ds.dims)
-      self.assertEqual(v, ds.dims[k])
+      self.assertEqual(v, ds.sizes[k])
 
   def skip_test_dim_sizes__all(self):
     # TODO(alxmrs): Why is this test slow?
@@ -71,13 +71,13 @@ class ExplodeTest(DaskTestCase):
 
   def test_data_equal__one__first(self):
     ds = next(iter(explode(self.air)))
-    iselection = {dim: slice(0, s) for dim, s in ds.dims.items()}
+    iselection = {dim: slice(0, s) for dim, s in ds.sizes.items()}
     self.assertEqual(self.air.isel(iselection), ds)
 
   def test_data_equal__one__last(self):
     dss = list(explode(self.air))
     ds = dss[-1]
-    iselection = {dim: slice(0, s) for dim, s in ds.dims.items()}
+    iselection = {dim: slice(0, s) for dim, s in ds.sizes.items()}
     self.assertEqual(self.air.isel(iselection), ds)
 
 
@@ -87,7 +87,7 @@ class PyArrowTableTest(DaskTestCase):
     table = read_xarray(self.air_small)
     self.assertIsNotNone(table)
     self.assertIsInstance(table, pa.Table)
-    self.assertEqual(len(table), np.prod(list(self.air_small.dims.values())))
+    self.assertEqual(len(table), np.prod(list(self.air_small.sizes.values())))
 
   def test_columns(self):
     table = read_xarray(self.air_small)
@@ -114,7 +114,7 @@ class PyArrowTableTest(DaskTestCase):
   def test_chunk_perf(self):
     table = read_xarray(self.air, chunks=dict(time=6))
     self.assertIsNotNone(table)
-    self.assertEqual(len(table), np.prod(list(self.air.dims.values())))
+    self.assertEqual(len(table), np.prod(list(self.air.sizes.values())))
 
   def test_column_metadata_preserved(self):
     try:
