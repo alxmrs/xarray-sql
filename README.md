@@ -20,7 +20,7 @@ import xarray_sql as qr
 ds = xr.tutorial.open_dataset('air_temperature')
 
 # The same as a dask-sql Context; i.e. an Apache DataFusion Context.
-c = qr.XarrayContext(ds)
+c = qr.XarrayContext()
 c.from_dataset('air', ds, chunks=dict(time=24))
 
 df = c.sql('''
