@@ -26,8 +26,9 @@ classifiers = [
   "Topic :: Database :: Front-Ends",
 ]
 dependencies = [
-  "xarray",
-  "dask-sql",
+  "dask-sql<2024.3.0",
+  "dask[dataframe]>=2024.5.1",
+  "xarray>=2024.7.0",
 ]
 
 [project.optional-dependencies]
@@ -38,11 +39,6 @@ io = [
 test = [
   "xarray_sql[io]",
   "pytest",
-]
-dev = [
-  "xarray_sql[test]",
-  "pyink",
-  "py-spy"
 ]
 demo = [
   "xarray_sql[io]",
