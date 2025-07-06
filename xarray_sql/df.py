@@ -16,9 +16,7 @@ except ImportError:
 Block = t.Dict[str, slice]
 Chunks = t.Optional[t.Dict[str, int]]
 
-# Turn on Dask-Expr
-dask.config.set({'dataframe.query-planning-warning': False})
-dask.config.set({'dataframe.query-planning': True})
+# TODO(alxmrs): Is this still needed?
 # Turn on Copy-On-Write (needs Pandas 2.0).
 pd.options.mode.copy_on_write = True
 
