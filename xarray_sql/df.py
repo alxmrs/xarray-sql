@@ -32,7 +32,7 @@ def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> t.Iterator[Block]:
   else:
     chunks = ds.chunks
 
-  assert chunks, 'Dataset `ds` must be chunked or `chunks` must be provided.'
+  assert chunks, "Dataset `ds` must be chunked or `chunks` must be provided."
 
   chunk_bounds = {dim: np.cumsum((0,) + c) for dim, c in chunks.items()}
   ichunk = {dim: range(len(c)) for dim, c in chunks.items()}
@@ -58,28 +58,25 @@ def _block_len(block: Block) -> int:
 
 
 def from_map(
-    func: t.Callable,
-    *iterables,
-    args: t.Optional[t.Tuple] = None,
-    **kwargs
+    func: t.Callable, *iterables, args: t.Optional[t.Tuple] = None, **kwargs
 ) -> pa.Table:
   """Create a PyArrow Table by mapping a function over iterables.
-  
+
   This is equivalent to dask's from_map but returns a PyArrow Table
   that can be used with DataFusion instead of a Dask DataFrame.
-  
+
   Args:
     func: Function to apply to each element of the iterables.
     *iterables: Iterable objects to map the function over.
     args: Additional positional arguments to pass to func.
     **kwargs: Additional keyword arguments to pass to func.
-    
+
   Returns:
     A PyArrow Table containing the concatenated results.
   """
   if args is None:
     args = ()
-  
+
   # Apply the function to each combination of iterable elements
   results = []
   for items in zip(*iterables) if len(iterables) > 1 else iterables[0]:
@@ -87,7 +84,7 @@ def from_map(
       result = func(*items, *args, **kwargs)
     else:
       result = func(items, *args, **kwargs)
-    
+
     # Convert result to PyArrow Table
     if isinstance(result, pd.DataFrame):
       pa_table = pa.Table.from_pandas(result)
@@ -99,14 +96,16 @@ def from_map(
         df = pd.DataFrame(result)
         pa_table = pa.Table.from_pandas(df)
       except Exception as e:
-        raise ValueError(f"Cannot convert function result to PyArrow Table: {e}")
-    
+        raise ValueError(
+            f"Cannot convert function result to PyArrow Table: {e}"
+        )
+
     results.append(pa_table)
-  
+
   # Concatenate all results
   if not results:
     raise ValueError("No results to concatenate")
-  
+
   return pa.concat_tables(results)
 
 
@@ -125,7 +124,7 @@ def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.Table:
   fst = next(iter(ds.values())).dims
   assert all(
       da.dims == fst for da in ds.values()
-  ), 'All dimensions must be equal. Please filter data_vars in the Dataset.'
+  ), "All dimensions must be equal. Please filter data_vars in the Dataset."
 
   blocks = list(block_slices(ds, chunks))
 
