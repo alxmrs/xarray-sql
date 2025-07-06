@@ -23,11 +23,11 @@ jobs:
   build-artifacts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - name: Set up Python
         uses: actions/setup-python@v2.3.1
         with:
-          python-version: 3.9
+          python-version: 3.11
 
       - name: Install dependencies
         run: |
@@ -43,7 +43,7 @@ jobs:
         run: |
           python -m twine check dist/*
           pwd
-      - uses: actions/upload-artifact@v2
+      - uses: actions/upload-artifact@v4
         with:
           name: releases
           path: dist
@@ -55,8 +55,8 @@ jobs:
       - uses: actions/setup-python@v2.3.1
         name: Install Python
         with:
-          python-version: 3.9
-      - uses: actions/download-artifact@v2
+          python-version: 3.11
+      - uses: actions/download-artifact@v4
         with:
           name: releases
           path: dist
@@ -79,13 +79,13 @@ jobs:
           sleep 3
           python -m pip install --upgrade pip
           python -m pip install --extra-index-url https://test.pypi.org/simple --upgrade de
-          python -c "import qarray; print(qarray.__version__)"
+          python -c "import xarray_sql; print(xarray_sql.__version__)"
   upload-to-pypi:
     needs: test-built-dist
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v2
+      - uses: actions/download-artifact@v4
         with:
           name: releases
           path: dist
