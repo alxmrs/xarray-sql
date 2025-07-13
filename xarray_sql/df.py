@@ -9,6 +9,7 @@ import xarray as xr
 Block = t.Dict[t.Hashable, slice]
 Chunks = t.Optional[t.Dict[str, int]]
 
+
 # Borrowed from Xarray
 def _get_chunk_slicer(
     dim: t.Hashable, chunk_index: t.Mapping, chunk_bounds: t.Mapping
