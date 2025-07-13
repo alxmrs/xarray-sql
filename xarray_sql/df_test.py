@@ -418,6 +418,9 @@ class ReadXarrayStreamingTest(unittest.TestCase):
             # malloc peak is about 6.89x chunk_size on average
             self.assertLess(chunk_size * 4, peak)
 
+        # The peak malloc should never be more than the original dataset!
+        self.assertLess(max(peaks), self.large_ds.nbytes)
+
         tracemalloc.stop()
 
 
