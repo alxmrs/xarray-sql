@@ -1,4 +1,5 @@
 import itertools
+import tracemalloc
 import unittest
 
 import numpy as np
@@ -373,6 +374,52 @@ class TestFromMapBatchedCorrectness(DaskTestCase):
         expected_columns = {'time', 'lat', 'lon', 'air'}
         actual_columns = set(table.column_names)
         self.assertTrue(expected_columns.issubset(actual_columns))
+
+
+class ReadXarrayStreamingTest(unittest.TestCase):
+    def setUp(self):
+        self.large_ds = create_large_dataset().chunk({'time': 25})
+
+    def test_read_xarray__loads_one_chunk_at_a_time(self):
+        tracemalloc.start()
+        iterable = read_xarray(self.large_ds)
+        first_size, first_peak = tracemalloc.get_traced_memory()
+        tracemalloc.reset_peak()
+
+        sizes, peaks = [], []
+
+        first_chunk = self.large_ds.isel(next(block_slices(self.large_ds)))
+        chunk_size = first_chunk.nbytes
+
+        # Creating the iterator should be inexpensive -- less than one chunk.
+        # We multiply by constant factors because chunks have additional overhead
+        self.assertLess(first_size, chunk_size * 3)
+        self.assertLess(first_peak, chunk_size * 6)
+
+        for it in iterable:
+            _ = it
+            cur_size, cur_peak = tracemalloc.get_traced_memory()
+            tracemalloc.reset_peak()
+            sizes.append(cur_size), peaks.append(cur_peak)
+
+        mean_size = np.mean(sizes)
+        mean_peak = np.mean(peaks)
+
+        # Provide a bound for each size and peak
+        for size in sizes:
+            self.assertGreater(mean_size*1.1, size)
+            self.assertGreater(chunk_size * 3, size)
+            # malloc size is about 2.66x chunk_size on average
+            self.assertLess(chunk_size * 2, size)
+
+        for peak in peaks:
+            self.assertGreater(mean_peak*1.1, peak)
+            self.assertGreater(chunk_size * 7, peak)
+            # malloc peak is about 6.89x chunk_size on average
+            self.assertLess(chunk_size * 4, peak)
+
+        tracemalloc.stop()
+
 
 
 
