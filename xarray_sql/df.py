@@ -5,17 +5,9 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import xarray as xr
-from datafusion.context import ArrowStreamExportable
 
 Block = t.Dict[t.Hashable, slice]
 Chunks = t.Optional[t.Dict[str, int]]
-
-# Turn on Dask-Expr
-dask.config.set({'dataframe.query-planning-warning': False})
-dask.config.set({'dataframe.query-planning': True})
-# Turn on Copy-On-Write (needs Pandas 2.0).
-pd.options.mode.copy_on_write = True
-
 
 # Borrowed from Xarray
 def _get_chunk_slicer(

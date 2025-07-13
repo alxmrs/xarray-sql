@@ -8,7 +8,10 @@ gcloud auth application-default login
 coiled login
 coiled setup gcp --region us-central1
 ```
-To run the demo:
+To run the local demo:
+./demo/sst.py --timeframe day --fake
+
+To run the remote demo:
 ```
 ./demo/sst.py --timeframe month --cluster small
 ```
@@ -17,7 +20,8 @@ import argparse
 
 import numpy as np
 import xarray as xr
-import xarray_sql as qr
+
+import xarray_sql as xql
 
 # Instead of letting users choose arbitrary time frames, we only allow
 # the following choices. This design prevents users from accidentally
@@ -30,7 +34,7 @@ TIMEFRAMES = {
     'all': slice('1940-01-01', '2023-11-01'),
 }
 
-CLUSTERS = ['local', 'small', 'arm', 'mem-opt']
+CLUSTERS = ['none', 'local', 'small', 'arm', 'mem-opt']
 
 
 def rand_wx(times) -> xr.Dataset:
@@ -42,7 +46,7 @@ def rand_wx(times) -> xr.Dataset:
   time = xr.date_range(times.start, times.stop, freq='H')
   level = np.array([1000, 500], dtype=np.int32)
 
-  temperature = 15 + 8 * np.random.randn(720, 1440, len(time), len(level))
+  temperature = 15 + 8 * np.random.randn(720, 1440, len(time))
   precipitation = 10 * np.random.rand(720, 1440, len(time), len(level))
 
   return xr.Dataset(
@@ -69,9 +73,9 @@ parser.add_argument('--timeframe', choices=TIMEFRAMES.keys(), default='day')
 parser.add_argument(
     '--cluster',
     choices=CLUSTERS,
-    default='local',
-    help='Choose the Dask cluster type. '
-    'Either: a local cluster, ARM VMs or memory-optimized VMs in GCP via Coiled.',
+    default='none',
+    help='Choose the Dask cluster type, or none at all.'
+    'Either: no cluster, a local cluster, ARM VMs or memory-optimized VMs in GCP via Coiled.',
 )
 parser.add_argument(
     '--fake',
@@ -114,7 +118,8 @@ elif args.cluster == 'mem-opt':
 
   client = cluster.get_client()
   cluster.adapt(minimum=1, maximum=25)
-else:
+
+elif args.cluster == 'local':
   from dask.distributed import LocalCluster
 
   cluster = LocalCluster(processes=False)
@@ -134,7 +139,7 @@ era5_sst_ds = era5_ds[['sea_surface_temperature']].sel(time=timeframe)
 
 print(f'sst_size={era5_sst_ds.nbytes / 2**30:.5f} GiBs')
 
-c = qr.Context()
+c = xql.XarrayContext()
 # `time=48` produces 190 MiB chunks
 # `time=96` produces 380 MiB chunks
 # `time=192` produces 760 MiB chunks
@@ -143,7 +148,7 @@ c = qr.Context()
 time_chunks = 96  # four day chunks.
 if args.cluster == 'mem-opt':
   time_chunks = 720  # one month chunks.
-c.create_table('era5', era5_sst_ds, chunks=dict(time=time_chunks))
+c.from_dataset('era5', era5_sst_ds, chunks=dict(time=time_chunks))
 
 print('beginning query.')
 # TODO(alxmrs): `DATE` function is not supported in Apache Calcite out-of-the-box.
@@ -164,7 +169,7 @@ now = np.datetime64('now', 's').astype(int)
 results_name = f'global_avg_sst_{args.timeframe}_{now}'
 if args.fake:
   results_name = 'fake_' + results_name
-if args.cluster == 'local':
-  df.to_csv(results_name + '_*.csv')
+if args.cluster == 'local' or args.cluster == 'none':
+  df.to_pandas().to_csv(results_name + '.csv')
 else:
-  df.to_parquet(f'gs://xarray-sql-experiments/{results_name}/')
+  df.write_parquet(f'gs://xarray-sql-experiments/{results_name}/')
