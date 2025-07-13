@@ -23,13 +23,13 @@ class SqlTestCase(DaskTestCase):
 
     query = c.sql(
         """
-    SELECT
-      "lat", "lon", SUM("air") as air_total
-    FROM 
-      "air" 
-    GROUP BY
-     "lat", "lon"
-    """
+  SELECT
+    "lat", "lon", SUM("air") as air_total
+  FROM 
+    "air" 
+  GROUP BY
+   "lat", "lon"
+  """
     )
 
     result = query.to_pandas()

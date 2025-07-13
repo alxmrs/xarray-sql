@@ -5,8 +5,9 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import xarray as xr
+from datafusion.context import ArrowStreamExportable
 
-Block = t.Dict[str, slice]
+Block = t.Dict[t.Hashable, slice]
 Chunks = t.Optional[t.Dict[str, int]]
 
 
@@ -54,7 +55,42 @@ def explode(ds: xr.Dataset, chunks: Chunks = None) -> t.Iterator[xr.Dataset]:
 
 
 def _block_len(block: Block) -> int:
-  return np.prod([v.stop - v.start for v in block.values()])
+  return int(np.prod([v.stop - v.start for v in block.values()]))
+
+
+def from_map_batched(
+    func: t.Callable[[...], pd.DataFrame],
+    *iterables,
+    args: t.Optional[t.Tuple] = None,
+    schema: pa.Schema = None,
+    **kwargs,
+) -> pa.RecordBatchReader:
+  """Create a PyArrow RecordBatchReader by mapping a function over iterables.
+
+  This is equivalent to dask's from_map but returns a PyArrow
+  RecordBatchReader that can be used with DataFusion. It iterates over
+  RecordBatches which are created via the `func` one-at-a-time.
+
+  Args:
+    func: Function to apply to each element of the iterables. Currently, the function
+      must return a Pandas DataFrame.
+    *iterables: Iterable objects to map the function over.
+    schema: Optional schema needed for the RecordBatchReader.
+    args: Additional positional arguments to pass to func.
+    **kwargs: Additional keyword arguments to pass to func.
+
+  Returns:
+    A PyArrow RecordBatchReader containing the stream of RecordBatches.
+  """
+  if args is None:
+    args = ()
+
+  def map_batches():
+    for items in zip(*iterables):
+      df = func(*items, *args, **kwargs)
+      yield pa.RecordBatch.from_pandas(df, schema=schema)
+
+  return pa.RecordBatchReader.from_batches(schema, map_batches())
 
 
 def from_map(
@@ -109,7 +145,12 @@ def from_map(
   return pa.concat_tables(results)
 
 
-def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.Table:
+def pivot(ds: xr.Dataset) -> pd.DataFrame:
+  """Converts an xarray Dataset to a pandas DataFrame."""
+  return ds.to_dataframe().reset_index()
+
+
+def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> ArrowStreamExportable:
   """Pivots an Xarray Dataset into a PyArrow Table, partitioned by chunks.
 
   Args:
@@ -128,7 +169,11 @@ def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.Table:
 
   blocks = list(block_slices(ds, chunks))
 
-  def pivot(b: Block) -> pd.DataFrame:
-    return ds.isel(b).to_dataframe().reset_index()
+  def pivot_block(b: Block):
+    return pivot(ds.isel(b))
 
-  return from_map(pivot, blocks)
+  schema = pa.Schema.from_pandas(pivot_block(blocks[0]))
+  last_schema = pa.Schema.from_pandas(pivot_block(blocks[-1]))
+  assert schema == last_schema, "Schemas must be consistent across blocks!"
+
+  return from_map_batched(pivot_block, blocks, schema=schema)
