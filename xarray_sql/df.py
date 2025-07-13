@@ -81,12 +81,12 @@ def from_map_batched(
   if args is None:
     args = ()
 
-  def apply_map():
+  def map_batches():
     for items in zip(*iterables):
       df = func(*items, *args, **kwargs)
       yield pa.RecordBatch.from_pandas(df, schema=schema)
 
-  return pa.RecordBatchReader.from_batches(schema, apply_map())
+  return pa.RecordBatchReader.from_batches(schema, map_batches())
 
 
 def from_map(
