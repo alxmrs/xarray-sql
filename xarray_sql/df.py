@@ -18,7 +18,7 @@ def _get_chunk_slicer(
   if dim in chunk_index:
     which_chunk = chunk_index[dim]
     return slice(
-      chunk_bounds[dim][which_chunk], chunk_bounds[dim][which_chunk + 1]
+        chunk_bounds[dim][which_chunk], chunk_bounds[dim][which_chunk + 1]
     )
   return slice(None)
 
@@ -40,11 +40,11 @@ def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> t.Iterator[Block]:
   ick, icv = zip(*ichunk.items())  # Makes same order of keys and val.
   chunk_idxs = (dict(zip(ick, i)) for i in itertools.product(*icv))
   blocks = (
-    {
-      dim: _get_chunk_slicer(dim, chunk_index, chunk_bounds)
-      for dim in ds.dims
-    }
-    for chunk_index in chunk_idxs
+      {
+          dim: _get_chunk_slicer(dim, chunk_index, chunk_bounds)
+          for dim in ds.dims
+      }
+      for chunk_index in chunk_idxs
   )
   yield from blocks
 
@@ -59,8 +59,11 @@ def _block_len(block: Block) -> int:
 
 
 def from_map_batched(
-    func: t.Callable[[...], pd.DataFrame], *iterables, args: t.Optional[t.Tuple] = None,
-    schema: pa.Schema = None, **kwargs
+    func: t.Callable[[...], pd.DataFrame],
+    *iterables,
+    args: t.Optional[t.Tuple] = None,
+    schema: pa.Schema = None,
+    **kwargs,
 ) -> pa.RecordBatchReader:
   """Create a PyArrow RecordBatchReader by mapping a function over iterables.
 
@@ -129,7 +132,7 @@ def from_map(
         pa_table = pa.Table.from_pandas(df)
       except Exception as e:
         raise ValueError(
-          f"Cannot convert function result to PyArrow Table: {e}"
+            f"Cannot convert function result to PyArrow Table: {e}"
         )
 
     results.append(pa_table)
@@ -160,15 +163,16 @@ def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> ArrowStreamExportable:
   """
   fst = next(iter(ds.values())).dims
   assert all(
-    da.dims == fst for da in ds.values()
+      da.dims == fst for da in ds.values()
   ), "All dimensions must be equal. Please filter data_vars in the Dataset."
 
   blocks = list(block_slices(ds, chunks))
 
-  def pivot_block(b: Block): return pivot(ds.isel(b))
+  def pivot_block(b: Block):
+    return pivot(ds.isel(b))
 
   schema = pa.Schema.from_pandas(pivot_block(blocks[0]))
   last_schema = pa.Schema.from_pandas(pivot_block(blocks[-1]))
-  assert schema == last_schema, 'Schemas must be consistent across blocks!'
+  assert schema == last_schema, "Schemas must be consistent across blocks!"
 
   return from_map_batched(pivot_block, blocks, schema=schema)

@@ -20,18 +20,18 @@ def rand_wx(start: str, end: str) -> xr.Dataset:
   temperature = 15 + 8 * np.random.randn(720, 1440, len(time), len(level))
   precipitation = 10 * np.random.rand(720, 1440, len(time), len(level))
   return xr.Dataset(
-    data_vars=dict(
-      temperature=(['lat', 'lon', 'time', 'level'], temperature),
-      precipitation=(['lat', 'lon', 'time', 'level'], precipitation),
-    ),
-    coords=dict(
-      lat=lat,
-      lon=lon,
-      time=time,
-      level=level,
-      reference_time=reference_time,
-    ),
-    attrs=dict(description='Random weather.'),
+      data_vars=dict(
+          temperature=(['lat', 'lon', 'time', 'level'], temperature),
+          precipitation=(['lat', 'lon', 'time', 'level'], precipitation),
+      ),
+      coords=dict(
+          lat=lat,
+          lon=lon,
+          time=time,
+          level=level,
+          reference_time=reference_time,
+      ),
+      attrs=dict(description='Random weather.'),
   )
 
 
@@ -48,23 +48,22 @@ def create_large_dataset(time_steps=1000, lat_points=100, lon_points=100):
   temp_data = np.random.rand(time_steps, lat_points, lon_points) * 40 - 10
   precip_data = np.random.rand(time_steps, lat_points, lon_points) * 100
 
-  return xr.Dataset({
-    'temperature': (['time', 'lat', 'lon'], temp_data),
-    'precipitation': (['time', 'lat', 'lon'], precip_data),
-  }, coords={
-    'time': time,
-    'lat': lat,
-    'lon': lon,
-  })
+  return xr.Dataset(
+      {
+          'temperature': (['time', 'lat', 'lon'], temp_data),
+          'precipitation': (['time', 'lat', 'lon'], precip_data),
+      },
+      coords={
+          'time': time,
+          'lat': lat,
+          'lon': lon,
+      },
+  )
 
 
 def adding_function(x, y):
   """Simple function that adds two values and returns a DataFrame."""
-  result = pd.DataFrame({
-    'x': [x],
-    'y': [y],
-    'sum': [x + y]
-  })
+  result = pd.DataFrame({'x': [x], 'y': [y], 'sum': [x + y]})
   return result
 
 
@@ -76,7 +75,7 @@ class DaskTestCase(unittest.TestCase):
     self.air = self.air.chunk(self.chunks)
 
     self.air_small = self.air.isel(
-      time=slice(0, 12), lat=slice(0, 11), lon=slice(0, 10)
+        time=slice(0, 12), lat=slice(0, 11), lon=slice(0, 10)
     ).chunk(self.chunks)
     self.randwx = rand_wx('1995-01-13T00', '1995-01-13T01')
 
@@ -86,7 +85,7 @@ class ExplodeTest(DaskTestCase):
   def test_cardinality(self):
     dss = explode(self.air)
     self.assertEqual(
-      len(list(dss)), np.prod([len(c) for c in self.air.chunks.values()])
+        len(list(dss)), np.prod([len(c) for c in self.air.chunks.values()])
     )
 
   def test_dim_sizes__one(self):
@@ -99,8 +98,8 @@ class ExplodeTest(DaskTestCase):
     # TODO(alxmrs): Why is this test slow?
     dss = explode(self.air)
     self.assertEqual(
-      [tuple(ds.dims.values()) for ds in dss],
-      list(itertools.product(*self.air.chunksizes.values())),
+        [tuple(ds.dims.values()) for ds in dss],
+        list(itertools.product(*self.air.chunksizes.values())),
     )
 
   def test_data_equal__one__first(self):
@@ -115,7 +114,7 @@ class ExplodeTest(DaskTestCase):
     self.assertEqual(self.air.isel(iselection), ds)
 
 
-@unittest.skip("Chose non-pa.Table implementation.")
+@unittest.skip('Chose non-pa.Table implementation.')
 class PyArrowTableTest(DaskTestCase):
 
   def test_sanity(self):
@@ -198,7 +197,7 @@ class FromMapTest(unittest.TestCase):
 
     df = result.to_pandas()
     self.assertEqual(
-      list(df['result']), [12, 14, 16]
+        list(df['result']), [12, 14, 16]
     )  # (1*2+10, 2*2+10, 3*2+10)
 
   def test_from_map_with_pyarrow_tables(self):
@@ -219,7 +218,8 @@ class TestFromMapBatchedCorrectness(DaskTestCase):
   def test_basic_functionality(self):
     """Test that from_map_batched produces correct RecordBatchReader."""
     blocks = list(
-      block_slices(self.air_small, chunks={'time': 4, 'lat': 3, 'lon': 4}))
+        block_slices(self.air_small, chunks={'time': 4, 'lat': 3, 'lon': 4})
+    )
 
     # Get expected schema
     first_block_df = pivot(self.air_small.isel(blocks[0]))
@@ -227,9 +227,9 @@ class TestFromMapBatchedCorrectness(DaskTestCase):
 
     # Create RecordBatchReader
     reader = from_map_batched(
-      pivot,
-      [self.air_small.isel(block) for block in blocks],
-      schema=expected_schema
+        pivot,
+        [self.air_small.isel(block) for block in blocks],
+        schema=expected_schema,
     )
 
     # Verify it's a RecordBatchReader
@@ -252,17 +252,12 @@ class TestFromMapBatchedCorrectness(DaskTestCase):
     x_values = [1, 2, 3, 4, 5]
     y_values = [10, 20, 30, 40, 50]
 
-    expected_schema = pa.schema([
-      ('x', pa.int64()),
-      ('y', pa.int64()),
-      ('sum', pa.int64())
-    ])
+    expected_schema = pa.schema(
+        [('x', pa.int64()), ('y', pa.int64()), ('sum', pa.int64())]
+    )
 
     reader = from_map_batched(
-      adding_function,
-      x_values,
-      y_values,
-      schema=expected_schema
+        adding_function, x_values, y_values, schema=expected_schema
     )
 
     # Read all data
@@ -270,11 +265,13 @@ class TestFromMapBatchedCorrectness(DaskTestCase):
     df = table.to_pandas()
 
     # Verify results
-    expected_df = pd.DataFrame({
-      'x': x_values,
-      'y': y_values,
-      'sum': [x + y for x, y in zip(x_values, y_values)]
-    })
+    expected_df = pd.DataFrame(
+        {
+            'x': x_values,
+            'y': y_values,
+            'sum': [x + y for x, y in zip(x_values, y_values)],
+        }
+    )
 
     pd.testing.assert_frame_equal(df, expected_df)
 
@@ -282,34 +279,27 @@ class TestFromMapBatchedCorrectness(DaskTestCase):
     """Test from_map_batched with additional args and kwargs."""
 
     def multiply_and_add(x, multiplier, offset=0):
-      result = pd.DataFrame({
-        'x': [x],
-        'result': [x * multiplier + offset]
-      })
+      result = pd.DataFrame({'x': [x], 'result': [x * multiplier + offset]})
       return result
 
     values = [1, 2, 3]
-    expected_schema = pa.schema([
-      ('x', pa.int64()),
-      ('result', pa.int64())
-    ])
+    expected_schema = pa.schema([('x', pa.int64()), ('result', pa.int64())])
 
     reader = from_map_batched(
-      multiply_and_add,
-      values,
-      args=(2,),  # multiplier = 2
-      offset=5,  # offset = 5
-      schema=expected_schema
+        multiply_and_add,
+        values,
+        args=(2,),  # multiplier = 2
+        offset=5,  # offset = 5
+        schema=expected_schema,
     )
 
     table = reader.read_all()
     df = table.to_pandas()
 
     # Verify results: x * 2 + 5
-    expected_df = pd.DataFrame({
-      'x': [1, 2, 3],
-      'result': [7, 9, 11]  # (1*2+5, 2*2+5, 3*2+5)
-    })
+    expected_df = pd.DataFrame(
+        {'x': [1, 2, 3], 'result': [7, 9, 11]}  # (1*2+5, 2*2+5, 3*2+5)
+    )
 
     pd.testing.assert_frame_equal(df, expected_df)
 
@@ -318,9 +308,7 @@ class TestFromMapBatchedCorrectness(DaskTestCase):
     empty_schema = pa.schema([('value', pa.int64())])
 
     reader = from_map_batched(
-      lambda x: pd.DataFrame({'value': [x]}),
-      [],
-      schema=empty_schema
+        lambda x: pd.DataFrame({'value': [x]}), [], schema=empty_schema
     )
 
     batches = list(reader)
@@ -341,17 +329,25 @@ class TestFromMapBatchedCorrectness(DaskTestCase):
 
     # Regular map approach
     regular_dfs = [pivot(ds) for ds in datasets]
-    regular_table = pa.Table.from_pandas(pd.concat(regular_dfs, ignore_index=True))
+    regular_table = pa.Table.from_pandas(
+        pd.concat(regular_dfs, ignore_index=True)
+    )
 
     # Results should be identical
     self.assertEqual(batched_table.schema, regular_table.schema)
     self.assertEqual(len(batched_table), len(regular_table))
 
     # Compare data (allowing for potential column order differences)
-    batched_df = batched_table.to_pandas().sort_values(
-      ['time', 'lat', 'lon']).reset_index(drop=True)
-    regular_df = regular_table.to_pandas().sort_values(
-      ['time', 'lat', 'lon']).reset_index(drop=True)
+    batched_df = (
+        batched_table.to_pandas()
+        .sort_values(['time', 'lat', 'lon'])
+        .reset_index(drop=True)
+    )
+    regular_df = (
+        regular_table.to_pandas()
+        .sort_values(['time', 'lat', 'lon'])
+        .reset_index(drop=True)
+    )
 
     pd.testing.assert_frame_equal(batched_df, regular_df)
 
@@ -364,7 +360,9 @@ class TestFromMapBatchedCorrectness(DaskTestCase):
     air_chunked = air_small.chunk({'time': 25, 'lat': 5, 'lon': 8})
 
     # read_xarray uses from_map_batched internally
-    arrow_stream = read_xarray(air_chunked, chunks={'time': 25, 'lat': 5, 'lon': 8})
+    arrow_stream = read_xarray(
+        air_chunked, chunks={'time': 25, 'lat': 5, 'lon': 8}
+    )
 
     # Verify it returns a proper ArrowStreamExportable (RecordBatchReader)
     self.assertTrue(hasattr(arrow_stream, 'schema'))
@@ -381,6 +379,7 @@ class TestFromMapBatchedCorrectness(DaskTestCase):
 
 
 class ReadXarrayStreamingTest(unittest.TestCase):
+
   def setUp(self):
     self.large_ds = create_large_dataset().chunk({'time': 25})
 
