@@ -35,8 +35,8 @@ df = c.sql('''
 # A table of the average temperature for each location across time.
 df.to_pandas()
 
-# Alternatively, you can just create the DataFrame from the Dataset:
-df = qr.read_xarray(ds).to_pandas()
+# Alternatively, you can just create the DataFrame from the RecordBatchReader:
+df = qr.read_xarray(ds).read_pandas()
 df.head()
 ```
 
