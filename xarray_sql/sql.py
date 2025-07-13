@@ -1,7 +1,8 @@
 import xarray as xr
 from datafusion import SessionContext
 
-from .df import read_xarray, Chunks
+from .df import read_xarray
+from .core import Chunks
 
 
 class XarrayContext(SessionContext):

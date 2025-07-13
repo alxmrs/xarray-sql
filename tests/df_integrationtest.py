@@ -2,7 +2,7 @@ import unittest
 
 import xarray as xr
 
-from . import read_xarray
+from xarray_sql import read_xarray
 
 
 class Era5TestCast(unittest.TestCase):

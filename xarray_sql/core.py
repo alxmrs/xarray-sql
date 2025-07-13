@@ -4,11 +4,12 @@ import typing as t
 import numpy as np
 import xarray as xr
 
-Row = t.List[t.Any]
-
+Row = list[t.Any]
+Block = dict[t.Hashable, slice]
+Chunks = t.Optional[t.Dict[t.Hashable, int]]
 
 # deprecated
-def get_columns(ds: xr.Dataset) -> t.List[str]:
+def get_columns(ds: xr.Dataset) -> list[t.Hashable]:
   return list(ds.sizes.keys()) + list(ds.data_vars.keys())
 
 
@@ -46,3 +47,46 @@ def unbounded_unravel(ds: xr.Dataset) -> np.ndarray:
     out[d] = coords[:, i]
 
   return out
+
+
+# Borrowed from Xarray
+def _get_chunk_slicer(
+    dim: t.Hashable, chunk_index: t.Mapping, chunk_bounds: t.Mapping
+):
+  if dim in chunk_index:
+    which_chunk = chunk_index[dim]
+    return slice(
+        chunk_bounds[dim][which_chunk], chunk_bounds[dim][which_chunk + 1]
+    )
+  return slice(None)
+
+
+# Adapted from Xarray `map_blocks` implementation.
+def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> t.Iterator[Block]:
+  """Compute block slices for a chunked Dataset."""
+  if chunks is not None:
+    for_chunking = ds.copy(data=None, deep=False).chunk(chunks)
+    chunks = for_chunking.chunks
+    del for_chunking
+  else:
+    chunks = ds.chunks
+
+  assert chunks, "Dataset `ds` must be chunked or `chunks` must be provided."
+
+  chunk_bounds = {dim: np.cumsum((0,) + c) for dim, c in chunks.items()}
+  ichunk = {dim: range(len(c)) for dim, c in chunks.items()}
+  ick, icv = zip(*ichunk.items())  # Makes same order of keys and val.
+  chunk_idxs = (dict(zip(ick, i)) for i in itertools.product(*icv))
+  blocks = (
+      {
+          dim: _get_chunk_slicer(dim, chunk_index, chunk_bounds)
+          for dim in ds.dims
+      }
+      for chunk_index in chunk_idxs
+  )
+  yield from blocks
+
+
+def explode(ds: xr.Dataset, chunks: Chunks = None) -> t.Iterator[xr.Dataset]:
+  """Explodes a dataset into its chunks."""
+  yield from (ds.isel(b) for b in block_slices(ds, chunks=chunks))

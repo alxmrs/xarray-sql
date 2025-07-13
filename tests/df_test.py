@@ -1,84 +1,11 @@
-import itertools
 import unittest
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-import xarray as xr
 
-from .df import explode, read_xarray, block_slices, from_map
-
-
-def rand_wx(start: str, end: str) -> xr.Dataset:
-  np.random.seed(42)
-  lat = np.linspace(-90, 90, num=720)
-  lon = np.linspace(-180, 180, num=1440)
-  time = pd.date_range(start, end, freq='h')
-  level = np.array([1000, 500], dtype=np.int32)
-  reference_time = pd.Timestamp(start)
-  temperature = 15 + 8 * np.random.randn(720, 1440, len(time), len(level))
-  precipitation = 10 * np.random.rand(720, 1440, len(time), len(level))
-  return xr.Dataset(
-      data_vars=dict(
-          temperature=(['lat', 'lon', 'time', 'level'], temperature),
-          precipitation=(['lat', 'lon', 'time', 'level'], precipitation),
-      ),
-      coords=dict(
-          lat=lat,
-          lon=lon,
-          time=time,
-          level=level,
-          reference_time=reference_time,
-      ),
-      attrs=dict(description='Random weather.'),
-  )
-
-
-class DaskTestCase(unittest.TestCase):
-
-  def setUp(self) -> None:
-    self.air = xr.tutorial.open_dataset('air_temperature')
-    self.chunks = {'time': 240}
-    self.air = self.air.chunk(self.chunks)
-
-    self.air_small = self.air.isel(
-        time=slice(0, 12), lat=slice(0, 11), lon=slice(0, 10)
-    ).chunk(self.chunks)
-    self.randwx = rand_wx('1995-01-13T00', '1995-01-13T01')
-
-
-class ExplodeTest(DaskTestCase):
-
-  def test_cardinality(self):
-    dss = explode(self.air)
-    self.assertEqual(
-        len(list(dss)), np.prod([len(c) for c in self.air.chunks.values()])
-    )
-
-  def test_dim_sizes__one(self):
-    ds = next(iter(explode(self.air)))
-    for k, v in self.chunks.items():
-      self.assertIn(k, ds.dims)
-      self.assertEqual(v, ds.sizes[k])
-
-  def skip_test_dim_sizes__all(self):
-    # TODO(alxmrs): Why is this test slow?
-    dss = explode(self.air)
-    self.assertEqual(
-        [tuple(ds.dims.values()) for ds in dss],
-        list(itertools.product(*self.air.chunksizes.values())),
-    )
-
-  def test_data_equal__one__first(self):
-    ds = next(iter(explode(self.air)))
-    iselection = {dim: slice(0, s) for dim, s in ds.sizes.items()}
-    self.assertEqual(self.air.isel(iselection), ds)
-
-  def test_data_equal__one__last(self):
-    dss = list(explode(self.air))
-    ds = dss[-1]
-    iselection = {dim: slice(0, s) for dim, s in ds.sizes.items()}
-    self.assertEqual(self.air.isel(iselection), ds)
+from tests.conftest import DaskTestCase
+from xarray_sql.df import read_xarray, from_map
 
 
 class PyArrowTableTest(DaskTestCase):

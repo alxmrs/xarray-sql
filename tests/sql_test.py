@@ -1,7 +1,7 @@
 import unittest
 
-from . import XarrayContext
-from .df_test import DaskTestCase
+from xarray_sql import XarrayContext
+from tests.conftest import DaskTestCase
 
 
 class SqlTestCase(DaskTestCase):
