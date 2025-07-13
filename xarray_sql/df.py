@@ -150,7 +150,7 @@ def pivot(ds: xr.Dataset) -> pd.DataFrame:
   return ds.to_dataframe().reset_index()
 
 
-def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> ArrowStreamExportable:
+def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.RecordBatchReader:
   """Pivots an Xarray Dataset into a PyArrow Table, partitioned by chunks.
 
   Args:
