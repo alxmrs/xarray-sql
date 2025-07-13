@@ -1,12 +1,14 @@
 import itertools
 import typing as t
 
+import datafusion
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import xarray as xr
+from datafusion.context import ArrowStreamExportable
 
-Block = t.Dict[str, slice]
+Block = t.Dict[t.Hashable, slice]
 Chunks = t.Optional[t.Dict[str, int]]
 
 
@@ -55,6 +57,20 @@ def explode(ds: xr.Dataset, chunks: Chunks = None) -> t.Iterator[xr.Dataset]:
 
 def _block_len(block: Block) -> int:
   return np.prod([v.stop - v.start for v in block.values()])
+
+
+def from_map_to_batches(
+      func: t.Callable[[...], pd.DataFrame], *iterables, args: t.Optional[t.Tuple] = None, schema: pa.Schema = None, **kwargs
+) -> pa.RecordBatchReader:
+  if args is None:
+    args = ()
+
+  def apply_map():
+    for items in zip(*iterables):
+      df = func(*items, *args, **kwargs)
+      yield pa.RecordBatch.from_pandas(df, schema=schema)
+
+  return pa.RecordBatchReader.from_batches(schema, apply_map())
 
 
 def from_map(
@@ -109,7 +125,7 @@ def from_map(
   return pa.concat_tables(results)
 
 
-def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.Table:
+def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> ArrowStreamExportable:
   """Pivots an Xarray Dataset into a PyArrow Table, partitioned by chunks.
 
   Args:
@@ -131,4 +147,8 @@ def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.Table:
   def pivot(b: Block) -> pd.DataFrame:
     return ds.isel(b).to_dataframe().reset_index()
 
-  return from_map(pivot, blocks)
+  schema = pa.Schema.from_pandas(pivot(blocks[0]))
+  last_schema = pa.Schema.from_pandas(pivot(blocks[-1]))
+  assert schema == last_schema, 'Schemas must be consistent across blocks!'
+
+  return from_map_to_batches(pivot, blocks, schema=schema)

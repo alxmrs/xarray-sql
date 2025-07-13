@@ -15,3 +15,4 @@ class XarrayContext(SessionContext):
   ):
     arrow_table = read_xarray(input_table, chunks)
     return self.from_arrow(arrow_table, table_name)
+

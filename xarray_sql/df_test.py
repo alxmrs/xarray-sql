@@ -81,6 +81,7 @@ class ExplodeTest(DaskTestCase):
     self.assertEqual(self.air.isel(iselection), ds)
 
 
+@unittest.skip("Chose non-pa.Table implementation.")
 class PyArrowTableTest(DaskTestCase):
 
   def test_sanity(self):
