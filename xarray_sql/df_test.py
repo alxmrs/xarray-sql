@@ -114,50 +114,6 @@ class ExplodeTest(DaskTestCase):
     self.assertEqual(self.air.isel(iselection), ds)
 
 
-@unittest.skip('Chose non-pa.Table implementation.')
-class PyArrowTableTest(DaskTestCase):
-
-  def test_sanity(self):
-    table = read_xarray(self.air_small)
-    self.assertIsNotNone(table)
-    self.assertIsInstance(table, pa.Table)
-    self.assertEqual(len(table), np.prod(list(self.air_small.sizes.values())))
-
-  def test_columns(self):
-    table = read_xarray(self.air_small)
-    cols = table.column_names
-    self.assertEqual(cols, ['lat', 'time', 'lon', 'air'])
-
-  def test_dtypes(self):
-    table = read_xarray(self.air_small)
-    # Convert to pandas to check dtypes
-    df = table.to_pandas()
-    types = list(df.dtypes)
-    self.assertEqual([self.air_small[c].dtype for c in df.columns], types)
-
-  def test_different_chunk_sizes(self):
-    default_table = read_xarray(self.air_small)
-    chunked_table = read_xarray(self.air_small, dict(time=5))
-
-    # Both should produce valid tables
-    self.assertIsInstance(default_table, pa.Table)
-    self.assertIsInstance(chunked_table, pa.Table)
-    # Should have same number of rows
-    self.assertEqual(len(default_table), len(chunked_table))
-
-  def test_chunk_perf(self):
-    table = read_xarray(self.air, chunks=dict(time=6))
-    self.assertIsNotNone(table)
-    self.assertEqual(len(table), np.prod(list(self.air.sizes.values())))
-
-  def test_column_metadata_preserved(self):
-    try:
-      table = read_xarray(self.randwx, chunks=dict(time=24))
-      self.assertIsInstance(table, pa.Table)
-    except Exception as e:
-      self.fail(f'Unexpected error: {e}')
-
-
 class FromMapTest(unittest.TestCase):
 
   def test_basic_from_map(self):
