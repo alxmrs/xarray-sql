@@ -39,7 +39,7 @@ def unbounded_unravel(ds: xr.Dataset) -> np.ndarray:
 
   prod_vals = (ds.coords[k].values for k in dim_keys)
   coords = np.array(np.meshgrid(*prod_vals), dtype=int).T.reshape(
-      -1, len(dim_keys)
+    -1, len(dim_keys)
   )
 
   for i, d in enumerate(dim_keys):

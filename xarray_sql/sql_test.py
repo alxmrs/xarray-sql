@@ -22,14 +22,14 @@ class SqlTestCase(DaskTestCase):
     c.from_dataset('air', self.air_small)
 
     query = c.sql(
-        """
-    SELECT
-      "lat", "lon", SUM("air") as air_total
-    FROM 
-      "air" 
-    GROUP BY
-     "lat", "lon"
-    """
+      """
+  SELECT
+    "lat", "lon", SUM("air") as air_total
+  FROM 
+    "air" 
+  GROUP BY
+   "lat", "lon"
+  """
     )
 
     result = query.to_pandas()
@@ -43,7 +43,7 @@ class SqlTestCase(DaskTestCase):
     c.from_dataset('air', self.air)
 
     query = c.sql(
-        """
+      """
     SELECT
       "lat", "lon", AVG("air") as air_total
     FROM 
