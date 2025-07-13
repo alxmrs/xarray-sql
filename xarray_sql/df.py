@@ -72,7 +72,8 @@ def from_map_batched(
   RecordBatches which are created via the `func` one-at-a-time.
 
   Args:
-    func: Function to apply to each element of the iterables.
+    func: Function to apply to each element of the iterables. Currently, the function
+      must return a Pandas DataFrame.
     *iterables: Iterable objects to map the function over.
     schema: Optional schema needed for the RecordBatchReader.
     args: Additional positional arguments to pass to func.
