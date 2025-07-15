@@ -1,0 +1,15 @@
+[package]
+name = "zarrquet"
+version = "0.1.0"
+authors = ["Alex Merose"]
+edition = "2021"
+
+[dependencies]
+zarrs = "0.21.2"
+pyo3 = "0.25.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "zarrquet"
+crate-type = ["cdylib"]
+
