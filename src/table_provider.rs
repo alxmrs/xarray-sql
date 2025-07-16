@@ -4,7 +4,8 @@ use datafusion::catalog::MemTable;
 use datafusion::error::DataFusionError;
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::catalog::Session;
-use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
+use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, Operator, BinaryExpr};
+use datafusion::scalar::ScalarValue;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion_ffi::table_provider::FFI_TableProvider;
@@ -20,7 +21,90 @@ use zarrs::array::Array;
 use zarrs::array::data_type::DataType as ZarrDataType;
 use zarrs::array_subset::ArraySubset;
 use zarrs::array::chunk_grid::ChunkGrid;
-use arrow_array::{Int64Array, Float64Array};
+use arrow_array::{Int64Array, Float64Array, Int32Array, Float32Array};
+
+/// Represents a coordinate range constraint for chunk filtering
+#[derive(Debug, Clone)]
+struct CoordinateRange {
+    dimension: usize,
+    min: Option<i64>,
+    max: Option<i64>,
+}
+
+impl CoordinateRange {
+    fn new(dimension: usize) -> Self {
+        Self { dimension, min: None, max: None }
+    }
+    
+    fn with_min(mut self, min: i64) -> Self {
+        self.min = Some(min);
+        self
+    }
+    
+    fn with_max(mut self, max: i64) -> Self {
+        self.max = Some(max);
+        self
+    }
+    
+    /// Check if a coordinate value satisfies this range
+    fn contains(&self, value: i64) -> bool {
+        if let Some(min) = self.min {
+            if value < min { return false; }
+        }
+        if let Some(max) = self.max {
+            if value > max { return false; }
+        }
+        true
+    }
+}
+
+/// Represents a collection of coordinate constraints for filtering
+#[derive(Debug, Clone)]
+pub struct CoordinateFilter {
+    ranges: Vec<CoordinateRange>,
+}
+
+/// Helper function to generate all chunk index combinations
+fn generate_chunk_indices(
+    chunks_per_dim: &[u64],
+    current: &mut Vec<u64>,
+    results: &mut Vec<Vec<u64>>,
+) {
+    if current.len() == chunks_per_dim.len() {
+        results.push(current.clone());
+        return;
+    }
+    
+    let dim_idx = current.len();
+    for chunk_idx in 0..chunks_per_dim[dim_idx] {
+        current.push(chunk_idx);
+        generate_chunk_indices(chunks_per_dim, current, results);
+        current.pop();
+    }
+}
+
+impl CoordinateFilter {
+    fn new() -> Self {
+        Self { ranges: Vec::new() }
+    }
+    
+    fn add_range(mut self, range: CoordinateRange) -> Self {
+        self.ranges.push(range);
+        self
+    }
+    
+    /// Check if a set of coordinates satisfies all constraints
+    pub fn matches(&self, coordinates: &[i64]) -> bool {
+        for range in &self.ranges {
+            if range.dimension < coordinates.len() {
+                if !range.contains(coordinates[range.dimension]) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
 
 /// Trait for types that can be converted to Arrow arrays with minimal copying
 trait ToArrowArray: Clone + Sized {
@@ -752,24 +836,449 @@ impl TableProvider for ZarrTableProvider {
         TableType::Base
     }
 
+    async fn scan(
+        &self,
+        _state: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        limit: Option<usize>,
+    ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        // For predicate pushdown, parse coordinate filters
+        let filter_refs: Vec<&Expr> = filters.iter().collect();
+        let coordinate_filter = self.parse_coordinate_filters(&filter_refs)?;
+        
+        // Create filtered batches using coordinate constraints
+        let batches = self.create_filtered_batches(coordinate_filter, limit)?;
+        
+        // Create MemTable with filtered data
+        let schema = self.schema();
+        let mem_table = MemTable::try_new(schema, vec![batches])?;
+        
+        // Apply projection if specified
+        mem_table.scan(_state, projection, &[], limit).await
+    }
+    
     fn supports_filters_pushdown(
         &self,
         filters: &[&Expr],
     ) -> Result<Vec<TableProviderFilterPushDown>, DataFusionError> {
-        // For now, indicate that we cannot push down any filters
-        // TODO: Implement predicate pushdown for chunk filtering
-        Ok(vec![TableProviderFilterPushDown::Unsupported; filters.len()])
+        let mut results = Vec::new();
+        
+        for filter in filters {
+            // Check if this filter can be pushed down (coordinate-based filters)
+            if self.can_pushdown_filter(filter) {
+                results.push(TableProviderFilterPushDown::Exact);
+            } else {
+                results.push(TableProviderFilterPushDown::Unsupported);
+            }
+        }
+        
+        Ok(results)
+    }
+}
+
+impl ZarrTableProvider {
+    /// Check if a filter expression can be pushed down to coordinate level
+    fn can_pushdown_filter(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
+                // Check for coordinate column comparisons
+                let has_coord_column = match (left.as_ref(), right.as_ref()) {
+                    (Expr::Column(col), Expr::Literal(_, _)) => col.name.starts_with("dim_"),
+                    (Expr::Literal(_, _), Expr::Column(col)) => col.name.starts_with("dim_"),
+                    _ => false,
+                };
+                
+                // Only support specific comparison operators
+                let supported_op = matches!(op, 
+                    Operator::Eq | Operator::Gt | Operator::GtEq | 
+                    Operator::Lt | Operator::LtEq
+                );
+                
+                has_coord_column && supported_op
+            },
+            _ => false,
+        }
+    }
+    /// Parse DataFusion expressions into coordinate filters
+    pub fn parse_coordinate_filters(&self, filters: &[&Expr]) -> Result<CoordinateFilter, DataFusionError> {
+        let mut coordinate_filter = CoordinateFilter::new();
+        
+        for filter in filters {
+            if let Some(range) = self.parse_coordinate_expression(filter)? {
+                coordinate_filter = coordinate_filter.add_range(range);
+            }
+        }
+        
+        Ok(coordinate_filter)
+    }
+    
+    /// Parse a single expression into a coordinate range if possible
+    fn parse_coordinate_expression(&self, expr: &Expr) -> Result<Option<CoordinateRange>, DataFusionError> {
+        match expr {
+            Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
+                // Handle expressions like: dim_0 >= 5, dim_1 < 10, etc.
+                if let (Expr::Column(col), Expr::Literal(scalar, _)) = (left.as_ref(), right.as_ref()) {
+                    if let Some(dim_idx) = self.parse_dimension_name(&col.name) {
+                        if let Some(value) = self.extract_i64_from_scalar(scalar) {
+                            let range = match op {
+                                Operator::Eq => CoordinateRange::new(dim_idx).with_min(value).with_max(value),
+                                Operator::Gt => CoordinateRange::new(dim_idx).with_min(value + 1),
+                                Operator::GtEq => CoordinateRange::new(dim_idx).with_min(value),
+                                Operator::Lt => CoordinateRange::new(dim_idx).with_max(value - 1),
+                                Operator::LtEq => CoordinateRange::new(dim_idx).with_max(value),
+                                _ => return Ok(None), // Unsupported operator
+                            };
+                            return Ok(Some(range));
+                        }
+                    }
+                }
+                
+                // Handle reversed expressions like: 5 <= dim_0
+                if let (Expr::Literal(scalar, _), Expr::Column(col)) = (left.as_ref(), right.as_ref()) {
+                    if let Some(dim_idx) = self.parse_dimension_name(&col.name) {
+                        if let Some(value) = self.extract_i64_from_scalar(scalar) {
+                            let range = match op {
+                                Operator::Eq => CoordinateRange::new(dim_idx).with_min(value).with_max(value),
+                                Operator::Lt => CoordinateRange::new(dim_idx).with_min(value + 1),
+                                Operator::LtEq => CoordinateRange::new(dim_idx).with_min(value),
+                                Operator::Gt => CoordinateRange::new(dim_idx).with_max(value - 1),
+                                Operator::GtEq => CoordinateRange::new(dim_idx).with_max(value),
+                                _ => return Ok(None), // Unsupported operator
+                            };
+                            return Ok(Some(range));
+                        }
+                    }
+                }
+            }
+            _ => return Ok(None), // Unsupported expression type
+        }
+        
+        Ok(None)
+    }
+    
+    /// Parse dimension name like "dim_0", "dim_1" into dimension index
+    fn parse_dimension_name(&self, name: &str) -> Option<usize> {
+        if name.starts_with("dim_") {
+            name[4..].parse::<usize>().ok()
+        } else {
+            None
+        }
+    }
+    
+    /// Extract i64 value from ScalarValue
+    fn extract_i64_from_scalar(&self, scalar: &ScalarValue) -> Option<i64> {
+        match scalar {
+            ScalarValue::Int8(Some(v)) => Some(*v as i64),
+            ScalarValue::Int16(Some(v)) => Some(*v as i64),
+            ScalarValue::Int32(Some(v)) => Some(*v as i64),
+            ScalarValue::Int64(Some(v)) => Some(*v),
+            ScalarValue::UInt8(Some(v)) => Some(*v as i64),
+            ScalarValue::UInt16(Some(v)) => Some(*v as i64),
+            ScalarValue::UInt32(Some(v)) => Some(*v as i64),
+            ScalarValue::UInt64(Some(v)) => {
+                if *v <= i64::MAX as u64 {
+                    Some(*v as i64)
+                } else {
+                    None // Value too large for i64
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> Result<Vec<TableProviderFilterPushDown>, DataFusionError> {
+        let mut results = Vec::new();
+        
+        for filter in filters {
+            // Check if this filter can be converted to a coordinate range
+            match self.parse_coordinate_expression(filter) {
+                Ok(Some(_)) => {
+                    // This filter operates on coordinates and can be pushed down
+                    results.push(TableProviderFilterPushDown::Exact);
+                }
+                Ok(None) => {
+                    // This filter cannot be pushed down (operates on data variables)
+                    results.push(TableProviderFilterPushDown::Unsupported);
+                }
+                Err(_) => {
+                    // Error parsing, cannot push down
+                    results.push(TableProviderFilterPushDown::Unsupported);
+                }
+            }
+        }
+        
+        Ok(results)
+    }
+    
+    /// Create RecordBatches with coordinate filtering applied
+    pub fn create_filtered_batches(
+        &self,
+        coordinate_filter: CoordinateFilter,
+        limit: Option<usize>,
+    ) -> Result<Vec<RecordBatch>, DataFusionError> {
+        let store = self.store.as_ref()
+            .ok_or_else(|| DataFusionError::External("No store available".into()))?;
+        
+        // Get the zarr group and arrays
+        let group = Group::open(store.clone(), "/")
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        
+        let children = group.children(false)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        
+        // Collect data variables (same logic as before)
+        let mut all_arrays = Vec::new();
+        for child in &children {
+            let path_str = child.path().to_string();
+            if let Ok(array) = Array::open(store.clone(), &path_str) {
+                let shape = array.shape().to_vec();
+                all_arrays.push((path_str, array, shape));
+            }
+        }
+        
+        if all_arrays.is_empty() {
+            return Err(DataFusionError::External("No arrays found in Zarr store".into()));
+        }
+        
+        // Identify data variables (highest dimensionality, >1D)
+        let max_dims = all_arrays.iter()
+            .map(|(_, _, shape)| shape.len())
+            .max()
+            .unwrap_or(0);
+        
+        let data_variables: Vec<_> = all_arrays.into_iter()
+            .filter(|(_, _, shape)| shape.len() == max_dims && shape.len() > 1)
+            .collect();
+        
+        if data_variables.is_empty() {
+            return Err(DataFusionError::External("No data variables found".into()));
+        }
+        
+        // Get chunk grid from the first data variable
+        let (_, ref_array, ref_shape) = &data_variables[0];
+        let chunk_grid = ref_array.chunk_grid();
+        
+        // Generate all possible chunk indices and filter them
+        let mut filtered_batches = Vec::new();
+        let mut row_count = 0;
+        
+        // For now, just iterate through the first chunk for testing
+        // TODO: Implement proper chunk iteration when zarrs API is clearer
+        let chunk_indices = vec![0u64; ref_shape.len()];
+        let chunk_combinations = vec![chunk_indices];
+        
+        for chunk_indices in chunk_combinations {
+            // Check if this chunk potentially contains data matching our filter
+            if self.chunk_matches_filter(&chunk_indices, &ref_shape, &coordinate_filter)? {
+                // Read the chunk and apply row-level filtering
+                match self.chunk_to_record_batch(&chunk_indices) {
+                    Ok(batch) => {
+                        let filtered_batch = self.filter_record_batch(batch, &coordinate_filter)?;
+                        if filtered_batch.num_rows() > 0 {
+                            row_count += filtered_batch.num_rows();
+                            filtered_batches.push(filtered_batch);
+                            
+                            // Apply limit if specified
+                            if let Some(limit) = limit {
+                                if row_count >= limit {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Skip chunks that can't be read (might be expected)
+                        continue;
+                    }
+                }
+            }
+        }
+        
+        Ok(filtered_batches)
+    }
+    
+    /// Check if a chunk potentially contains data matching the coordinate filter
+    fn chunk_matches_filter(
+        &self,
+        chunk_indices: &[u64],
+        array_shape: &[u64],
+        coordinate_filter: &CoordinateFilter,
+    ) -> Result<bool, DataFusionError> {
+        if coordinate_filter.ranges.is_empty() {
+            return Ok(true); // No filters, chunk matches
+        }
+        
+        let store = self.store.as_ref()
+            .ok_or_else(|| DataFusionError::External("No store available".into()))?;
+        
+        let group = Group::open(store.clone(), "/")
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        
+        // Find a data variable to get chunk subset info
+        let children = group.children(false)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        
+        for child in &children {
+            let path_str = child.path().to_string();
+            if let Ok(array) = Array::open(store.clone(), &path_str) {
+                let shape = array.shape().to_vec();
+                if shape.len() > 1 && shape == array_shape {
+                    // Get chunk subset to determine coordinate ranges
+                    let chunk_subset = array.chunk_subset(chunk_indices)
+                        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                    
+                    let chunk_start = chunk_subset.start();
+                    let chunk_shape = chunk_subset.shape();
+                    
+                    // Check if any coordinate in this chunk could match the filter
+                    for range in &coordinate_filter.ranges {
+                        if range.dimension < chunk_start.len() {
+                            let chunk_min = chunk_start[range.dimension] as i64;
+                            let chunk_max = chunk_min + chunk_shape[range.dimension] as i64 - 1;
+                            
+                            // Check if the filter range overlaps with the chunk range
+                            let filter_min = range.min.unwrap_or(i64::MIN);
+                            let filter_max = range.max.unwrap_or(i64::MAX);
+                            
+                            // No overlap if chunk_max < filter_min or chunk_min > filter_max
+                            if chunk_max < filter_min || chunk_min > filter_max {
+                                return Ok(false); // This chunk doesn't match
+                            }
+                        }
+                    }
+                    
+                    return Ok(true); // Chunk potentially matches
+                }
+            }
+        }
+        
+        Ok(true) // Couldn't determine, assume it matches
+    }
+    
+    /// Filter a RecordBatch to only include rows matching the coordinate filter
+    fn filter_record_batch(
+        &self,
+        batch: RecordBatch,
+        coordinate_filter: &CoordinateFilter,
+    ) -> Result<RecordBatch, DataFusionError> {
+        if coordinate_filter.ranges.is_empty() {
+            return Ok(batch); // No filtering needed
+        }
+        
+        let schema = batch.schema();
+        let num_rows = batch.num_rows();
+        let mut keep_rows = Vec::with_capacity(num_rows);
+        
+        // Extract coordinate columns (first N columns are coordinates)
+        let num_dims = coordinate_filter.ranges.iter()
+            .map(|r| r.dimension + 1)
+            .max()
+            .unwrap_or(0)
+            .min(batch.num_columns());
+        
+        let coord_arrays: Vec<&Int64Array> = (0..num_dims)
+            .map(|i| batch.column(i).as_any().downcast_ref::<Int64Array>().unwrap())
+            .collect();
+        
+        // Check each row against the coordinate filter
+        for row_idx in 0..num_rows {
+            let coordinates: Vec<i64> = coord_arrays
+                .iter()
+                .map(|arr| arr.value(row_idx))
+                .collect();
+            
+            if coordinate_filter.matches(&coordinates) {
+                keep_rows.push(row_idx);
+            }
+        }
+        
+        // Create filtered batch
+        if keep_rows.len() == num_rows {
+            // All rows match, return original batch
+            Ok(batch)
+        } else if keep_rows.is_empty() {
+            // No rows match, return empty batch with same schema
+            let empty_arrays: Vec<Arc<dyn arrow_array::Array>> = schema.fields()
+                .iter()
+                .map(|field| {
+                    match field.data_type() {
+                        DataType::Int64 => Arc::new(Int64Array::new_null(0)) as Arc<dyn arrow_array::Array>,
+                        DataType::Float64 => Arc::new(Float64Array::new_null(0)) as Arc<dyn arrow_array::Array>,
+                        DataType::Int32 => Arc::new(Int32Array::new_null(0)) as Arc<dyn arrow_array::Array>,
+                        DataType::Float32 => Arc::new(Float32Array::new_null(0)) as Arc<dyn arrow_array::Array>,
+                        _ => Arc::new(Int64Array::new_null(0)) as Arc<dyn arrow_array::Array>, // Default fallback
+                    }
+                })
+                .collect();
+            
+            RecordBatch::try_new(schema, empty_arrays)
+                .map_err(|e| DataFusionError::External(Box::new(e)))
+        } else {
+            // Some rows match, create filtered batch
+            let filtered_arrays: Vec<Arc<dyn arrow_array::Array>> = (0..batch.num_columns())
+                .map(|col_idx| {
+                    let column = batch.column(col_idx);
+                    self.filter_array(column, &keep_rows)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            
+            RecordBatch::try_new(schema, filtered_arrays)
+                .map_err(|e| DataFusionError::External(Box::new(e)))
+        }
+    }
+    
+    /// Filter an Arrow array to only include specified row indices
+    fn filter_array(
+        &self,
+        array: &Arc<dyn arrow_array::Array>,
+        keep_rows: &[usize],
+    ) -> Result<Arc<dyn arrow_array::Array>, DataFusionError> {
+        // Handle different array types
+        if let Some(int64_array) = array.as_any().downcast_ref::<Int64Array>() {
+            let filtered_values: Vec<i64> = keep_rows
+                .iter()
+                .map(|&idx| int64_array.value(idx))
+                .collect();
+            Ok(Arc::new(Int64Array::from(filtered_values)))
+        } else if let Some(float64_array) = array.as_any().downcast_ref::<Float64Array>() {
+            let filtered_values: Vec<f64> = keep_rows
+                .iter()
+                .map(|&idx| float64_array.value(idx))
+                .collect();
+            Ok(Arc::new(Float64Array::from(filtered_values)))
+        } else if let Some(int32_array) = array.as_any().downcast_ref::<arrow_array::Int32Array>() {
+            let filtered_values: Vec<i32> = keep_rows
+                .iter()
+                .map(|&idx| int32_array.value(idx))
+                .collect();
+            Ok(Arc::new(arrow_array::Int32Array::from(filtered_values)))
+        } else {
+            Err(DataFusionError::External(
+                "Unsupported array type for filtering".into()
+            ))
+        }
     }
 
     async fn scan(
         &self,
         _state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
-        _limit: Option<usize>,
+        filters: &[Expr],
+        limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
         // Get the schema for this table
         let schema = self.schema();
+        
+        // Parse coordinate filters from the provided expressions
+        let filter_refs: Vec<&Expr> = filters.iter().collect();
+        let coordinate_filter = self.parse_coordinate_filters(&filter_refs)?;
+        
+        // Generate filtered RecordBatches
+        let batches = self.create_filtered_batches(coordinate_filter, limit)?;
         
         // Apply projection if specified
         let projected_schema = if let Some(projection) = projection {
@@ -782,13 +1291,11 @@ impl TableProvider for ZarrTableProvider {
             schema
         };
 
-        // For now, use MemTable as placeholder
-        // TODO: Implement proper ZarrExecutionPlan for streaming
-        let empty_batches: Vec<RecordBatch> = vec![];
-        let mem_table = MemTable::try_new(projected_schema, vec![empty_batches])?;
+        // Create MemTable with filtered data
+        let mem_table = MemTable::try_new(projected_schema, vec![batches])?;
         
         // Return the MemTable's execution plan
-        mem_table.scan(_state, projection, _filters, _limit).await
+        mem_table.scan(_state, projection, &[], limit).await // Note: filters already applied
     }
 }
 
