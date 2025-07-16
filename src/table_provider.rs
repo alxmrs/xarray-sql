@@ -131,7 +131,7 @@ impl ToArrowArray for i32 {
 /// A DataFusion TableProvider that reads from Zarr stores
 #[pyclass(name = "ZarrTableProvider", module = "zarrquet", subclass)]
 #[derive(Clone, Debug)]
-pub(crate) struct ZarrTableProvider {
+pub struct ZarrTableProvider {
     store_path: String,
     store: Option<Arc<FilesystemStore>>,
 }
@@ -175,35 +175,61 @@ impl ZarrTableProvider {
         let group = Group::open(store.clone(), "/")
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         
-        // Collect all data variables with their metadata
+        // Collect all arrays and separate coordinates from data variables
         let children = group.children(false)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         
-        let mut data_variables = Vec::new();
-        let mut reference_shape: Option<Vec<u64>> = None;
+        let mut all_arrays = Vec::new();
         
-        // First pass: collect all arrays and validate dimension consistency
+        // First pass: collect all arrays with their metadata
         for child in &children {
             let path_str = child.path().to_string();
             if let Ok(array) = Array::open(store.clone(), &path_str) {
                 let shape = array.shape().to_vec();
                 let data_type = array.data_type().clone();
-                
-                // Check dimension consistency
-                if let Some(ref ref_shape) = reference_shape {
-                    if shape != *ref_shape {
-                        return Err(DataFusionError::External(
-                            format!(
-                                "Inconsistent dimensions across variables. Variable '{}' has shape {:?}, but expected {:?}. All variables must have the same dimensional structure.",
-                                path_str, shape, ref_shape
-                            ).into()
-                        ));
-                    }
-                } else {
-                    reference_shape = Some(shape.clone());
+                all_arrays.push((path_str, shape, data_type));
+            }
+        }
+        
+        if all_arrays.is_empty() {
+            return Err(DataFusionError::External("No arrays found in Zarr store".into()));
+        }
+        
+        // Identify data variables vs coordinates
+        // Data variables typically have the highest dimensionality
+        // Coordinates are typically 1D arrays
+        let max_dims = all_arrays.iter()
+            .map(|(_, shape, _)| shape.len())
+            .max()
+            .unwrap_or(0);
+        
+        let mut data_variables = Vec::new();
+        let mut coordinate_arrays = Vec::new();
+        
+        for (name, shape, data_type) in all_arrays {
+            if shape.len() == max_dims && shape.len() > 1 {
+                // This is likely a data variable (multi-dimensional)
+                data_variables.push((name, shape, data_type));
+            } else {
+                // This is likely a coordinate array (1D or lower dimensionality)
+                coordinate_arrays.push((name, shape, data_type));
+            }
+        }
+        
+        // Validate that data variables have consistent dimensions
+        let mut reference_shape: Option<Vec<u64>> = None;
+        for (name, shape, _) in &data_variables {
+            if let Some(ref ref_shape) = reference_shape {
+                if shape != ref_shape {
+                    return Err(DataFusionError::External(
+                        format!(
+                            "Inconsistent dimensions across data variables. Variable '{}' has shape {:?}, but expected {:?}. All data variables must have the same dimensional structure.",
+                            name, shape, ref_shape
+                        ).into()
+                    ));
                 }
-                
-                data_variables.push((path_str, shape, data_type));
+            } else {
+                reference_shape = Some(shape.clone());
             }
         }
         
@@ -359,24 +385,44 @@ impl ZarrTableProvider {
         let group = Group::open(store.clone(), "/")
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         
-        // Collect all arrays and their data
+        // Collect all arrays and separate coordinates from data variables
         let children = group.children(false)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        
+        let mut all_arrays = Vec::new();
+        
+        // First pass: collect all arrays with their metadata
+        for child in &children {
+            let path_str = child.path().to_string();
+            if let Ok(array) = Array::open(store.clone(), &path_str) {
+                let shape = array.shape().to_vec();
+                all_arrays.push((path_str, array, shape));
+            }
+        }
+        
+        if all_arrays.is_empty() {
+            return Err(DataFusionError::External("No arrays found in Zarr store".into()));
+        }
+        
+        // Identify data variables (highest dimensionality, >1D)
+        let max_dims = all_arrays.iter()
+            .map(|(_, _, shape)| shape.len())
+            .max()
+            .unwrap_or(0);
         
         let mut arrays_data = Vec::new();
         let mut reference_shape: Option<Vec<u64>> = None;
         let mut reference_chunk_subset: Option<ArraySubset> = None;
         
-        // First pass: collect all arrays and validate consistency
-        for child in &children {
-            let path_str = child.path().to_string();
-            if let Ok(array) = Array::open(store.clone(), &path_str) {
+        // Second pass: process only data variables
+        for (path_str, array, shape) in all_arrays {
+            // Only process data variables (multi-dimensional arrays)
+            if shape.len() == max_dims && shape.len() > 1 {
                 // Validate chunk alignment
                 let chunk_subset = array.chunk_subset(chunk_indices)
                     .map_err(|e| DataFusionError::External(Box::new(e)))?;
                 
                 // Check shape and chunk consistency
-                let shape = array.shape().to_vec();
                 if let Some(ref ref_shape) = reference_shape {
                     if shape != *ref_shape {
                         return Err(DataFusionError::External(
