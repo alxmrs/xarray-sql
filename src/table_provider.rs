@@ -839,4 +839,205 @@ mod tests {
         let error = result.unwrap_err();
         assert!(error.to_string().contains("No store available"));
     }
+
+    // ===== MULTI-VARIABLE TESTS =====
+    // These tests define the expected behavior for multi-variable Zarr datasets
+    
+    #[test]
+    fn test_multi_variable_schema_inference() {
+        // Test that schema inference works correctly for multiple variables
+        // with consistent dimensions
+        
+        // Expected behavior:
+        // Given a Zarr with variables: temperature(time, lat, lon), pressure(time, lat, lon)
+        // Schema should be:
+        // - time: Int64 (dimension)
+        // - lat: Int64 (dimension)  
+        // - lon: Int64 (dimension)
+        // - temperature: Float64 (data variable)
+        // - pressure: Float64 (data variable)
+        
+        // This test should pass once multi-variable support is implemented
+        // For now, we'll mark it as ignored and implement it later
+        
+        // TODO: Implement this test once we have multi-variable support
+        // let provider = create_test_multi_variable_provider();
+        // let schema = provider.infer_schema().unwrap();
+        // 
+        // assert_eq!(schema.fields().len(), 5); // 3 dimensions + 2 data variables
+        // assert_eq!(schema.field(0).name(), "time");
+        // assert_eq!(schema.field(1).name(), "lat");
+        // assert_eq!(schema.field(2).name(), "lon");
+        // assert_eq!(schema.field(3).name(), "temperature");
+        // assert_eq!(schema.field(4).name(), "pressure");
+    }
+
+    #[test]
+    fn test_multi_variable_dimension_consistency_check() {
+        // Test that we properly validate dimension consistency across variables
+        
+        // Expected behavior:
+        // Given variables with inconsistent dimensions:
+        // - temperature(time, lat, lon) - shape [10, 5, 8]
+        // - pressure(time, lat) - shape [10, 5]
+        // Should return an error explaining the inconsistency
+        
+        // TODO: Implement this test
+        // let provider = create_test_inconsistent_dimensions_provider();
+        // let result = provider.infer_schema();
+        // 
+        // assert!(result.is_err());
+        // let error = result.unwrap_err();
+        // assert!(error.to_string().contains("inconsistent dimensions"));
+    }
+
+    #[test]
+    fn test_multi_variable_chunk_alignment() {
+        // Test that chunks are properly aligned across multiple variables
+        
+        // Expected behavior:
+        // Given variables with different chunk shapes:
+        // - temperature: chunks [5, 3, 4]
+        // - pressure: chunks [5, 3, 2]  
+        // Should return an error explaining chunk misalignment
+        
+        // TODO: Implement this test
+        // let provider = create_test_misaligned_chunks_provider();
+        // let result = provider.chunk_to_record_batch(&[0, 0, 0]);
+        // 
+        // assert!(result.is_err());
+        // let error = result.unwrap_err();
+        // assert!(error.to_string().contains("chunk alignment"));
+    }
+
+    #[test]
+    fn test_multi_variable_record_batch_creation() {
+        // Test that RecordBatch creation works correctly for multiple variables
+        
+        // Expected behavior:
+        // Given variables: temperature(time, lat, lon), pressure(time, lat, lon)
+        // With shapes [2, 2, 2] and data:
+        // temperature = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
+        // pressure = [[[100.0, 101.0], [102.0, 103.0]], [[104.0, 105.0], [106.0, 107.0]]]
+        //
+        // Expected table rows:
+        // (time=0, lat=0, lon=0, temp=1.0, pressure=100.0)
+        // (time=0, lat=0, lon=1, temp=2.0, pressure=101.0)
+        // (time=0, lat=1, lon=0, temp=3.0, pressure=102.0)
+        // (time=0, lat=1, lon=1, temp=4.0, pressure=103.0)
+        // (time=1, lat=0, lon=0, temp=5.0, pressure=104.0)
+        // (time=1, lat=0, lon=1, temp=6.0, pressure=105.0)
+        // (time=1, lat=1, lon=0, temp=7.0, pressure=106.0)
+        // (time=1, lat=1, lon=1, temp=8.0, pressure=107.0)
+        
+        // TODO: Implement this test
+        // let provider = create_test_multi_variable_provider();
+        // let batch = provider.chunk_to_record_batch(&[0, 0, 0]).unwrap();
+        // 
+        // assert_eq!(batch.num_rows(), 8); // 2 * 2 * 2 = 8 rows
+        // assert_eq!(batch.schema().fields().len(), 5); // time, lat, lon, temp, pressure
+        // 
+        // // Test first row
+        // let time_array = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        // let lat_array = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        // let lon_array = batch.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+        // let temp_array = batch.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        // let pressure_array = batch.column(4).as_any().downcast_ref::<Float64Array>().unwrap();
+        // 
+        // assert_eq!(time_array.value(0), 0);
+        // assert_eq!(lat_array.value(0), 0);
+        // assert_eq!(lon_array.value(0), 0);
+        // assert_eq!(temp_array.value(0), 1.0);
+        // assert_eq!(pressure_array.value(0), 100.0);
+        // 
+        // // Test last row
+        // assert_eq!(time_array.value(7), 1);
+        // assert_eq!(lat_array.value(7), 1);
+        // assert_eq!(lon_array.value(7), 1);
+        // assert_eq!(temp_array.value(7), 8.0);
+        // assert_eq!(pressure_array.value(7), 107.0);
+    }
+
+    #[test]
+    fn test_multi_variable_with_mixed_data_types() {
+        // Test handling of multiple variables with different data types
+        
+        // Expected behavior:
+        // Given variables:
+        // - temperature: Float64
+        // - pressure: Float32
+        // - humidity: Int32
+        // - is_raining: Bool
+        //
+        // Should create a schema with appropriate data types for each column
+        
+        // TODO: Implement this test
+        // let provider = create_test_mixed_types_provider();
+        // let schema = provider.infer_schema().unwrap();
+        // 
+        // assert_eq!(schema.field_with_name("temperature").unwrap().data_type(), &DataType::Float64);
+        // assert_eq!(schema.field_with_name("pressure").unwrap().data_type(), &DataType::Float64); // f32 converted to f64
+        // assert_eq!(schema.field_with_name("humidity").unwrap().data_type(), &DataType::Int32);
+        // assert_eq!(schema.field_with_name("is_raining").unwrap().data_type(), &DataType::Boolean);
+    }
+
+    #[test]
+    fn test_coordinate_names_from_zarr_metadata() {
+        // Test that we can extract proper coordinate names from Zarr metadata
+        // instead of using generic dim_0, dim_1, etc.
+        
+        // Expected behavior:
+        // Given Zarr metadata with coordinate names: ["time", "latitude", "longitude"]
+        // Schema should use these names instead of dim_0, dim_1, dim_2
+        
+        // TODO: Implement this test
+        // let provider = create_test_named_coordinates_provider();
+        // let schema = provider.infer_schema().unwrap();
+        // 
+        // assert_eq!(schema.field(0).name(), "time");
+        // assert_eq!(schema.field(1).name(), "latitude");
+        // assert_eq!(schema.field(2).name(), "longitude");
+    }
+
+    #[test]
+    fn test_multi_variable_chunked_reading() {
+        // Test that we can read multiple variables chunk-by-chunk correctly
+        
+        // Expected behavior:
+        // Given a dataset with 4 chunks, reading chunk [1, 0] should return
+        // data from the correct spatial/temporal region for ALL variables
+        
+        // TODO: Implement this test
+        // let provider = create_test_chunked_multi_variable_provider();
+        // let batch = provider.chunk_to_record_batch(&[1, 0]).unwrap();
+        // 
+        // // Verify that coordinates reflect the correct chunk offset
+        // let time_array = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        // assert!(time_array.value(0) >= 10); // Assuming chunk 1 starts at time=10
+        // 
+        // // Verify that all variables have data for the same coordinates
+        // assert_eq!(batch.num_rows(), expected_chunk_size);
+        // for row in 0..batch.num_rows() {
+        //     // All variables should have non-null values for the same coordinates
+        //     assert!(!batch.column(3).is_null(row)); // temperature
+        //     assert!(!batch.column(4).is_null(row)); // pressure
+        // }
+    }
+
+    // Helper functions for creating test providers (to be implemented)
+    
+    // fn create_test_multi_variable_provider() -> ZarrTableProvider {
+    //     // Create a test provider with multiple variables having consistent dimensions
+    //     todo!("Implement test provider creation")
+    // }
+    
+    // fn create_test_inconsistent_dimensions_provider() -> ZarrTableProvider {
+    //     // Create a test provider with variables having inconsistent dimensions
+    //     todo!("Implement test provider creation")
+    // }
+    
+    // fn create_test_misaligned_chunks_provider() -> ZarrTableProvider {
+    //     // Create a test provider with misaligned chunks
+    //     todo!("Implement test provider creation")
+    // }
 }
