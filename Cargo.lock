@@ -3934,8 +3934,10 @@ dependencies = [
  "async-trait",
  "datafusion",
  "datafusion-ffi",
+ "futures",
  "pyo3",
  "pyo3-build-config 0.23.5",
+ "tokio",
  "zarrs",
 ]
 
