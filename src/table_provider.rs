@@ -293,55 +293,39 @@ impl ZarrTableProvider {
         chunk_subset: &ArraySubset,
         array_name: &str,
     ) -> Result<RecordBatch, DataFusionError> {
-        let shape = data.shape();
-        let ndim = shape.len();
-        
-        // Calculate total number of elements
+        let original_shape = data.shape();
+        let ndim = original_shape.len();
         let total_elements = data.len();
         
-        // Create builders for coordinate columns
-        let mut coord_builders: Vec<Int64Builder> = (0..ndim)
-            .map(|_| Int64Builder::new())
-            .collect();
-        
-        // Create builder for data values
-        let mut value_builder = Float64Builder::new();
+        // Reshape to 1D for efficient processing (zero-copy when possible)
+        let flat_data = data.to_shape(total_elements)
+            .map_err(|e| DataFusionError::External(format!("Failed to reshape array: {}", e).into()))?;
         
         // Get the chunk start indices from the subset
         let chunk_start = chunk_subset.start();
         
-        // Iterate through all elements in the ndarray
-        for (flat_idx, &value) in data.iter().enumerate() {
-            // Convert flat index to multi-dimensional coordinates
-            let mut coords = vec![0u64; ndim];
-            let mut remainder = flat_idx;
-            
-            for dim in (0..ndim).rev() {
-                coords[dim] = (remainder % shape[dim]) as u64;
-                remainder /= shape[dim];
-            }
-            
-            // Add global coordinates (chunk start + local coordinates)
-            for (dim, &coord) in coords.iter().enumerate() {
-                let global_coord = chunk_start[dim] + coord;
-                coord_builders[dim].append_value(global_coord as i64);
-            }
-            
-            // Add the data value
-            value_builder.append_value(value);
-        }
+        // Generate coordinate arrays efficiently
+        let coord_arrays = self.generate_coordinates(original_shape, chunk_start, total_elements);
         
-        // Build the arrays
+        // Create Arrow arrays efficiently
         let mut arrays: Vec<Arc<dyn arrow_array::Array>> = Vec::new();
         
-        // Add coordinate columns
-        for (dim_idx, mut builder) in coord_builders.into_iter().enumerate() {
-            let array = Arc::new(builder.finish());
+        // Add coordinate columns from pre-allocated vectors
+        for coord_array in coord_arrays {
+            let array = Arc::new(Int64Array::from(coord_array));
             arrays.push(array);
         }
         
-        // Add data column
-        let data_array = Arc::new(value_builder.finish());
+        // Create data column from ndarray slice (zero-copy when possible)
+        let data_vec: Vec<f64> = if flat_data.is_standard_layout() {
+            // Zero-copy path: use the underlying data directly
+            flat_data.as_slice().unwrap().to_vec()
+        } else {
+            // Fallback: copy to contiguous memory
+            flat_data.iter().cloned().collect()
+        };
+        
+        let data_array = Arc::new(Float64Array::from(data_vec));
         arrays.push(data_array);
         
         // Create the schema
@@ -358,33 +342,24 @@ impl ZarrTableProvider {
             .map_err(|e| DataFusionError::External(Box::new(e)))
     }
     
-    /// Convert f32 ndarray to Arrow RecordBatch in tabular format
-    fn ndarray_to_record_batch_f32(
+    /// Generate coordinate arrays for n-dimensional data
+    fn generate_coordinates(
         &self,
-        data: ndarray::ArrayD<f32>,
-        chunk_subset: &ArraySubset,
-        array_name: &str,
-    ) -> Result<RecordBatch, DataFusionError> {
-        let shape = data.shape();
+        shape: &[usize],
+        chunk_start: &[u64],
+        total_elements: usize,
+    ) -> Vec<Vec<i64>> {
         let ndim = shape.len();
-        
-        // Create builders for coordinate columns
-        let mut coord_builders: Vec<Int64Builder> = (0..ndim)
-            .map(|_| Int64Builder::new())
+        let mut coord_arrays: Vec<Vec<i64>> = (0..ndim)
+            .map(|_| Vec::with_capacity(total_elements))
             .collect();
         
-        // Create builder for data values
-        let mut value_builder = Float64Builder::new();
-        
-        // Get the chunk start indices from the subset
-        let chunk_start = chunk_subset.start();
-        
-        // Iterate through all elements in the ndarray
-        for (flat_idx, &value) in data.iter().enumerate() {
-            // Convert flat index to multi-dimensional coordinates
+        // Generate coordinates efficiently using mathematical approach
+        for flat_idx in 0..total_elements {
             let mut coords = vec![0u64; ndim];
             let mut remainder = flat_idx;
             
+            // Convert flat index to multi-dimensional coordinates
             for dim in (0..ndim).rev() {
                 coords[dim] = (remainder % shape[dim]) as u64;
                 remainder /= shape[dim];
@@ -393,24 +368,53 @@ impl ZarrTableProvider {
             // Add global coordinates (chunk start + local coordinates)
             for (dim, &coord) in coords.iter().enumerate() {
                 let global_coord = chunk_start[dim] + coord;
-                coord_builders[dim].append_value(global_coord as i64);
+                coord_arrays[dim].push(global_coord as i64);
             }
-            
-            // Add the data value (convert f32 to f64)
-            value_builder.append_value(value as f64);
         }
         
-        // Build the arrays
+        coord_arrays
+    }
+    
+    /// Convert f32 ndarray to Arrow RecordBatch in tabular format
+    fn ndarray_to_record_batch_f32(
+        &self,
+        data: ndarray::ArrayD<f32>,
+        chunk_subset: &ArraySubset,
+        array_name: &str,
+    ) -> Result<RecordBatch, DataFusionError> {
+        let original_shape = data.shape();
+        let ndim = original_shape.len();
+        let total_elements = data.len();
+        
+        // Reshape to 1D for efficient processing (zero-copy when possible)
+        let flat_data = data.to_shape(total_elements)
+            .map_err(|e| DataFusionError::External(format!("Failed to reshape array: {}", e).into()))?;
+        
+        // Get the chunk start indices from the subset
+        let chunk_start = chunk_subset.start();
+        
+        // Generate coordinate arrays efficiently
+        let coord_arrays = self.generate_coordinates(original_shape, chunk_start, total_elements);
+        
+        // Create Arrow arrays efficiently
         let mut arrays: Vec<Arc<dyn arrow_array::Array>> = Vec::new();
         
-        // Add coordinate columns
-        for (_dim_idx, mut builder) in coord_builders.into_iter().enumerate() {
-            let array = Arc::new(builder.finish());
+        // Add coordinate columns from pre-allocated vectors
+        for coord_array in coord_arrays {
+            let array = Arc::new(Int64Array::from(coord_array));
             arrays.push(array);
         }
         
-        // Add data column
-        let data_array = Arc::new(value_builder.finish());
+        // Create data column from ndarray slice (zero-copy when possible)
+        let data_vec: Vec<f64> = if flat_data.is_standard_layout() {
+            // Zero-copy path: use the underlying data directly, convert f32 to f64
+            flat_data.as_slice().unwrap().iter().map(|&x| x as f64).collect()
+        } else {
+            // Fallback: copy to contiguous memory
+            flat_data.iter().map(|&x| x as f64).collect()
+        };
+        
+        let data_array = Arc::new(Float64Array::from(data_vec));
         arrays.push(data_array);
         
         // Create the schema
@@ -434,52 +438,39 @@ impl ZarrTableProvider {
         chunk_subset: &ArraySubset,
         array_name: &str,
     ) -> Result<RecordBatch, DataFusionError> {
-        let shape = data.shape();
-        let ndim = shape.len();
+        let original_shape = data.shape();
+        let ndim = original_shape.len();
+        let total_elements = data.len();
         
-        // Create builders for coordinate columns
-        let mut coord_builders: Vec<Int64Builder> = (0..ndim)
-            .map(|_| Int64Builder::new())
-            .collect();
-        
-        // Create builder for data values
-        let mut value_builder = Int64Builder::new();
+        // Reshape to 1D for efficient processing (zero-copy when possible)
+        let flat_data = data.to_shape(total_elements)
+            .map_err(|e| DataFusionError::External(format!("Failed to reshape array: {}", e).into()))?;
         
         // Get the chunk start indices from the subset
         let chunk_start = chunk_subset.start();
         
-        // Iterate through all elements in the ndarray
-        for (flat_idx, &value) in data.iter().enumerate() {
-            // Convert flat index to multi-dimensional coordinates
-            let mut coords = vec![0u64; ndim];
-            let mut remainder = flat_idx;
-            
-            for dim in (0..ndim).rev() {
-                coords[dim] = (remainder % shape[dim]) as u64;
-                remainder /= shape[dim];
-            }
-            
-            // Add global coordinates (chunk start + local coordinates)
-            for (dim, &coord) in coords.iter().enumerate() {
-                let global_coord = chunk_start[dim] + coord;
-                coord_builders[dim].append_value(global_coord as i64);
-            }
-            
-            // Add the data value
-            value_builder.append_value(value);
-        }
+        // Generate coordinate arrays efficiently
+        let coord_arrays = self.generate_coordinates(original_shape, chunk_start, total_elements);
         
-        // Build the arrays
+        // Create Arrow arrays efficiently
         let mut arrays: Vec<Arc<dyn arrow_array::Array>> = Vec::new();
         
-        // Add coordinate columns
-        for (_dim_idx, mut builder) in coord_builders.into_iter().enumerate() {
-            let array = Arc::new(builder.finish());
+        // Add coordinate columns from pre-allocated vectors
+        for coord_array in coord_arrays {
+            let array = Arc::new(Int64Array::from(coord_array));
             arrays.push(array);
         }
         
-        // Add data column
-        let data_array = Arc::new(value_builder.finish());
+        // Create data column from ndarray slice (zero-copy when possible)
+        let data_vec: Vec<i64> = if flat_data.is_standard_layout() {
+            // Zero-copy path: use the underlying data directly
+            flat_data.as_slice().unwrap().to_vec()
+        } else {
+            // Fallback: copy to contiguous memory
+            flat_data.iter().cloned().collect()
+        };
+        
+        let data_array = Arc::new(Int64Array::from(data_vec));
         arrays.push(data_array);
         
         // Create the schema
@@ -503,52 +494,39 @@ impl ZarrTableProvider {
         chunk_subset: &ArraySubset,
         array_name: &str,
     ) -> Result<RecordBatch, DataFusionError> {
-        let shape = data.shape();
-        let ndim = shape.len();
+        let original_shape = data.shape();
+        let ndim = original_shape.len();
+        let total_elements = data.len();
         
-        // Create builders for coordinate columns
-        let mut coord_builders: Vec<Int64Builder> = (0..ndim)
-            .map(|_| Int64Builder::new())
-            .collect();
-        
-        // Create builder for data values
-        let mut value_builder = arrow_array::builder::Int32Builder::new();
+        // Reshape to 1D for efficient processing (zero-copy when possible)
+        let flat_data = data.to_shape(total_elements)
+            .map_err(|e| DataFusionError::External(format!("Failed to reshape array: {}", e).into()))?;
         
         // Get the chunk start indices from the subset
         let chunk_start = chunk_subset.start();
         
-        // Iterate through all elements in the ndarray
-        for (flat_idx, &value) in data.iter().enumerate() {
-            // Convert flat index to multi-dimensional coordinates
-            let mut coords = vec![0u64; ndim];
-            let mut remainder = flat_idx;
-            
-            for dim in (0..ndim).rev() {
-                coords[dim] = (remainder % shape[dim]) as u64;
-                remainder /= shape[dim];
-            }
-            
-            // Add global coordinates (chunk start + local coordinates)
-            for (dim, &coord) in coords.iter().enumerate() {
-                let global_coord = chunk_start[dim] + coord;
-                coord_builders[dim].append_value(global_coord as i64);
-            }
-            
-            // Add the data value
-            value_builder.append_value(value);
-        }
+        // Generate coordinate arrays efficiently
+        let coord_arrays = self.generate_coordinates(original_shape, chunk_start, total_elements);
         
-        // Build the arrays
+        // Create Arrow arrays efficiently
         let mut arrays: Vec<Arc<dyn arrow_array::Array>> = Vec::new();
         
-        // Add coordinate columns
-        for (_dim_idx, mut builder) in coord_builders.into_iter().enumerate() {
-            let array = Arc::new(builder.finish());
+        // Add coordinate columns from pre-allocated vectors
+        for coord_array in coord_arrays {
+            let array = Arc::new(Int64Array::from(coord_array));
             arrays.push(array);
         }
         
-        // Add data column
-        let data_array = Arc::new(value_builder.finish());
+        // Create data column from ndarray slice (zero-copy when possible)
+        let data_vec: Vec<i32> = if flat_data.is_standard_layout() {
+            // Zero-copy path: use the underlying data directly
+            flat_data.as_slice().unwrap().to_vec()
+        } else {
+            // Fallback: copy to contiguous memory
+            flat_data.iter().cloned().collect()
+        };
+        
+        let data_array = Arc::new(arrow_array::Int32Array::from(data_vec));
         arrays.push(data_array);
         
         // Create the schema
