@@ -24,6 +24,111 @@ use arrow_array::{Int64Array, Float64Array, BooleanArray, StringArray};
 use arrow_array::builder::{Int64Builder, Float64Builder, BooleanBuilder, StringBuilder};
 use std::collections::HashMap;
 
+/// Trait for types that can be converted to Arrow arrays with minimal copying
+trait ToArrowArray: Clone + Sized {
+    type ArrowArray: arrow_array::Array + 'static;
+    
+    /// Convert a flattened ndarray to an Arrow array with zero-copy when possible
+    fn to_arrow_array(
+        flat_data: &ndarray::ArrayBase<ndarray::CowRepr<'_, Self>, ndarray::Dim<[usize; 1]>>,
+    ) -> Vec<Self>;
+    
+    /// Get the Arrow DataType for this type
+    fn arrow_data_type() -> DataType;
+    
+    /// Create an Arrow array from a vector
+    fn from_vec(data: Vec<Self>) -> Arc<Self::ArrowArray>;
+}
+
+impl ToArrowArray for f64 {
+    type ArrowArray = Float64Array;
+    
+    fn to_arrow_array(
+        flat_data: &ndarray::ArrayBase<ndarray::CowRepr<'_, Self>, ndarray::Dim<[usize; 1]>>,
+    ) -> Vec<Self> {
+        if flat_data.is_standard_layout() {
+            flat_data.as_slice().unwrap().to_vec()
+        } else {
+            flat_data.iter().cloned().collect()
+        }
+    }
+    
+    fn arrow_data_type() -> DataType {
+        DataType::Float64
+    }
+    
+    fn from_vec(data: Vec<Self>) -> Arc<Self::ArrowArray> {
+        Arc::new(Float64Array::from(data))
+    }
+}
+
+impl ToArrowArray for f32 {
+    type ArrowArray = Float64Array;
+    
+    fn to_arrow_array(
+        flat_data: &ndarray::ArrayBase<ndarray::CowRepr<'_, Self>, ndarray::Dim<[usize; 1]>>,
+    ) -> Vec<Self> {
+        if flat_data.is_standard_layout() {
+            flat_data.as_slice().unwrap().to_vec()
+        } else {
+            flat_data.iter().cloned().collect()
+        }
+    }
+    
+    fn arrow_data_type() -> DataType {
+        DataType::Float64  // Convert f32 to f64 for consistency
+    }
+    
+    fn from_vec(data: Vec<Self>) -> Arc<Self::ArrowArray> {
+        let f64_data: Vec<f64> = data.iter().map(|&x| x as f64).collect();
+        Arc::new(Float64Array::from(f64_data))
+    }
+}
+
+impl ToArrowArray for i64 {
+    type ArrowArray = Int64Array;
+    
+    fn to_arrow_array(
+        flat_data: &ndarray::ArrayBase<ndarray::CowRepr<'_, Self>, ndarray::Dim<[usize; 1]>>,
+    ) -> Vec<Self> {
+        if flat_data.is_standard_layout() {
+            flat_data.as_slice().unwrap().to_vec()
+        } else {
+            flat_data.iter().cloned().collect()
+        }
+    }
+    
+    fn arrow_data_type() -> DataType {
+        DataType::Int64
+    }
+    
+    fn from_vec(data: Vec<Self>) -> Arc<Self::ArrowArray> {
+        Arc::new(Int64Array::from(data))
+    }
+}
+
+impl ToArrowArray for i32 {
+    type ArrowArray = arrow_array::Int32Array;
+    
+    fn to_arrow_array(
+        flat_data: &ndarray::ArrayBase<ndarray::CowRepr<'_, Self>, ndarray::Dim<[usize; 1]>>,
+    ) -> Vec<Self> {
+        if flat_data.is_standard_layout() {
+            flat_data.as_slice().unwrap().to_vec()
+        } else {
+            flat_data.iter().cloned().collect()
+        }
+    }
+    
+    fn arrow_data_type() -> DataType {
+        DataType::Int32
+    }
+    
+    fn from_vec(data: Vec<Self>) -> Arc<Self::ArrowArray> {
+        Arc::new(arrow_array::Int32Array::from(data))
+    }
+}
+
 
 /// A DataFusion TableProvider that reads from Zarr stores
 #[pyclass(name = "ZarrTableProvider", module = "zarrquet", subclass)]
@@ -258,88 +363,32 @@ impl ZarrTableProvider {
         let chunk_subset = array.chunk_subset(chunk_indices)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         
-        // Handle different data types
+        // Handle different data types using the generic implementation
         match array.data_type() {
             ZarrDataType::Float64 => {
                 let chunk_data = array.retrieve_chunk_ndarray::<f64>(chunk_indices)
                     .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                self.ndarray_to_record_batch_f64(chunk_data, &chunk_subset, array_name)
+                self.ndarray_to_record_batch(chunk_data, &chunk_subset, array_name)
             }
             ZarrDataType::Float32 => {
                 let chunk_data = array.retrieve_chunk_ndarray::<f32>(chunk_indices)
                     .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                self.ndarray_to_record_batch_f32(chunk_data, &chunk_subset, array_name)
+                self.ndarray_to_record_batch(chunk_data, &chunk_subset, array_name)
             }
             ZarrDataType::Int64 => {
                 let chunk_data = array.retrieve_chunk_ndarray::<i64>(chunk_indices)
                     .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                self.ndarray_to_record_batch_i64(chunk_data, &chunk_subset, array_name)
+                self.ndarray_to_record_batch(chunk_data, &chunk_subset, array_name)
             }
             ZarrDataType::Int32 => {
                 let chunk_data = array.retrieve_chunk_ndarray::<i32>(chunk_indices)
                     .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                self.ndarray_to_record_batch_i32(chunk_data, &chunk_subset, array_name)
+                self.ndarray_to_record_batch(chunk_data, &chunk_subset, array_name)
             }
             other => Err(DataFusionError::External(
                 format!("Unsupported zarr data type for chunk reading: {:?}", other).into()
             ))
         }
-    }
-    
-    /// Convert f64 ndarray to Arrow RecordBatch in tabular format
-    fn ndarray_to_record_batch_f64(
-        &self,
-        data: ndarray::ArrayD<f64>,
-        chunk_subset: &ArraySubset,
-        array_name: &str,
-    ) -> Result<RecordBatch, DataFusionError> {
-        let original_shape = data.shape();
-        let ndim = original_shape.len();
-        let total_elements = data.len();
-        
-        // Reshape to 1D for efficient processing (zero-copy when possible)
-        let flat_data = data.to_shape(total_elements)
-            .map_err(|e| DataFusionError::External(format!("Failed to reshape array: {}", e).into()))?;
-        
-        // Get the chunk start indices from the subset
-        let chunk_start = chunk_subset.start();
-        
-        // Generate coordinate arrays efficiently
-        let coord_arrays = self.generate_coordinates(original_shape, chunk_start, total_elements);
-        
-        // Create Arrow arrays efficiently
-        let mut arrays: Vec<Arc<dyn arrow_array::Array>> = Vec::new();
-        
-        // Add coordinate columns from pre-allocated vectors
-        for coord_array in coord_arrays {
-            let array = Arc::new(Int64Array::from(coord_array));
-            arrays.push(array);
-        }
-        
-        // Create data column from ndarray slice (zero-copy when possible)
-        let data_vec: Vec<f64> = if flat_data.is_standard_layout() {
-            // Zero-copy path: use the underlying data directly
-            flat_data.as_slice().unwrap().to_vec()
-        } else {
-            // Fallback: copy to contiguous memory
-            flat_data.iter().cloned().collect()
-        };
-        
-        let data_array = Arc::new(Float64Array::from(data_vec));
-        arrays.push(data_array);
-        
-        // Create the schema
-        let mut fields = Vec::new();
-        for dim_idx in 0..ndim {
-            fields.push(Field::new(format!("dim_{}", dim_idx), DataType::Int64, false));
-        }
-        fields.push(Field::new(array_name, DataType::Float64, true));
-        
-        let schema = Arc::new(Schema::new(fields));
-        
-        // Create the RecordBatch
-        RecordBatch::try_new(schema, arrays)
-            .map_err(|e| DataFusionError::External(Box::new(e)))
     }
     
     /// Generate coordinate arrays for n-dimensional data
@@ -375,13 +424,16 @@ impl ZarrTableProvider {
         coord_arrays
     }
     
-    /// Convert f32 ndarray to Arrow RecordBatch in tabular format
-    fn ndarray_to_record_batch_f32(
+    /// Generic method to convert ndarray to Arrow RecordBatch in tabular format
+    fn ndarray_to_record_batch<T>(
         &self,
-        data: ndarray::ArrayD<f32>,
+        data: ndarray::ArrayD<T>,
         chunk_subset: &ArraySubset,
         array_name: &str,
-    ) -> Result<RecordBatch, DataFusionError> {
+    ) -> Result<RecordBatch, DataFusionError>
+    where
+        T: ToArrowArray + Clone,
+    {
         let original_shape = data.shape();
         let ndim = original_shape.len();
         let total_elements = data.len();
@@ -406,135 +458,16 @@ impl ZarrTableProvider {
         }
         
         // Create data column from ndarray slice (zero-copy when possible)
-        let data_vec: Vec<f64> = if flat_data.is_standard_layout() {
-            // Zero-copy path: use the underlying data directly, convert f32 to f64
-            flat_data.as_slice().unwrap().iter().map(|&x| x as f64).collect()
-        } else {
-            // Fallback: copy to contiguous memory
-            flat_data.iter().map(|&x| x as f64).collect()
-        };
-        
-        let data_array = Arc::new(Float64Array::from(data_vec));
-        arrays.push(data_array);
+        let data_vec = T::to_arrow_array(&flat_data);
+        let data_array = T::from_vec(data_vec);
+        arrays.push(data_array as Arc<dyn arrow_array::Array>);
         
         // Create the schema
         let mut fields = Vec::new();
         for dim_idx in 0..ndim {
             fields.push(Field::new(format!("dim_{}", dim_idx), DataType::Int64, false));
         }
-        fields.push(Field::new(array_name, DataType::Float64, true));
-        
-        let schema = Arc::new(Schema::new(fields));
-        
-        // Create the RecordBatch
-        RecordBatch::try_new(schema, arrays)
-            .map_err(|e| DataFusionError::External(Box::new(e)))
-    }
-    
-    /// Convert i64 ndarray to Arrow RecordBatch in tabular format
-    fn ndarray_to_record_batch_i64(
-        &self,
-        data: ndarray::ArrayD<i64>,
-        chunk_subset: &ArraySubset,
-        array_name: &str,
-    ) -> Result<RecordBatch, DataFusionError> {
-        let original_shape = data.shape();
-        let ndim = original_shape.len();
-        let total_elements = data.len();
-        
-        // Reshape to 1D for efficient processing (zero-copy when possible)
-        let flat_data = data.to_shape(total_elements)
-            .map_err(|e| DataFusionError::External(format!("Failed to reshape array: {}", e).into()))?;
-        
-        // Get the chunk start indices from the subset
-        let chunk_start = chunk_subset.start();
-        
-        // Generate coordinate arrays efficiently
-        let coord_arrays = self.generate_coordinates(original_shape, chunk_start, total_elements);
-        
-        // Create Arrow arrays efficiently
-        let mut arrays: Vec<Arc<dyn arrow_array::Array>> = Vec::new();
-        
-        // Add coordinate columns from pre-allocated vectors
-        for coord_array in coord_arrays {
-            let array = Arc::new(Int64Array::from(coord_array));
-            arrays.push(array);
-        }
-        
-        // Create data column from ndarray slice (zero-copy when possible)
-        let data_vec: Vec<i64> = if flat_data.is_standard_layout() {
-            // Zero-copy path: use the underlying data directly
-            flat_data.as_slice().unwrap().to_vec()
-        } else {
-            // Fallback: copy to contiguous memory
-            flat_data.iter().cloned().collect()
-        };
-        
-        let data_array = Arc::new(Int64Array::from(data_vec));
-        arrays.push(data_array);
-        
-        // Create the schema
-        let mut fields = Vec::new();
-        for dim_idx in 0..ndim {
-            fields.push(Field::new(format!("dim_{}", dim_idx), DataType::Int64, false));
-        }
-        fields.push(Field::new(array_name, DataType::Int64, true));
-        
-        let schema = Arc::new(Schema::new(fields));
-        
-        // Create the RecordBatch
-        RecordBatch::try_new(schema, arrays)
-            .map_err(|e| DataFusionError::External(Box::new(e)))
-    }
-    
-    /// Convert i32 ndarray to Arrow RecordBatch in tabular format
-    fn ndarray_to_record_batch_i32(
-        &self,
-        data: ndarray::ArrayD<i32>,
-        chunk_subset: &ArraySubset,
-        array_name: &str,
-    ) -> Result<RecordBatch, DataFusionError> {
-        let original_shape = data.shape();
-        let ndim = original_shape.len();
-        let total_elements = data.len();
-        
-        // Reshape to 1D for efficient processing (zero-copy when possible)
-        let flat_data = data.to_shape(total_elements)
-            .map_err(|e| DataFusionError::External(format!("Failed to reshape array: {}", e).into()))?;
-        
-        // Get the chunk start indices from the subset
-        let chunk_start = chunk_subset.start();
-        
-        // Generate coordinate arrays efficiently
-        let coord_arrays = self.generate_coordinates(original_shape, chunk_start, total_elements);
-        
-        // Create Arrow arrays efficiently
-        let mut arrays: Vec<Arc<dyn arrow_array::Array>> = Vec::new();
-        
-        // Add coordinate columns from pre-allocated vectors
-        for coord_array in coord_arrays {
-            let array = Arc::new(Int64Array::from(coord_array));
-            arrays.push(array);
-        }
-        
-        // Create data column from ndarray slice (zero-copy when possible)
-        let data_vec: Vec<i32> = if flat_data.is_standard_layout() {
-            // Zero-copy path: use the underlying data directly
-            flat_data.as_slice().unwrap().to_vec()
-        } else {
-            // Fallback: copy to contiguous memory
-            flat_data.iter().cloned().collect()
-        };
-        
-        let data_array = Arc::new(arrow_array::Int32Array::from(data_vec));
-        arrays.push(data_array);
-        
-        // Create the schema
-        let mut fields = Vec::new();
-        for dim_idx in 0..ndim {
-            fields.push(Field::new(format!("dim_{}", dim_idx), DataType::Int64, false));
-        }
-        fields.push(Field::new(array_name, DataType::Int32, true));
+        fields.push(Field::new(array_name, T::arrow_data_type(), true));
         
         let schema = Arc::new(Schema::new(fields));
         
@@ -855,7 +788,7 @@ mod tests {
             .expect("Failed to create chunk subset");
         
         // Transform to RecordBatch
-        let result = provider.ndarray_to_record_batch_f64(data, &chunk_subset, "test_array");
+        let result = provider.ndarray_to_record_batch(data, &chunk_subset, "test_array");
         assert!(result.is_ok());
         
         let batch = result.unwrap();
