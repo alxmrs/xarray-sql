@@ -3,13 +3,24 @@ name = "zarrquet"
 version = "0.1.0"
 authors = ["Alex Merose"]
 edition = "2021"
+exclude = ["perf_tests/*"]
 
 [dependencies]
 zarrs = "0.21.2"
 pyo3 = "0.25.0"
+arrow = "55.2.0"
+datafusion = "48.0.1"
+datafusion-ffi = "48.0.1"
+arrow-array = { version = "55.0.0" }
+arrow-schema = { version = "55.0.0" }
+async-trait = "0.1.88"
+
+
+[build-dependencies]
+pyo3-build-config = "0.23"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
 name = "zarrquet"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
