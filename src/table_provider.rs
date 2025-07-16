@@ -20,9 +20,7 @@ use zarrs::array::Array;
 use zarrs::array::data_type::DataType as ZarrDataType;
 use zarrs::array_subset::ArraySubset;
 use zarrs::array::chunk_grid::ChunkGrid;
-use arrow_array::{Int64Array, Float64Array, BooleanArray, StringArray};
-use arrow_array::builder::{Int64Builder, Float64Builder, BooleanBuilder, StringBuilder};
-use std::collections::HashMap;
+use arrow_array::{Int64Array, Float64Array};
 
 /// Trait for types that can be converted to Arrow arrays with minimal copying
 trait ToArrowArray: Clone + Sized {
