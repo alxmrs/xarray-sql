@@ -20,6 +20,9 @@ use zarrs::array::Array;
 use zarrs::array::data_type::DataType as ZarrDataType;
 use zarrs::array_subset::ArraySubset;
 use zarrs::array::chunk_grid::ChunkGrid;
+use arrow_array::{Int64Array, Float64Array, BooleanArray, StringArray};
+use arrow_array::builder::{Int64Builder, Float64Builder, BooleanBuilder, StringBuilder};
+use std::collections::HashMap;
 
 
 /// A DataFusion TableProvider that reads from Zarr stores
@@ -216,6 +219,350 @@ impl ZarrTableProvider {
         }
         
         Err(DataFusionError::External("No arrays found in Zarr store".into()))
+    }
+    
+    /// Transform a Zarr chunk into a RecordBatch
+    pub fn chunk_to_record_batch(
+        &self,
+        chunk_indices: &[u64],
+    ) -> Result<RecordBatch, DataFusionError> {
+        let store = self.store.as_ref()
+            .ok_or_else(|| DataFusionError::External("No store available".into()))?;
+        
+        // Get the zarr group
+        let group = Group::open(store.clone(), "/")
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        
+        // Get the first array (for now, we'll support single arrays)
+        let children = group.children(false)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        
+        for child in &children {
+            let path_str = child.path().to_string();
+            if let Ok(array) = Array::open(store.clone(), &path_str) {
+                return self.array_chunk_to_record_batch(&array, chunk_indices, &path_str);
+            }
+        }
+        
+        Err(DataFusionError::External("No arrays found in Zarr store".into()))
+    }
+    
+    /// Convert a specific array chunk to RecordBatch
+    fn array_chunk_to_record_batch(
+        &self,
+        array: &Array<FilesystemStore>,
+        chunk_indices: &[u64],
+        array_name: &str,
+    ) -> Result<RecordBatch, DataFusionError> {
+        // Get the chunk subset
+        let chunk_subset = array.chunk_subset(chunk_indices)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        
+        // Handle different data types
+        match array.data_type() {
+            ZarrDataType::Float64 => {
+                let chunk_data = array.retrieve_chunk_ndarray::<f64>(chunk_indices)
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                self.ndarray_to_record_batch_f64(chunk_data, &chunk_subset, array_name)
+            }
+            ZarrDataType::Float32 => {
+                let chunk_data = array.retrieve_chunk_ndarray::<f32>(chunk_indices)
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                self.ndarray_to_record_batch_f32(chunk_data, &chunk_subset, array_name)
+            }
+            ZarrDataType::Int64 => {
+                let chunk_data = array.retrieve_chunk_ndarray::<i64>(chunk_indices)
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                self.ndarray_to_record_batch_i64(chunk_data, &chunk_subset, array_name)
+            }
+            ZarrDataType::Int32 => {
+                let chunk_data = array.retrieve_chunk_ndarray::<i32>(chunk_indices)
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                self.ndarray_to_record_batch_i32(chunk_data, &chunk_subset, array_name)
+            }
+            other => Err(DataFusionError::External(
+                format!("Unsupported zarr data type for chunk reading: {:?}", other).into()
+            ))
+        }
+    }
+    
+    /// Convert f64 ndarray to Arrow RecordBatch in tabular format
+    fn ndarray_to_record_batch_f64(
+        &self,
+        data: ndarray::ArrayD<f64>,
+        chunk_subset: &ArraySubset,
+        array_name: &str,
+    ) -> Result<RecordBatch, DataFusionError> {
+        let shape = data.shape();
+        let ndim = shape.len();
+        
+        // Calculate total number of elements
+        let total_elements = data.len();
+        
+        // Create builders for coordinate columns
+        let mut coord_builders: Vec<Int64Builder> = (0..ndim)
+            .map(|_| Int64Builder::new())
+            .collect();
+        
+        // Create builder for data values
+        let mut value_builder = Float64Builder::new();
+        
+        // Get the chunk start indices from the subset
+        let chunk_start = chunk_subset.start();
+        
+        // Iterate through all elements in the ndarray
+        for (flat_idx, &value) in data.iter().enumerate() {
+            // Convert flat index to multi-dimensional coordinates
+            let mut coords = vec![0u64; ndim];
+            let mut remainder = flat_idx;
+            
+            for dim in (0..ndim).rev() {
+                coords[dim] = (remainder % shape[dim]) as u64;
+                remainder /= shape[dim];
+            }
+            
+            // Add global coordinates (chunk start + local coordinates)
+            for (dim, &coord) in coords.iter().enumerate() {
+                let global_coord = chunk_start[dim] + coord;
+                coord_builders[dim].append_value(global_coord as i64);
+            }
+            
+            // Add the data value
+            value_builder.append_value(value);
+        }
+        
+        // Build the arrays
+        let mut arrays: Vec<Arc<dyn arrow_array::Array>> = Vec::new();
+        
+        // Add coordinate columns
+        for (dim_idx, mut builder) in coord_builders.into_iter().enumerate() {
+            let array = Arc::new(builder.finish());
+            arrays.push(array);
+        }
+        
+        // Add data column
+        let data_array = Arc::new(value_builder.finish());
+        arrays.push(data_array);
+        
+        // Create the schema
+        let mut fields = Vec::new();
+        for dim_idx in 0..ndim {
+            fields.push(Field::new(format!("dim_{}", dim_idx), DataType::Int64, false));
+        }
+        fields.push(Field::new(array_name, DataType::Float64, true));
+        
+        let schema = Arc::new(Schema::new(fields));
+        
+        // Create the RecordBatch
+        RecordBatch::try_new(schema, arrays)
+            .map_err(|e| DataFusionError::External(Box::new(e)))
+    }
+    
+    /// Convert f32 ndarray to Arrow RecordBatch in tabular format
+    fn ndarray_to_record_batch_f32(
+        &self,
+        data: ndarray::ArrayD<f32>,
+        chunk_subset: &ArraySubset,
+        array_name: &str,
+    ) -> Result<RecordBatch, DataFusionError> {
+        let shape = data.shape();
+        let ndim = shape.len();
+        
+        // Create builders for coordinate columns
+        let mut coord_builders: Vec<Int64Builder> = (0..ndim)
+            .map(|_| Int64Builder::new())
+            .collect();
+        
+        // Create builder for data values
+        let mut value_builder = Float64Builder::new();
+        
+        // Get the chunk start indices from the subset
+        let chunk_start = chunk_subset.start();
+        
+        // Iterate through all elements in the ndarray
+        for (flat_idx, &value) in data.iter().enumerate() {
+            // Convert flat index to multi-dimensional coordinates
+            let mut coords = vec![0u64; ndim];
+            let mut remainder = flat_idx;
+            
+            for dim in (0..ndim).rev() {
+                coords[dim] = (remainder % shape[dim]) as u64;
+                remainder /= shape[dim];
+            }
+            
+            // Add global coordinates (chunk start + local coordinates)
+            for (dim, &coord) in coords.iter().enumerate() {
+                let global_coord = chunk_start[dim] + coord;
+                coord_builders[dim].append_value(global_coord as i64);
+            }
+            
+            // Add the data value (convert f32 to f64)
+            value_builder.append_value(value as f64);
+        }
+        
+        // Build the arrays
+        let mut arrays: Vec<Arc<dyn arrow_array::Array>> = Vec::new();
+        
+        // Add coordinate columns
+        for (_dim_idx, mut builder) in coord_builders.into_iter().enumerate() {
+            let array = Arc::new(builder.finish());
+            arrays.push(array);
+        }
+        
+        // Add data column
+        let data_array = Arc::new(value_builder.finish());
+        arrays.push(data_array);
+        
+        // Create the schema
+        let mut fields = Vec::new();
+        for dim_idx in 0..ndim {
+            fields.push(Field::new(format!("dim_{}", dim_idx), DataType::Int64, false));
+        }
+        fields.push(Field::new(array_name, DataType::Float64, true));
+        
+        let schema = Arc::new(Schema::new(fields));
+        
+        // Create the RecordBatch
+        RecordBatch::try_new(schema, arrays)
+            .map_err(|e| DataFusionError::External(Box::new(e)))
+    }
+    
+    /// Convert i64 ndarray to Arrow RecordBatch in tabular format
+    fn ndarray_to_record_batch_i64(
+        &self,
+        data: ndarray::ArrayD<i64>,
+        chunk_subset: &ArraySubset,
+        array_name: &str,
+    ) -> Result<RecordBatch, DataFusionError> {
+        let shape = data.shape();
+        let ndim = shape.len();
+        
+        // Create builders for coordinate columns
+        let mut coord_builders: Vec<Int64Builder> = (0..ndim)
+            .map(|_| Int64Builder::new())
+            .collect();
+        
+        // Create builder for data values
+        let mut value_builder = Int64Builder::new();
+        
+        // Get the chunk start indices from the subset
+        let chunk_start = chunk_subset.start();
+        
+        // Iterate through all elements in the ndarray
+        for (flat_idx, &value) in data.iter().enumerate() {
+            // Convert flat index to multi-dimensional coordinates
+            let mut coords = vec![0u64; ndim];
+            let mut remainder = flat_idx;
+            
+            for dim in (0..ndim).rev() {
+                coords[dim] = (remainder % shape[dim]) as u64;
+                remainder /= shape[dim];
+            }
+            
+            // Add global coordinates (chunk start + local coordinates)
+            for (dim, &coord) in coords.iter().enumerate() {
+                let global_coord = chunk_start[dim] + coord;
+                coord_builders[dim].append_value(global_coord as i64);
+            }
+            
+            // Add the data value
+            value_builder.append_value(value);
+        }
+        
+        // Build the arrays
+        let mut arrays: Vec<Arc<dyn arrow_array::Array>> = Vec::new();
+        
+        // Add coordinate columns
+        for (_dim_idx, mut builder) in coord_builders.into_iter().enumerate() {
+            let array = Arc::new(builder.finish());
+            arrays.push(array);
+        }
+        
+        // Add data column
+        let data_array = Arc::new(value_builder.finish());
+        arrays.push(data_array);
+        
+        // Create the schema
+        let mut fields = Vec::new();
+        for dim_idx in 0..ndim {
+            fields.push(Field::new(format!("dim_{}", dim_idx), DataType::Int64, false));
+        }
+        fields.push(Field::new(array_name, DataType::Int64, true));
+        
+        let schema = Arc::new(Schema::new(fields));
+        
+        // Create the RecordBatch
+        RecordBatch::try_new(schema, arrays)
+            .map_err(|e| DataFusionError::External(Box::new(e)))
+    }
+    
+    /// Convert i32 ndarray to Arrow RecordBatch in tabular format
+    fn ndarray_to_record_batch_i32(
+        &self,
+        data: ndarray::ArrayD<i32>,
+        chunk_subset: &ArraySubset,
+        array_name: &str,
+    ) -> Result<RecordBatch, DataFusionError> {
+        let shape = data.shape();
+        let ndim = shape.len();
+        
+        // Create builders for coordinate columns
+        let mut coord_builders: Vec<Int64Builder> = (0..ndim)
+            .map(|_| Int64Builder::new())
+            .collect();
+        
+        // Create builder for data values
+        let mut value_builder = arrow_array::builder::Int32Builder::new();
+        
+        // Get the chunk start indices from the subset
+        let chunk_start = chunk_subset.start();
+        
+        // Iterate through all elements in the ndarray
+        for (flat_idx, &value) in data.iter().enumerate() {
+            // Convert flat index to multi-dimensional coordinates
+            let mut coords = vec![0u64; ndim];
+            let mut remainder = flat_idx;
+            
+            for dim in (0..ndim).rev() {
+                coords[dim] = (remainder % shape[dim]) as u64;
+                remainder /= shape[dim];
+            }
+            
+            // Add global coordinates (chunk start + local coordinates)
+            for (dim, &coord) in coords.iter().enumerate() {
+                let global_coord = chunk_start[dim] + coord;
+                coord_builders[dim].append_value(global_coord as i64);
+            }
+            
+            // Add the data value
+            value_builder.append_value(value);
+        }
+        
+        // Build the arrays
+        let mut arrays: Vec<Arc<dyn arrow_array::Array>> = Vec::new();
+        
+        // Add coordinate columns
+        for (_dim_idx, mut builder) in coord_builders.into_iter().enumerate() {
+            let array = Arc::new(builder.finish());
+            arrays.push(array);
+        }
+        
+        // Add data column
+        let data_array = Arc::new(value_builder.finish());
+        arrays.push(data_array);
+        
+        // Create the schema
+        let mut fields = Vec::new();
+        for dim_idx in 0..ndim {
+            fields.push(Field::new(format!("dim_{}", dim_idx), DataType::Int64, false));
+        }
+        fields.push(Field::new(array_name, DataType::Int32, true));
+        
+        let schema = Arc::new(Schema::new(fields));
+        
+        // Create the RecordBatch
+        RecordBatch::try_new(schema, arrays)
+            .map_err(|e| DataFusionError::External(Box::new(e)))
     }
 }
 
@@ -508,5 +855,77 @@ mod tests {
         // The execution plan should have empty schema for empty projection
         let execution_plan = scan_result.unwrap();
         assert_eq!(execution_plan.schema().fields().len(), 0);
+    }
+    
+    #[test]
+    fn test_ndarray_to_record_batch_transformation() {
+        use ndarray::ArrayD;
+        
+        // Create a test provider
+        let provider = ZarrTableProvider {
+            store_path: "test".to_string(),
+            store: None,
+        };
+        
+        // Create a simple 2D ndarray for testing
+        let data = ArrayD::from_shape_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        
+        // Create a mock chunk subset
+        let chunk_start = vec![0u64, 0u64];
+        let chunk_shape = vec![2u64, 3u64];
+        let chunk_subset = ArraySubset::new_with_start_shape(chunk_start, chunk_shape)
+            .expect("Failed to create chunk subset");
+        
+        // Transform to RecordBatch
+        let result = provider.ndarray_to_record_batch_f64(data, &chunk_subset, "test_array");
+        assert!(result.is_ok());
+        
+        let batch = result.unwrap();
+        
+        // Verify schema
+        let schema = batch.schema();
+        assert_eq!(schema.fields().len(), 3); // 2 coordinate dimensions + 1 data column
+        assert_eq!(schema.field(0).name(), "dim_0");
+        assert_eq!(schema.field(1).name(), "dim_1");
+        assert_eq!(schema.field(2).name(), "test_array");
+        
+        // Verify data types
+        assert_eq!(schema.field(0).data_type(), &DataType::Int64);
+        assert_eq!(schema.field(1).data_type(), &DataType::Int64);
+        assert_eq!(schema.field(2).data_type(), &DataType::Float64);
+        
+        // Verify number of rows (should be 2 * 3 = 6)
+        assert_eq!(batch.num_rows(), 6);
+        
+        // Verify some coordinate values
+        let dim_0_array = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let dim_1_array = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        let data_array = batch.column(2).as_any().downcast_ref::<Float64Array>().unwrap();
+        
+        // Check first row: coordinates (0, 0) with value 1.0
+        assert_eq!(dim_0_array.value(0), 0);
+        assert_eq!(dim_1_array.value(0), 0);
+        assert_eq!(data_array.value(0), 1.0);
+        
+        // Check last row: coordinates (1, 2) with value 6.0
+        assert_eq!(dim_0_array.value(5), 1);
+        assert_eq!(dim_1_array.value(5), 2);
+        assert_eq!(data_array.value(5), 6.0);
+    }
+    
+    #[test]
+    fn test_chunk_to_record_batch_with_no_store() {
+        // Test error handling when no store is available
+        let provider = ZarrTableProvider {
+            store_path: "test".to_string(),
+            store: None,
+        };
+        
+        let chunk_indices = vec![0u64, 0u64];
+        let result = provider.chunk_to_record_batch(&chunk_indices);
+        assert!(result.is_err());
+        
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("No store available"));
     }
 }

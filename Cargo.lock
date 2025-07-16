@@ -3935,6 +3935,7 @@ dependencies = [
  "datafusion",
  "datafusion-ffi",
  "futures",
+ "ndarray",
  "pyo3",
  "pyo3-build-config 0.23.5",
  "tokio",
