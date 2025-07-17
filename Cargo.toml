@@ -14,7 +14,7 @@ datafusion-ffi = "48.0.1"
 arrow-array = { version = "55.0.0" }
 arrow-schema = { version = "55.0.0" }
 async-trait = "0.1.88"
-tokio = { version = "1.0", features = ["rt", "macros"] }
+tokio = { version = "1.0", features = ["rt", "rt-multi-thread", "macros"] }
 futures = "0.3"
 ndarray = "0.16"
 
@@ -26,4 +26,16 @@ pyo3-build-config = "0.23"
 [lib]
 name = "zarrquet"
 crate-type = ["cdylib", "rlib"]
+
+[[example]]
+name = "test_predicate_pushdown"
+path = "examples/test_predicate_pushdown.rs"
+
+[[example]]
+name = "sql_integration_tests"
+path = "examples/sql_integration_tests.rs"
+
+[[example]]
+name = "test_dimensional_joins"
+path = "examples/test_dimensional_joins.rs"
 
