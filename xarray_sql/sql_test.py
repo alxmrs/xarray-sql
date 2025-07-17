@@ -2,13 +2,12 @@ import os
 import shutil
 import tempfile
 import unittest
-from unittest import TestCase
 
 import numpy as np
 import xarray as xr
 
 from . import XarrayContext
-from .df_test import DaskTestCase, create_large_dataset, rand_wx
+from .df_test import create_large_dataset, rand_wx
 
 # Try to import parameterized testing, fall back to basic if not available
 try:
