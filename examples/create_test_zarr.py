@@ -50,14 +50,14 @@ def create_multi_variable_zarr():
     print(ds)
     
     # Save as Zarr
-    zarr_path = './test_data/multi_var.zarr'
+    zarr_path = '../test_data/multi_var.zarr'
     
     # Remove existing directory if it exists
     if os.path.exists(zarr_path):
         shutil.rmtree(zarr_path)
     
     # Create parent directory
-    os.makedirs('./test_data', exist_ok=True)
+    os.makedirs('../test_data', exist_ok=True)
     
     # Save to Zarr format
     ds.to_zarr(zarr_path)
@@ -104,7 +104,7 @@ def create_inconsistent_zarr():
     }, coords={'time': time, 'lat': lat})
     
     # Save separately and then manually combine directory structure
-    zarr_path = './test_data/inconsistent.zarr'
+    zarr_path = '../test_data/inconsistent.zarr'
     
     if os.path.exists(zarr_path):
         shutil.rmtree(zarr_path)

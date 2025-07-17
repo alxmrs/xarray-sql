@@ -46,7 +46,7 @@ def create_weather_dataset():
         'altitude': altitude,
     })
     
-    zarr_path = './test_data/weather.zarr'
+    zarr_path = '../test_data/weather.zarr'
     if os.path.exists(zarr_path):
         shutil.rmtree(zarr_path)
     ds.to_zarr(zarr_path)
@@ -87,7 +87,7 @@ def create_ocean_dataset():
         'lon': lon,
     })
     
-    zarr_path = './test_data/ocean.zarr'
+    zarr_path = '../test_data/ocean.zarr'
     if os.path.exists(zarr_path):
         shutil.rmtree(zarr_path)
     ds.to_zarr(zarr_path)
@@ -119,7 +119,7 @@ def create_simple_timeseries():
         'station': station,
     })
     
-    zarr_path = './test_data/timeseries.zarr'
+    zarr_path = '../test_data/timeseries.zarr'
     if os.path.exists(zarr_path):
         shutil.rmtree(zarr_path)
     ds.to_zarr(zarr_path)
@@ -147,7 +147,7 @@ def create_single_dimension_dataset():
         'index': index,
     })
     
-    zarr_path = './test_data/single_dim.zarr'
+    zarr_path = '../test_data/single_dim.zarr'
     if os.path.exists(zarr_path):
         shutil.rmtree(zarr_path)
     ds.to_zarr(zarr_path)
@@ -197,7 +197,7 @@ def create_large_sparse_dataset():
         'period': period,
     })
     
-    zarr_path = './test_data/business.zarr'
+    zarr_path = '../test_data/business.zarr'
     if os.path.exists(zarr_path):
         shutil.rmtree(zarr_path)
     ds.to_zarr(zarr_path)
@@ -210,7 +210,7 @@ def create_large_sparse_dataset():
 if __name__ == "__main__":
     try:
         # Create test data directory
-        os.makedirs('./test_data', exist_ok=True)
+        os.makedirs('../test_data', exist_ok=True)
         
         print("🏗️  Creating diverse test datasets for SQL integration tests...\n")
         
