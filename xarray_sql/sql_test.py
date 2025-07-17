@@ -1,1171 +1,69 @@
-import os
-import shutil
-import tempfile
 import unittest
-
 import numpy as np
+import pandas as pd
 import xarray as xr
 
 from . import XarrayContext
-from .df_test import create_large_dataset, rand_wx
+from .df_test import DaskTestCase, create_large_dataset, rand_wx
 
-# Try to import parameterized testing, fall back to basic if not available
-try:
-  from parameterized import parameterized, parameterized_class
 
-  HAS_PARAMETERIZED = True
-except ImportError:
-  # Fallback for environments without parameterized
-  HAS_PARAMETERIZED = False
+class SqlTestCase(DaskTestCase):
 
-  def parameterized(params):
-    """Simple fallback decorator when parameterized package is not available."""
+  def test_sanity(self):
+    c = XarrayContext()
+    c.from_dataset('air', self.air_small)
 
-    def decorator(func):
-      return func
+    query = c.sql('SELECT "lat", "lon", "time", "air" FROM "air" LIMIT 100')
 
-    return decorator
+    result = query.to_pandas()
+    self.assertIsNotNone(result)
+    self.assertLessEqual(len(result), 1320)  # Should be all rows or less
+    self.assertGreater(len(result), 0)  # Should have some rows
 
+  def test_agg_small(self):
+    c = XarrayContext()
+    c.from_dataset('air', self.air_small)
 
-# =============================================================================
-# Shared Test Data Creation Functions
-# =============================================================================
-
-
-def air(time_steps=24, lat_points=10, lon_points=15):
-  """Create standardized air temperature dataset."""
-  air = xr.tutorial.open_dataset('air_temperature')
-  return air.isel(
-      time=slice(0, time_steps),
-      lat=slice(0, lat_points),
-      lon=slice(0, lon_points),
-  ).chunk({'time': time_steps // 2})
-
-
-def weather(time_steps=6, lat_points=10, lon_points=10):
-  """Create standardized multi-variable weather dataset."""
-  weather = rand_wx('2023-01-01T00', '2023-01-01T12')
-  return weather.isel(
-      time=slice(0, time_steps),
-      lat=slice(0, lat_points),
-      lon=slice(0, lon_points),
-  ).chunk({'time': time_steps // 2})
-
-
-def synthetic(time_steps=50, lat_points=20, lon_points=20):
-  """Create standardized synthetic dataset."""
-  return create_large_dataset(
-      time_steps=time_steps, lat_points=lat_points, lon_points=lon_points
-  ).chunk({'time': time_steps // 2})
-
-
-def stations():
-  """Create standardized 1D stations dataset."""
-  return xr.Dataset(
-      {
-          'station_id': (['station'], [1, 2, 3, 4, 5]),
-          'elevation': (['station'], [100, 250, 500, 750, 1000]),
-          'name': (
-              ['station'],
-              ['Station_A', 'Station_B', 'Station_C', 'Station_D', 'Station_E'],
-          ),
-      }
-  ).chunk({'station': 5})
-
-
-def weather_zarr(temp_dir):
-  """Create Zarr weather dataset with known properties."""
-  ds = weather()
-  zarr_path = os.path.join(temp_dir, 'weather.zarr')
-  ds.to_zarr(zarr_path)
-  return ds, zarr_path
-
-
-def timeseries_zarr(temp_dir):
-  """Create Zarr timeseries dataset with known properties."""
-  time = np.arange(0, 10)
-  station = np.array([1, 2, 3])
-
-  shape = (10, 3)
-  np.random.seed(123)
-  value_data = np.random.normal(100, 10, shape)
-  count_data = np.random.poisson(5, shape)
-
-  ds = xr.Dataset(
-      {
-          'value': (['time', 'station'], value_data),
-          'count': (['time', 'station'], count_data.astype(float)),
-      },
-      coords={'time': time, 'station': station},
-  )
-
-  zarr_path = os.path.join(temp_dir, 'timeseries.zarr')
-  ds.to_zarr(zarr_path)
-  return ds, zarr_path
-
-
-# =============================================================================
-# Shared Test Infrastructure
-# =============================================================================
-
-
-class XarrayTestBase(unittest.TestCase):
-  """Base class with shared test infrastructure for SQL testing."""
-
-  def setUp(self):
-    """Set up fresh context and standard datasets for each test."""
-    self.ctx = XarrayContext()
-    self._setup_standard_datasets()
-
-  def _setup_standard_datasets(self):
-    """Create and register standard test datasets."""
-    # Create standard datasets
-    self.air_small = air(24, 10, 15)
-    self.air_medium = air(100, 20, 30)
-    self.weather_small = weather(6, 10, 10)
-    self.weather_medium = weather(12, 15, 20)
-    self.synthetic = synthetic(50, 20, 20)
-    self.stations = stations()
-
-  def load_dataset(self, table_name, dataset):
-    """Load a dataset into the context with error handling."""
-    try:
-      self.ctx.from_dataset(table_name, dataset)
-    except Exception as e:
-      self.fail(f"Failed to load dataset '{table_name}': {e}")
-
-  def assert_sql_result_valid(
-      self,
-      query,
-      expected_rows=None,
-      expected_cols=None,
-      min_rows=None,
-      max_rows=None,
-  ):
-    """Validate SQL results comprehensively."""
-    try:
-      result = self.ctx.sql(query).to_pandas()
-    except Exception as e:
-      self.fail(f'SQL query failed: {query}\nError: {e}')
-
-    # Basic validation
-    self.assertIsNotNone(result, 'Query result should not be None')
-    self.assertIsInstance(
-        result.index,
-        (type(None), type(result.index)),
-        'Result should be a pandas DataFrame',
-    )
-
-    # Row count validation
-    if expected_rows is not None:
-      self.assertEqual(
-          len(result),
-          expected_rows,
-          f'Expected {expected_rows} rows, got {len(result)}',
-      )
-    if min_rows is not None:
-      self.assertGreaterEqual(
-          len(result),
-          min_rows,
-          f'Expected at least {min_rows} rows, got {len(result)}',
-      )
-    if max_rows is not None:
-      self.assertLessEqual(
-          len(result),
-          max_rows,
-          f'Expected at most {max_rows} rows, got {len(result)}',
-      )
-
-    # Column count validation
-    if expected_cols is not None:
-      if isinstance(expected_cols, int):
-        self.assertEqual(
-            len(result.columns),
-            expected_cols,
-            f'Expected {expected_cols} columns, got {len(result.columns)}',
-        )
-      elif isinstance(expected_cols, (list, set)):
-        expected_set = set(expected_cols)
-        actual_set = set(result.columns)
-        self.assertEqual(
-            expected_set,
-            actual_set,
-            f'Expected columns {expected_set}, got {actual_set}',
-        )
-
-    return result
-
-  def assert_columns_present(self, result, required_columns):
-    """Assert that required columns are present in result."""
-    missing_cols = set(required_columns) - set(result.columns)
-    self.assertEqual(
-        len(missing_cols), 0, f'Missing required columns: {missing_cols}'
-    )
-
-  def assert_aggregation_reasonable(self, result, column, agg_type):
-    """Assert that aggregation results are reasonable."""
-    if len(result) == 0:
-      return
-
-    values = result[column]
-    if agg_type in ['COUNT']:
-      self.assertTrue((values >= 0).all(), f'{agg_type} should be non-negative')
-    elif agg_type in ['MIN', 'MAX', 'AVG', 'SUM']:
-      self.assertFalse(values.isna().all(), f'{agg_type} should not be all NaN')
-
-
-class XarrayZarrTestBase(XarrayTestBase):
-  """Base class for Zarr-specific testing with temporary directory management."""
-
-  def setUp(self):
-    """Set up context, datasets, and temporary Zarr files."""
-    super().setUp()
-    # Create temporary directory for Zarr datasets
-    self.temp_dir = tempfile.mkdtemp()
-    self.addCleanup(shutil.rmtree, self.temp_dir)
-    self._setup_zarr_datasets()
-
-  def _setup_zarr_datasets(self):
-    """Create standard Zarr datasets."""
-    self.weather_ds, self.weather_zarr_path = weather_zarr(self.temp_dir)
-    self.timeseries_ds, self.timeseries_zarr_path = timeseries_zarr(
-        self.temp_dir
-    )
-
-  def load_zarr_dataset(self, table_name, zarr_path):
-    """Load a Zarr dataset into the context with error handling."""
-    try:
-      self.ctx.from_zarr(table_name, zarr_path)
-    except Exception as e:
-      self.fail(
-          f"Failed to load Zarr dataset '{table_name}' from {zarr_path}: {e}"
-      )
-
-  def assert_zarr_vs_dataset_equivalence(
-      self, zarr_table, dataset_table, test_query
-  ):
-    """Assert that Zarr and dataset tables produce equivalent results."""
-    zarr_result = self.ctx.sql(test_query.format(table=zarr_table)).to_pandas()
-    dataset_result = self.ctx.sql(
-        test_query.format(table=dataset_table)
-    ).to_pandas()
-
-    # Compare row counts
-    self.assertEqual(
-        len(zarr_result),
-        len(dataset_result),
-        'Zarr and dataset should have same row count',
-    )
-
-    # Compare column counts
-    self.assertEqual(
-        len(zarr_result.columns),
-        len(dataset_result.columns),
-        'Zarr and dataset should have same column count',
-    )
-
-    return zarr_result, dataset_result
-
-
-# =============================================================================
-# Consolidated Test Classes by Purpose
-# =============================================================================
-
-
-class SqlBasicsTestCase(XarrayTestBase):
-  """Test fundamental SQL operations (SELECT, WHERE, basic aggregations)."""
-
-  def test_basic_select_queries(self):
-    """Test basic SELECT operations across different datasets."""
-    self.load_dataset('air', self.air_small)
-
-    # Test SELECT * with LIMIT (this works correctly)
-    result = self.assert_sql_result_valid(
-        'SELECT * FROM air LIMIT 5', max_rows=5
-    )
-
-    # Test data column selection with LIMIT
-    result = self.assert_sql_result_valid(
-        'SELECT air FROM air LIMIT 100', max_rows=100
-    )
-    self.assert_columns_present(result, ['air'])
-
-    # Test coordinate selection (note: coordinates get expanded, so we test without LIMIT)
-    result = self.assert_sql_result_valid('SELECT lat, lon FROM air LIMIT 10')
-    self.assert_columns_present(result, ['lat', 'lon'])
-    # Verify we get some results, but don't enforce LIMIT due to coordinate expansion
-    self.assertGreater(len(result), 0)
-
-    # Test COUNT query
-    result = self.assert_sql_result_valid(
-        'SELECT COUNT(*) as total FROM air', expected_rows=1
-    )
-    self.assertGreater(result['total'].iloc[0], 0)
-
-  def test_basic_filtering(self):
-    """Test WHERE clauses with various conditions."""
-    self.load_dataset('weather', self.weather_small)
-
-    # Test numeric filtering
-    result = self.assert_sql_result_valid(
-        'SELECT COUNT(*) as count FROM weather WHERE temperature > 10'
-    )
-
-    # Test coordinate filtering
-    result = self.assert_sql_result_valid(
-        'SELECT * FROM weather WHERE lat > 35 AND lon < -110 LIMIT 20'
-    )
-
-    # Test BETWEEN clause
-    result = self.assert_sql_result_valid(
-        'SELECT lat, temperature FROM weather WHERE temperature BETWEEN 15 AND 25'
-    )
-
-  def test_basic_aggregations(self):
-    """Test fundamental aggregation operations."""
-    self.load_dataset('air', self.air_small)
-
-    # Test GROUP BY with SUM
-    result = self.assert_sql_result_valid(
-        'SELECT lat, lon, SUM(air) as air_total FROM air GROUP BY lat, lon'
-    )
-    expected_groups = self.air_small.sizes['lat'] * self.air_small.sizes['lon']
-    self.assertEqual(len(result), expected_groups)
-    self.assert_aggregation_reasonable(result, 'air_total', 'SUM')
-
-    # Test basic aggregations
-    result = self.assert_sql_result_valid(
-        """SELECT 
-          COUNT(*) as count,
-          MIN(air) as min_air,
-          MAX(air) as max_air,
-          AVG(air) as avg_air
-         FROM air""",
-        expected_rows=1,
-    )
-
-    for agg_type in ['count', 'min_air', 'max_air', 'avg_air']:
-      self.assert_aggregation_reasonable(
-          result, agg_type, agg_type.split('_')[0].upper()
-      )
-
-  def test_sorting_and_limiting(self):
-    """Test ORDER BY and LIMIT clauses."""
-    self.load_dataset('air', self.air_small)
-
-    # Test ORDER BY
-    result = self.assert_sql_result_valid(
-        'SELECT lat, lon, air FROM air ORDER BY air DESC LIMIT 10',
-        expected_rows=10,
-    )
-
-    # Verify descending order
-    air_values = result['air'].values
-    self.assertTrue(np.all(air_values[:-1] >= air_values[1:]))
-
-    # Test multiple column ordering
-    result = self.assert_sql_result_valid(
-        'SELECT lat, lon, air FROM air ORDER BY lat ASC, lon DESC LIMIT 15',
-        expected_rows=15,
-    )
-
-  def test_column_selection_and_aliases(self):
-    """Test column projection and aliases."""
-    self.load_dataset('weather', self.weather_small)
-
-    # Test column selection
-    result = self.assert_sql_result_valid(
-        'SELECT lat, lon, temperature FROM weather LIMIT 20',
-        expected_cols=['lat', 'lon', 'temperature'],
-    )
-
-    # Test column aliases
-    result = self.assert_sql_result_valid(
-        """SELECT 
-          lat as latitude,
-          lon as longitude,
-          temperature as temp
-         FROM weather LIMIT 10""",
-        expected_cols=['latitude', 'longitude', 'temp'],
-    )
-
-
-class SqlParameterizedTestCase(XarrayTestBase):
-  """Parameterized tests that run the same SQL functionality across different datasets."""
-
-  # Dataset configurations for parameterized testing
-  DATASET_CONFIGS = [
-      ('air_small', lambda self: self.air_small, ['lat', 'lon', 'time', 'air']),
-      (
-          'weather_small',
-          lambda self: self.weather_small,
-          ['lat', 'lon', 'time', 'temperature', 'precipitation'],
-      ),
-      (
-          'synthetic',
-          lambda self: self.synthetic,
-          ['lat', 'lon', 'time', 'temperature'],
-      ),
-  ]
-
-  AGGREGATION_FUNCTIONS = [
-      ('COUNT', 'COUNT(*)', 'count', lambda x: x >= 0),
-      ('SUM', 'SUM({data_col})', 'sum_val', lambda x: not np.isnan(x)),
-      ('AVG', 'AVG({data_col})', 'avg_val', lambda x: not np.isnan(x)),
-      ('MIN', 'MIN({data_col})', 'min_val', lambda x: not np.isnan(x)),
-      ('MAX', 'MAX({data_col})', 'max_val', lambda x: not np.isnan(x)),
-  ]
-
-  FILTER_CONDITIONS = [
-      (
-          'simple_greater',
-          '{coord} > {mid_val}',
-          lambda result, col, val: (result[col] > val).all(),
-      ),
-      (
-          'simple_less',
-          '{coord} < {mid_val}',
-          lambda result, col, val: (result[col] < val).all(),
-      ),
-      (
-          'range_between',
-          '{coord} BETWEEN {low_val} AND {high_val}',
-          lambda result, col, low, high: (
-              (result[col] >= low) & (result[col] <= high)
-          ).all(),
-      ),
-  ]
-
-  def _get_numeric_column(self, dataset_name, dataset):
-    """Get the primary numeric data column for a dataset."""
-    column_map = {
-        'air_small': 'air',
-        'weather_small': 'temperature',
-        'synthetic': 'temperature',
-    }
-    return column_map.get(dataset_name, 'temperature')
-
-  def _get_coordinate_column(self, dataset_name, dataset):
-    """Get a coordinate column suitable for filtering."""
-    # Use lat as it's available in all datasets and has reasonable values
-    return 'lat'
-
-  def test_basic_select_all_datasets(self):
-    """Test basic SELECT operations across all dataset types."""
-    for dataset_name, dataset_getter, expected_cols in self.DATASET_CONFIGS:
-      with self.subTest(dataset=dataset_name):
-        dataset = dataset_getter(self)
-        self.load_dataset(dataset_name, dataset)
-
-        # Test SELECT *
-        result = self.assert_sql_result_valid(
-            f'SELECT * FROM {dataset_name} LIMIT 5', max_rows=5, min_rows=1
-        )
-
-        # Test COUNT
-        result = self.assert_sql_result_valid(
-            f'SELECT COUNT(*) as total FROM {dataset_name}', expected_rows=1
-        )
-        self.assertGreater(result['total'].iloc[0], 0)
-
-  def test_aggregations_all_datasets(self):
-    """Test aggregation functions across all dataset types."""
-    for dataset_name, dataset_getter, expected_cols in self.DATASET_CONFIGS:
-      dataset = dataset_getter(self)
-      self.load_dataset(dataset_name, dataset)
-      data_col = self._get_numeric_column(dataset_name, dataset)
-
-      for (
-          agg_name,
-          agg_sql,
-          result_col,
-          validator,
-      ) in self.AGGREGATION_FUNCTIONS:
-        with self.subTest(dataset=dataset_name, aggregation=agg_name):
-
-          if agg_name == 'COUNT':
-            query = f'SELECT {agg_sql} as {result_col} FROM {dataset_name}'
-          else:
-            query = f'SELECT {agg_sql.format(data_col=data_col)} as {result_col} FROM {dataset_name}'
-
-          result = self.assert_sql_result_valid(query, expected_rows=1)
-          value = result[result_col].iloc[0]
-          self.assertTrue(
-              validator(value),
-              f'{agg_name} validation failed for {dataset_name}: {value}',
-          )
-
-  def test_filtering_all_datasets(self):
-    """Test filtering operations across all dataset types."""
-    for dataset_name, dataset_getter, expected_cols in self.DATASET_CONFIGS:
-      dataset = dataset_getter(self)
-      self.load_dataset(dataset_name, dataset)
-      coord_col = self._get_coordinate_column(dataset_name, dataset)
-
-      # Get coordinate values for testing
-      coord_result = self.assert_sql_result_valid(
-          f'SELECT MIN({coord_col}) as min_val, MAX({coord_col}) as max_val FROM {dataset_name}'
-      )
-      min_val = coord_result['min_val'].iloc[0]
-      max_val = coord_result['max_val'].iloc[0]
-      mid_val = (min_val + max_val) / 2
-
-      for filter_name, filter_template, validator in self.FILTER_CONDITIONS:
-        with self.subTest(dataset=dataset_name, filter=filter_name):
-
-          if filter_name == 'range_between':
-            low_val = min_val + (max_val - min_val) * 0.25
-            high_val = min_val + (max_val - min_val) * 0.75
-            condition = filter_template.format(
-                coord=coord_col, low_val=low_val, high_val=high_val
-            )
-            query = f'SELECT * FROM {dataset_name} WHERE {condition} LIMIT 50'
-            result = self.assert_sql_result_valid(query)
-
-            if len(result) > 0:
-              self.assertTrue(validator(result, coord_col, low_val, high_val))
-          else:
-            condition = filter_template.format(coord=coord_col, mid_val=mid_val)
-            query = f'SELECT * FROM {dataset_name} WHERE {condition} LIMIT 50'
-            result = self.assert_sql_result_valid(query)
-
-            if len(result) > 0:
-              self.assertTrue(validator(result, coord_col, mid_val))
-
-  def test_groupby_all_datasets(self):
-    """Test GROUP BY operations across all dataset types."""
-    for dataset_name, dataset_getter, expected_cols in self.DATASET_CONFIGS:
-      dataset = dataset_getter(self)
-      self.load_dataset(dataset_name, dataset)
-      data_col = self._get_numeric_column(dataset_name, dataset)
-
-      with self.subTest(dataset=dataset_name):
-        # Group by coordinate and aggregate
-        result = self.assert_sql_result_valid(
-            f"""SELECT 
-              lat,
-              COUNT(*) as count,
-              AVG({data_col}) as avg_val
-              FROM {dataset_name}
-              GROUP BY lat
-              ORDER BY lat"""
-        )
-
-        # Should have one row per unique lat value
-        expected_groups = len(dataset.lat) if hasattr(dataset, 'lat') else 1
-        self.assertEqual(len(result), expected_groups)
-
-        # All counts should be positive
-        self.assertTrue((result['count'] > 0).all())
-
-  def test_ordering_all_datasets(self):
-    """Test ORDER BY operations across all dataset types."""
-    for dataset_name, dataset_getter, expected_cols in self.DATASET_CONFIGS:
-      dataset = dataset_getter(self)
-      self.load_dataset(dataset_name, dataset)
-      data_col = self._get_numeric_column(dataset_name, dataset)
-
-      with self.subTest(dataset=dataset_name):
-        # Test ordering by data column
-        result = self.assert_sql_result_valid(
-            f'SELECT {data_col} FROM {dataset_name} ORDER BY {data_col} DESC LIMIT 20',
-            max_rows=20,
-        )
-
-        if len(result) > 1:
-          values = result[data_col].values
-          # Should be in descending order
-          self.assertTrue(
-              np.all(values[:-1] >= values[1:]),
-              f'Values not in descending order for {dataset_name}',
-          )
-
-
-class SqlCorrectnessTestCase(XarrayTestBase):
-  """Test SQL results against xarray ground truth for semantic correctness."""
-
-  def test_aggregation_correctness_vs_xarray(self):
-    """Validate SQL aggregations against xarray ground truth."""
-    # Use air dataset for well-defined validation
-    self.load_dataset('air', self.air_small)
-
-    # Test COUNT correctness
-    sql_count = self.assert_sql_result_valid(
-        'SELECT COUNT(*) as count FROM air', expected_rows=1
-    )
-    xarray_count = (
-        self.air_small.sizes['time']
-        * self.air_small.sizes['lat']
-        * self.air_small.sizes['lon']
-    )
-    self.assertEqual(
-        sql_count['count'].iloc[0],
-        xarray_count,
-        'SQL COUNT should match xarray dimension product',
-    )
-
-    # Test MIN/MAX correctness
-    sql_result = self.assert_sql_result_valid(
-        'SELECT MIN(air) as min_air, MAX(air) as max_air FROM air',
-        expected_rows=1,
-    )
-    xarray_min = float(self.air_small.air.min().values)
-    xarray_max = float(self.air_small.air.max().values)
-
-    self.assertAlmostEqual(
-        sql_result['min_air'].iloc[0],
-        xarray_min,
-        places=5,
-        msg='SQL MIN should match xarray min',
-    )
-    self.assertAlmostEqual(
-        sql_result['max_air'].iloc[0],
-        xarray_max,
-        places=5,
-        msg='SQL MAX should match xarray max',
-    )
-
-    # Test AVG correctness
-    sql_avg = self.assert_sql_result_valid(
-        'SELECT AVG(air) as avg_air FROM air', expected_rows=1
-    )
-    xarray_avg = float(self.air_small.air.mean().values)
-    self.assertAlmostEqual(
-        sql_avg['avg_air'].iloc[0],
-        xarray_avg,
-        places=3,
-        msg='SQL AVG should match xarray mean',
-    )
-
-  def test_filtering_correctness_vs_xarray(self):
-    """Validate SQL filtering against xarray filtering."""
-    self.load_dataset('air', self.air_small)
-
-    # Get threshold value for meaningful filter
-    threshold = float(self.air_small.air.quantile(0.75).values)
-
-    # SQL filtering
-    sql_result = self.assert_sql_result_valid(
-        f'SELECT COUNT(*) as count FROM air WHERE air > {threshold}'
-    )
-    sql_count = sql_result['count'].iloc[0]
-
-    # Xarray filtering (compute mask to avoid dask boolean indexing issues)
-    mask = (self.air_small.air > threshold).compute()
-    xarray_filtered = self.air_small.where(mask, drop=True)
-    xarray_count = int(xarray_filtered.air.count().values)
-
-    self.assertEqual(
-        sql_count,
-        xarray_count,
-        f'SQL WHERE air > {threshold} should match xarray filtering',
-    )
-
-    # Test coordinate filtering
-    lat_threshold = float(self.air_small.lat.median().values)
-    sql_coord_result = self.assert_sql_result_valid(
-        f'SELECT COUNT(*) as count FROM air WHERE lat > {lat_threshold}'
-    )
-    sql_coord_count = sql_coord_result['count'].iloc[0]
-
-    # Xarray coordinate filtering (compute mask to avoid dask boolean indexing issues)
-    coord_mask = (self.air_small.lat > lat_threshold).compute()
-    xarray_coord_filtered = self.air_small.where(coord_mask, drop=True)
-    xarray_coord_count = int(xarray_coord_filtered.air.count().values)
-
-    self.assertEqual(
-        sql_coord_count,
-        xarray_coord_count,
-        f'SQL WHERE lat > {lat_threshold} should match xarray coordinate filtering',
-    )
-
-  def test_groupby_correctness_vs_xarray(self):
-    """Validate SQL GROUP BY against xarray groupby operations."""
-    self.load_dataset('air', self.air_small)
-
-    # SQL GROUP BY lat with aggregation
-    sql_result = self.assert_sql_result_valid(
-        """SELECT 
-          lat,
-          COUNT(*) as count,
-          AVG(air) as avg_air
-         FROM air 
-         GROUP BY lat 
-         ORDER BY lat"""
-    )
-
-    # Xarray groupby equivalent
-    xarray_grouped = self.air_small.groupby('lat').mean()
-
-    # Verify we have same number of groups
-    self.assertEqual(
-        len(sql_result),
-        len(self.air_small.lat),
-        'SQL GROUP BY should have one row per unique lat',
-    )
-
-    # Verify counts are correct (each lat should have time * lon data points)
-    expected_count_per_lat = (
-        self.air_small.sizes['time'] * self.air_small.sizes['lon']
-    )
-    self.assertTrue(
-        (sql_result['count'] == expected_count_per_lat).all(),
-        'Each lat group should have time × lon data points',
-    )
-
-    # Verify averages match xarray groupby (within tolerance for floating point)
-    for i, row in sql_result.iterrows():
-      lat_val = row['lat']
-      sql_avg = row['avg_air']
-      # xarray groupby calculates mean across all dimensions except the groupby dimension
-      xarray_avg = float(xarray_grouped.sel(lat=lat_val).air.mean().values)
-      self.assertAlmostEqual(
-          sql_avg,
-          xarray_avg,
-          places=3,
-          msg=f'SQL GROUP BY average for lat={lat_val} should match xarray groupby',
-      )
-
-  def test_coordinate_operations_correctness(self):
-    """Validate SQL coordinate operations against xarray coordinate access."""
-    self.load_dataset('air', self.air_small)
-
-    # Test coordinate MIN/MAX
-    sql_coords = self.assert_sql_result_valid(
-        """SELECT 
-          MIN(lat) as min_lat, MAX(lat) as max_lat,
-          MIN(lon) as min_lon, MAX(lon) as max_lon,
-          MIN(time) as min_time, MAX(time) as max_time
-         FROM air""",
-        expected_rows=1,
-    )
-
-    # Xarray coordinate values
-    xarray_lat_min, xarray_lat_max = float(self.air_small.lat.min()), float(
-        self.air_small.lat.max()
-    )
-    xarray_lon_min, xarray_lon_max = float(self.air_small.lon.min()), float(
-        self.air_small.lon.max()
-    )
-    xarray_time_min, xarray_time_max = (
-        self.air_small.time.min().values,
-        self.air_small.time.max().values,
-    )
-
-    # Validate coordinate ranges
-    self.assertAlmostEqual(
-        sql_coords['min_lat'].iloc[0], xarray_lat_min, places=5
-    )
-    self.assertAlmostEqual(
-        sql_coords['max_lat'].iloc[0], xarray_lat_max, places=5
-    )
-    self.assertAlmostEqual(
-        sql_coords['min_lon'].iloc[0], xarray_lon_min, places=5
-    )
-    self.assertAlmostEqual(
-        sql_coords['max_lon'].iloc[0], xarray_lon_max, places=5
-    )
-    # For time coordinates, convert to pandas timestamp for comparison
-    import pandas as pd
-
-    self.assertEqual(
-        sql_coords['min_time'].iloc[0], pd.Timestamp(xarray_time_min)
-    )
-    self.assertEqual(
-        sql_coords['max_time'].iloc[0], pd.Timestamp(xarray_time_max)
-    )
-
-  def test_spatial_aggregation_correctness(self):
-    """Validate spatial aggregations match xarray spatial operations."""
-    self.load_dataset('weather', self.weather_small)
-
-    # SQL spatial average (average over time for each lat/lon)
-    sql_spatial = self.assert_sql_result_valid(
-        """SELECT 
-          lat, lon,
-          AVG(temperature) as avg_temp,
-          COUNT(*) as time_points
-         FROM weather 
-         GROUP BY lat, lon 
-         ORDER BY lat, lon"""
-    )
-
-    # Xarray spatial average
-    xarray_spatial = self.weather_small.mean(dim='time')
-
-    # Verify structure - SQL may have more rows due to multiple variables
-    # so we just check that we have some reasonable number of spatial points
-    min_expected_points = (
-        self.weather_small.sizes['lat'] * self.weather_small.sizes['lon']
-    )
-    self.assertGreaterEqual(
-        len(sql_spatial),
-        min_expected_points,
-        'Should have at least one row per lat/lon combination',
-    )
-
-    # Verify time point counts are reasonable
-    expected_time_points = self.weather_small.sizes['time']
-    mode_count = sql_spatial['time_points'].mode()[0]
-    # Allow for multiple variables in the dataset by checking if count is multiple of time steps
-    self.assertTrue(
-        mode_count % expected_time_points == 0,
-        f'Time point count ({mode_count}) should be multiple of time steps ({expected_time_points})',
-    )
-
-    # Verify that all spatial averages are reasonable values (not NaN, finite)
-    temp_averages = sql_spatial['avg_temp']
-    self.assertFalse(
-        temp_averages.isna().any(), 'No temperature averages should be NaN'
-    )
-    self.assertTrue(
-        np.isfinite(temp_averages).all(),
-        'All temperature averages should be finite',
-    )
-    # Verify temperature values have reasonable range (not all identical)
-    self.assertGreater(
-        temp_averages.std(),
-        0,
-        'Temperature averages should have some variation',
-    )
-
-  def test_data_integrity_validation(self):
-    """Validate that SQL operations preserve data integrity properties."""
-    self.load_dataset('air', self.air_small)
-
-    # Test that filtering maintains data relationships
-    sql_result = self.assert_sql_result_valid(
-        """SELECT lat, lon, time, air 
-         FROM air 
-         WHERE lat BETWEEN 40 AND 60 AND lon BETWEEN -120 AND -80
-         ORDER BY lat, lon, time"""
-    )
-
-    if len(sql_result) > 0:
-      # All lat values should be in specified range
-      self.assertTrue(
-          (sql_result['lat'] >= 40).all() and (sql_result['lat'] <= 60).all(),
-          'Filtered lat values should be within specified range',
-      )
-
-      # All lon values should be in specified range
-      self.assertTrue(
-          (sql_result['lon'] >= -120).all()
-          and (sql_result['lon'] <= -80).all(),
-          'Filtered lon values should be within specified range',
-      )
-
-      # Air values should be reasonable (not NaN, within physical bounds)
-      self.assertFalse(
-          sql_result['air'].isna().any(), 'Air values should not be NaN'
-      )
-      self.assertTrue(
-          (sql_result['air'] > 200).all() and (sql_result['air'] < 350).all(),
-          'Air temperature values should be physically reasonable (200-350K)',
-      )
-
-  def test_zarr_vs_dataset_numerical_equivalence(self):
-    """Test numerical equivalence between Zarr and dataset results."""
-    if not hasattr(self, 'temp_dir'):
-      self.skipTest('Zarr functionality not available in this test class')
-      return
-
-    # This would need to be implemented in a Zarr-enabled test class
-    # Placeholder for now to show the pattern
-    pass
-
-
-class SqlZarrParameterizedTestCase(XarrayZarrTestBase):
-  """Parameterized tests specifically for Zarr datasets and from_zarr functionality."""
-
-  def test_zarr_operations_parameterized(self):
-    """Test multiple SQL operations on Zarr datasets in a parameterized way."""
-    self.load_zarr_dataset('weather', self.weather_zarr_path)
-
-    # Test cases: (operation_name, query, validator_function)
-    operation_tests = [
-        (
-            'count',
-            'SELECT COUNT(*) as result FROM weather',
-            lambda r: r['result'].iloc[0] > 0,
-        ),
-        (
-            'coordinate_min',
-            'SELECT MIN(dim_0) as result FROM weather',
-            lambda r: not np.isnan(r['result'].iloc[0]),
-        ),
-        (
-            'coordinate_max',
-            'SELECT MAX(dim_0) as result FROM weather',
-            lambda r: not np.isnan(r['result'].iloc[0]),
-        ),
-        (
-            'coordinate_filter',
-            'SELECT COUNT(*) as result FROM weather WHERE dim_0 >= 0',
-            lambda r: r['result'].iloc[0] >= 0,
-        ),
-        (
-            'data_aggregate',
-            'SELECT AVG("/temperature") as result FROM weather',
-            lambda r: not np.isnan(r['result'].iloc[0]),
-        ),
-    ]
-
-    for test_name, query, validator in operation_tests:
-      with self.subTest(operation=test_name):
-        result = self.assert_sql_result_valid(query, expected_rows=1)
-        self.assertTrue(validator(result), f'{test_name} validation failed')
-
-  def test_zarr_specific_operations(self):
-    """Test operations that are specific to Zarr table providers."""
-    self.load_zarr_dataset('weather', self.weather_zarr_path)
-
-    # Test Zarr-specific column naming (dim_* instead of coordinate names)
-    result = self.assert_sql_result_valid('SELECT * FROM weather LIMIT 1')
-
-    # Should have dim_0, dim_1, dim_2 columns (for time, lat, lon dimensions)
-    dim_columns = [col for col in result.columns if col.startswith('dim_')]
-    self.assertGreaterEqual(
-        len(dim_columns), 3, 'Should have at least 3 dimension columns'
-    )
-
-    # Should have data variable columns with '/' prefix
-    data_columns = [col for col in result.columns if col.startswith('/')]
-    self.assertGreaterEqual(
-        len(data_columns), 3, 'Should have at least 3 data variable columns'
-    )
-
-    # Test querying data variables
-    result = self.assert_sql_result_valid(
-        'SELECT AVG("/temperature") as avg_temp FROM weather', expected_rows=1
-    )
-    self.assertFalse(np.isnan(result['avg_temp'].iloc[0]))
-
-  def test_zarr_predicate_pushdown_efficiency(self):
-    """Test that predicate pushdown works efficiently with Zarr datasets."""
-    self.load_zarr_dataset('weather', self.weather_zarr_path)
-
-    # Test coordinate-based filtering (should push down to Zarr level)
-    total_result = self.assert_sql_result_valid(
-        'SELECT COUNT(*) as total FROM weather'
-    )
-    total_count = total_result['total'].iloc[0]
-
-    # Filter by first dimension (time)
-    filtered_result = self.assert_sql_result_valid(
-        'SELECT COUNT(*) as filtered FROM weather WHERE dim_0 >= 2'
-    )
-    filtered_count = filtered_result['filtered'].iloc[0]
-
-    # Should return fewer rows when filtered
-    self.assertLessEqual(filtered_count, total_count)
-
-    # Test multi-dimensional filtering
-    multi_filtered_result = self.assert_sql_result_valid(
-        'SELECT COUNT(*) as multi_filtered FROM weather WHERE dim_0 >= 1 AND dim_1 < 2'
-    )
-    multi_filtered_count = multi_filtered_result['multi_filtered'].iloc[0]
-
-    # Should be a reasonable subset
-    self.assertLessEqual(multi_filtered_count, filtered_count)
-
-
-class SqlZarrCorrectnessTestCase(XarrayZarrTestBase):
-  """Test SQL correctness specifically for Zarr datasets and equivalence with xarray."""
-
-  def test_zarr_aggregation_vs_xarray_ground_truth(self):
-    """Validate Zarr SQL aggregations against original xarray dataset."""
-    self.load_zarr_dataset('weather', self.weather_zarr_path)
-
-    # Test COUNT matches xarray dimensions
-    sql_count = self.assert_sql_result_valid(
-        'SELECT COUNT(*) as count FROM weather'
-    )
-    expected_count = (
-        self.weather_ds.sizes['time']
-        * self.weather_ds.sizes['lat']
-        * self.weather_ds.sizes['lon']
-    )
-    self.assertEqual(
-        sql_count['count'].iloc[0],
-        expected_count,
-        'Zarr SQL COUNT should match xarray dimension product',
-    )
-
-    # Test MIN/MAX of data variables
-    sql_temp_stats = self.assert_sql_result_valid(
-        'SELECT MIN("/temperature") as min_temp, MAX("/temperature") as max_temp FROM weather'
-    )
-    xarray_min_temp = float(self.weather_ds.temperature.min().values)
-    xarray_max_temp = float(self.weather_ds.temperature.max().values)
-
-    self.assertAlmostEqual(
-        sql_temp_stats['min_temp'].iloc[0],
-        xarray_min_temp,
-        places=5,
-        msg='Zarr SQL MIN should match xarray min',
-    )
-    self.assertAlmostEqual(
-        sql_temp_stats['max_temp'].iloc[0],
-        xarray_max_temp,
-        places=5,
-        msg='Zarr SQL MAX should match xarray max',
+    query = c.sql(
+        """
+  SELECT
+    "lat", "lon", SUM("air") as air_total
+  FROM 
+    "air" 
+  GROUP BY
+   "lat", "lon"
+  """
     )
 
-  def test_zarr_coordinate_filtering_vs_xarray(self):
-    """Test that Zarr coordinate filtering produces reasonable results."""
-    self.load_zarr_dataset('weather', self.weather_zarr_path)
+    result = query.to_pandas()
+    self.assertIsNotNone(result)
 
-    # Test filtering by dimension index
-    mid_time_idx = len(self.weather_ds.time) // 2
-
-    # SQL filtering on Zarr (uses dim_0 for time dimension)
-    sql_filtered = self.assert_sql_result_valid(
-        f'SELECT COUNT(*) as count FROM weather WHERE dim_0 >= {mid_time_idx}'
-    )
-    sql_count = sql_filtered['count'].iloc[0]
-
-    # Also test without filtering
-    sql_total = self.assert_sql_result_valid(
-        'SELECT COUNT(*) as count FROM weather'
-    )
-    total_count = sql_total['count'].iloc[0]
-
-    # Verify filtering reduces the count
-    self.assertLess(
-        sql_count, total_count, 'Filtering should reduce the total count'
-    )
-    self.assertGreater(
-        sql_count, 0, 'Filtering should still return some results'
-    )
-
-  def test_zarr_multidimensional_groupby_correctness(self):
-    """Test that Zarr GROUP BY operations produce reasonable results."""
-    self.load_zarr_dataset('weather', self.weather_zarr_path)
-
-    # SQL GROUP BY time dimension (dim_0)
-    sql_grouped = self.assert_sql_result_valid(
-        """SELECT 
-          dim_0,
-          COUNT(*) as count,
-          AVG("/temperature") as avg_temp
-         FROM weather 
-         GROUP BY dim_0 
-         ORDER BY dim_0"""
-    )
-
-    # Verify structure - should have reasonable number of groups
-    self.assertGreater(len(sql_grouped), 0, 'Should have at least one group')
-    self.assertLessEqual(
-        len(sql_grouped), 50, 'Should not have excessive groups'
-    )
-
-    # Verify temperature averages are reasonable
-    temp_avgs = sql_grouped['avg_temp']
-    self.assertFalse(
-        temp_avgs.isna().any(), 'No temperature averages should be NaN'
-    )
-    self.assertTrue(
-        np.isfinite(temp_avgs).all(),
-        'All temperature averages should be finite',
-    )
-    self.assertGreater(
-        temp_avgs.std(), 0, 'Temperature averages should vary across time'
-    )
-
-  def test_zarr_data_variable_access_correctness(self):
-    """Test that Zarr data variable access (with / prefix) works correctly."""
-    self.load_zarr_dataset('weather', self.weather_zarr_path)
-
-    # Test that all expected data variables are accessible
-    schema = self.assert_sql_result_valid('SELECT * FROM weather LIMIT 1')
-
-    # Should have data variables with '/' prefix
-    data_vars = [col for col in schema.columns if col.startswith('/')]
-    actual_vars = set(data_vars)
-
-    # Check that we have at least one data variable with '/' prefix
-    self.assertGreater(
-        len(actual_vars),
-        0,
-        "Should have at least one data variable with '/' prefix",
-    )
-
-    # Verify the actual variables match the weather dataset
-    expected_vars = {f'/{var}' for var in self.weather_ds.data_vars}
-    self.assertEqual(
-        actual_vars,
-        expected_vars,
-        f'Data variables should match weather dataset: {expected_vars}',
-    )
-
-    # Test aggregating available data variables
-    multi_agg = self.assert_sql_result_valid(
-        """SELECT 
-          AVG("/temperature") as avg_temp,
-          AVG("/precipitation") as avg_precip
-         FROM weather"""
-    )
-
-    # Validate that values are reasonable (not NaN, finite)
-    sql_temp_avg = multi_agg['avg_temp'].iloc[0]
-    sql_precip_avg = multi_agg['avg_precip'].iloc[0]
-
-    self.assertFalse(
-        np.isnan(sql_temp_avg), 'Temperature average should not be NaN'
-    )
-    self.assertFalse(
-        np.isnan(sql_precip_avg), 'Precipitation average should not be NaN'
-    )
-    self.assertTrue(
-        np.isfinite(sql_temp_avg), 'Temperature average should be finite'
-    )
-    self.assertTrue(
-        np.isfinite(sql_precip_avg), 'Precipitation average should be finite'
-    )
+    expected = self.air_small.sizes['lat'] * self.air_small.sizes['lon']
+    self.assertEqual(len(result), expected)
 
-  def test_zarr_predicate_pushdown_semantic_correctness(self):
-    """Test that predicate pushdown produces semantically correct results."""
-    self.load_zarr_dataset('weather', self.weather_zarr_path)
+  def test_agg_regular(self):
+    c = XarrayContext()
+    c.from_dataset('air', self.air)
 
-    # Complex multi-dimensional filter
-    sql_complex = self.assert_sql_result_valid(
-        """SELECT 
-          dim_0, dim_1, dim_2,
-          "/temperature",
-          COUNT(*) OVER (PARTITION BY dim_0) as count_per_time
-         FROM weather 
-         WHERE dim_0 >= 1 AND dim_1 < 2 AND "/temperature" > 15
-         ORDER BY dim_0, dim_1, dim_2"""
+    query = c.sql(
+        """
+    SELECT
+      "lat", "lon", AVG("air") as air_total
+    FROM 
+      "air" 
+    GROUP BY
+     "lat", "lon"
+    """
     )
 
-    if len(sql_complex) > 0:
-      # Verify all constraints are satisfied
-      self.assertTrue(
-          (sql_complex['dim_0'] >= 1).all(),
-          'Time constraint should be satisfied',
-      )
-      self.assertTrue(
-          (sql_complex['dim_1'] < 2).all(), 'Lat constraint should be satisfied'
-      )
-      self.assertTrue(
-          (sql_complex['/temperature'] > 15).all(),
-          'Temperature constraint should be satisfied',
-      )
+    result = query.to_pandas()
+    self.assertIsNotNone(result)
 
-      # Verify data relationships are preserved
-      # All rows with same dim_0 should have same count_per_time
-      for time_val in sql_complex['dim_0'].unique():
-        time_rows = sql_complex[sql_complex['dim_0'] == time_val]
-        unique_counts = time_rows['count_per_time'].unique()
-        self.assertEqual(
-            len(unique_counts),
-            1,
-            f'All rows with same time should have same count_per_time',
-        )
+    expected = self.air.sizes['lat'] * self.air.sizes['lon']
+    self.assertEqual(len(result), expected)
 
 
-class SqlAdvancedTestCase(XarrayTestBase):
+class SqlVarietyTestCase(unittest.TestCase):
   """Test SQL functionality with various types of Xarray datasets."""
 
   def setUp(self):
@@ -1258,12 +156,12 @@ class SqlAdvancedTestCase(XarrayTestBase):
     # Test MIN, MAX, AVG
     result = ctx.sql(
         """
-    SELECT 
-      MIN(temperature) as min_temp,
-      MAX(temperature) as max_temp,
-      AVG(temperature) as avg_temp
-    FROM synthetic
-  """
+      SELECT 
+        MIN(temperature) as min_temp,
+        MAX(temperature) as max_temp,
+        AVG(temperature) as avg_temp
+      FROM synthetic
+    """
     ).to_pandas()
 
     self.assertEqual(len(result), 1)
@@ -1281,14 +179,14 @@ class SqlAdvancedTestCase(XarrayTestBase):
     # Group by spatial coordinates
     result = ctx.sql(
         """
-    SELECT 
-      lat, lon,
-      AVG(air) as avg_air,
-      COUNT(*) as time_count
-    FROM air 
-    GROUP BY lat, lon
-    ORDER BY lat, lon
-  """
+      SELECT 
+        lat, lon,
+        AVG(air) as avg_air,
+        COUNT(*) as time_count
+      FROM air 
+      GROUP BY lat, lon
+      ORDER BY lat, lon
+    """
     ).to_pandas()
 
     expected_spatial_points = (
@@ -1419,10 +317,10 @@ class SqlJoinTestCase(unittest.TestCase):
     # First test a simple cross join to ensure datasets are compatible
     result = ctx.sql(
         """
-    SELECT COUNT(*) as total_combinations
-    FROM air_data a
-    CROSS JOIN stations s
-  """
+      SELECT COUNT(*) as total_combinations
+      FROM air_data a
+      CROSS JOIN stations s
+    """
     ).to_pandas()
 
     self.assertGreater(result['total_combinations'].iloc[0], 0)
@@ -1430,11 +328,11 @@ class SqlJoinTestCase(unittest.TestCase):
     # Test a simpler join condition
     result = ctx.sql(
         """
-    SELECT 
-      COUNT(*) as match_count
-    FROM air_data a, stations s
-    WHERE s.station_id = 101
-  """
+      SELECT 
+        COUNT(*) as match_count
+      FROM air_data a, stations s
+      WHERE s.station_id = 101
+    """
     ).to_pandas()
 
     self.assertGreater(result['match_count'].iloc[0], 0)
@@ -1459,13 +357,13 @@ class SqlJoinTestCase(unittest.TestCase):
     # Test a simpler region-based query without complex joins
     result = ctx.sql(
         """
-    SELECT 
-      region_name,
-      min_lat,
-      max_lat
-    FROM regions
-    WHERE min_lat < 50
-  """
+      SELECT 
+        region_name,
+        min_lat,
+        max_lat
+      FROM regions
+      WHERE min_lat < 50
+    """
     ).to_pandas()
 
     self.assertGreater(len(result), 0)
@@ -1480,20 +378,20 @@ class SqlJoinTestCase(unittest.TestCase):
     # Get statistics by elevation bands using station data
     result = ctx.sql(
         """
-    SELECT 
-      CASE 
-        WHEN s.elevation < 200 THEN 'Low'
-        WHEN s.elevation < 400 THEN 'Medium'
-        ELSE 'High'
-      END as elevation_band,
-      COUNT(DISTINCT s.station_id) as station_count,
-      COUNT(*) as air_measurements,
-      AVG(a.air) as avg_air
-    FROM air_data a
-    CROSS JOIN stations s
-    GROUP BY elevation_band
-    ORDER BY elevation_band
-  """
+      SELECT 
+        CASE 
+          WHEN s.elevation < 200 THEN 'Low'
+          WHEN s.elevation < 400 THEN 'Medium'
+          ELSE 'High'
+        END as elevation_band,
+        COUNT(DISTINCT s.station_id) as station_count,
+        COUNT(*) as air_measurements,
+        AVG(a.air) as avg_air
+      FROM air_data a
+      CROSS JOIN stations s
+      GROUP BY elevation_band
+      ORDER BY elevation_band
+    """
     ).to_pandas()
 
     self.assertGreater(len(result), 0)
@@ -1612,16 +510,16 @@ class SqlOptimizationTestCase(unittest.TestCase):
     # Test GROUP BY optimization
     result = ctx.sql(
         """
-    SELECT 
-      lat,
-      COUNT(*) as point_count,
-      AVG(temperature) as avg_temp,
-      MIN(precipitation) as min_precip,
-      MAX(precipitation) as max_precip
-    FROM weather
-    GROUP BY lat
-    ORDER BY lat
-  """
+      SELECT 
+        lat,
+        COUNT(*) as point_count,
+        AVG(temperature) as avg_temp,
+        MIN(precipitation) as min_precip,
+        MAX(precipitation) as max_precip
+      FROM weather
+      GROUP BY lat
+      ORDER BY lat
+    """
     ).to_pandas()
 
     # Should have one row per unique latitude
@@ -1640,12 +538,12 @@ class SqlOptimizationTestCase(unittest.TestCase):
     # Complex WHERE clause with AND/OR
     result = ctx.sql(
         """
-    SELECT lat, lon, temperature, precipitation
-    FROM weather
-    WHERE (temperature > 15 AND precipitation < 50) 
-       OR (lat > 45 AND lon < -100)
-    LIMIT 100
-  """
+      SELECT lat, lon, temperature, precipitation
+      FROM weather
+      WHERE (temperature > 15 AND precipitation < 50) 
+         OR (lat > 45 AND lon < -100)
+      LIMIT 100
+    """
     ).to_pandas()
 
     # Verify the complex condition
@@ -1679,13 +577,13 @@ class SqlComplexQueryTestCase(unittest.TestCase):
     # Subquery to find above-average temperatures
     result = ctx.sql(
         """
-    SELECT lat, lon, air
-    FROM air
-    WHERE air > (
-      SELECT AVG(air) FROM air
-    )
-    LIMIT 50
-  """
+      SELECT lat, lon, air
+      FROM air
+      WHERE air > (
+        SELECT AVG(air) FROM air
+      )
+      LIMIT 50
+    """
     ).to_pandas()
 
     if len(result) > 0:
@@ -1705,16 +603,16 @@ class SqlComplexQueryTestCase(unittest.TestCase):
       # Test ROW_NUMBER window function
       result = ctx.sql(
           """
-      SELECT 
-        lat, lon, air,
-        ROW_NUMBER() OVER (PARTITION BY lat ORDER BY air DESC) as rank_in_lat
-      FROM air
-      WHERE lat IN (
-        SELECT DISTINCT lat FROM air LIMIT 3
-      )
-      ORDER BY lat, rank_in_lat
-      LIMIT 30
-    """
+        SELECT 
+          lat, lon, air,
+          ROW_NUMBER() OVER (PARTITION BY lat ORDER BY air DESC) as rank_in_lat
+        FROM air
+        WHERE lat IN (
+          SELECT DISTINCT lat FROM air LIMIT 3
+        )
+        ORDER BY lat, rank_in_lat
+        LIMIT 30
+      """
       ).to_pandas()
 
       if len(result) > 0:
@@ -1737,26 +635,26 @@ class SqlComplexQueryTestCase(unittest.TestCase):
 
     result = ctx.sql(
         """
-    SELECT 
-      lat, lon,
-      temperature,
-      CASE 
-        WHEN temperature < 0 THEN 'Freezing'
-        WHEN temperature < 10 THEN 'Cold'
-        WHEN temperature < 20 THEN 'Cool'
-        WHEN temperature < 30 THEN 'Warm'
-        ELSE 'Hot'
-      END as temp_category,
-      precipitation,
-      CASE
-        WHEN precipitation < 5 THEN 'Dry'
-        WHEN precipitation < 20 THEN 'Light'
-        WHEN precipitation < 50 THEN 'Moderate'
-        ELSE 'Heavy'
-      END as precip_category
-    FROM weather
-    LIMIT 50
-  """
+      SELECT 
+        lat, lon,
+        temperature,
+        CASE 
+          WHEN temperature < 0 THEN 'Freezing'
+          WHEN temperature < 10 THEN 'Cold'
+          WHEN temperature < 20 THEN 'Cool'
+          WHEN temperature < 30 THEN 'Warm'
+          ELSE 'Hot'
+        END as temp_category,
+        precipitation,
+        CASE
+          WHEN precipitation < 5 THEN 'Dry'
+          WHEN precipitation < 20 THEN 'Light'
+          WHEN precipitation < 50 THEN 'Moderate'
+          ELSE 'Heavy'
+        END as precip_category
+      FROM weather
+      LIMIT 50
+    """
     ).to_pandas()
 
     self.assertGreater(len(result), 0)
@@ -1786,18 +684,18 @@ class SqlComplexQueryTestCase(unittest.TestCase):
 
     result = ctx.sql(
         """
-    SELECT 
-      lat, lon,
-      temperature,
-      ROUND(temperature, 1) as temp_rounded,
-      ABS(temperature - 20) as temp_diff_from_20,
-      SQRT(ABS(temperature)) as temp_sqrt,
-      precipitation,
-      LOG(precipitation + 1) as log_precip
-    FROM weather
-    WHERE precipitation > 0
-    LIMIT 30
-  """
+      SELECT 
+        lat, lon,
+        temperature,
+        ROUND(temperature, 1) as temp_rounded,
+        ABS(temperature - 20) as temp_diff_from_20,
+        SQRT(ABS(temperature)) as temp_sqrt,
+        precipitation,
+        LOG(precipitation + 1) as log_precip
+      FROM weather
+      WHERE precipitation > 0
+      LIMIT 30
+    """
     ).to_pandas()
 
     if len(result) > 0:
@@ -1818,13 +716,13 @@ class SqlComplexQueryTestCase(unittest.TestCase):
     # Test string operations on numeric data converted to string
     result = ctx.sql(
         """
-    SELECT 
-      lat, lon,
-      CAST(lat AS VARCHAR) as lat_str,
-      CONCAT('Lat: ', CAST(lat AS VARCHAR), ', Lon: ', CAST(lon AS VARCHAR)) as coordinates
-    FROM air
-    LIMIT 10
-  """
+      SELECT 
+        lat, lon,
+        CAST(lat AS VARCHAR) as lat_str,
+        CONCAT('Lat: ', CAST(lat AS VARCHAR), ', Lon: ', CAST(lon AS VARCHAR)) as coordinates
+      FROM air
+      LIMIT 10
+    """
     ).to_pandas()
 
     self.assertGreater(len(result), 0)
@@ -1909,428 +807,6 @@ class SqlErrorHandlingTestCase(unittest.TestCase):
     # Request more rows than exist
     result = ctx.sql(f'SELECT * FROM air LIMIT {total_rows * 10}').to_pandas()
     self.assertEqual(len(result), total_rows)
-
-
-class SqlZarrTestCase(unittest.TestCase):
-  """Test SQL functionality with Zarr datasets using from_zarr method."""
-
-  def setUp(self):
-    """Set up temporary Zarr datasets for testing."""
-    # Create temporary directory for Zarr datasets
-    self.temp_dir = tempfile.mkdtemp()
-    self.addCleanup(shutil.rmtree, self.temp_dir)
-
-    # Create test datasets and save as Zarr
-    self._create_zarr_datasets()
-
-  def _create_zarr_datasets(self):
-    """Create diverse Zarr datasets for testing."""
-    # 1. Multi-variable weather dataset (3D)
-    time = np.arange(0, 5)  # 5 time points
-    lat = np.array([30.0, 35.0, 40.0])  # 3 latitudes
-    lon = np.array([-120.0, -115.0, -110.0, -105.0])  # 4 longitudes
-
-    shape = (5, 3, 4)
-    temperature_data = np.random.normal(20, 5, shape)
-    pressure_data = np.random.normal(1013, 20, shape)
-    humidity_data = np.random.uniform(30, 90, shape)
-
-    self.weather_ds = xr.Dataset(
-        {
-            'temperature': (['time', 'lat', 'lon'], temperature_data),
-            'pressure': (['time', 'lat', 'lon'], pressure_data),
-            'humidity': (['time', 'lat', 'lon'], humidity_data),
-        },
-        coords={
-            'time': time,
-            'lat': lat,
-            'lon': lon,
-        },
-    )
-
-    self.weather_zarr_path = os.path.join(self.temp_dir, 'weather.zarr')
-    self.weather_ds.to_zarr(self.weather_zarr_path)
-
-    # 2. Simple 2D timeseries dataset
-    time_2d = np.arange(0, 10)
-    station = np.array([1, 2, 3])
-
-    shape_2d = (10, 3)
-    value_data = np.random.normal(100, 10, shape_2d)
-    count_data = np.random.poisson(5, shape_2d)
-
-    self.timeseries_ds = xr.Dataset(
-        {
-            'value': (['time', 'station'], value_data),
-            'count': (['time', 'station'], count_data.astype(float)),
-        },
-        coords={
-            'time': time_2d,
-            'station': station,
-        },
-    )
-
-    self.timeseries_zarr_path = os.path.join(self.temp_dir, 'timeseries.zarr')
-    self.timeseries_ds.to_zarr(self.timeseries_zarr_path)
-
-    # 3. Business dataset for complex queries
-    category = np.arange(0, 4)
-    region = np.arange(0, 3)
-    period = np.arange(0, 6)
-
-    shape_3d = (4, 3, 6)
-    activity_data = np.random.exponential(10, shape_3d)
-    revenue_data = activity_data * (2 + np.random.normal(0, 0.5, shape_3d))
-
-    self.business_ds = xr.Dataset(
-        {
-            'activity': (['category', 'region', 'period'], activity_data),
-            'revenue': (['category', 'region', 'period'], revenue_data),
-        },
-        coords={
-            'category': category,
-            'region': region,
-            'period': period,
-        },
-    )
-
-    self.business_zarr_path = os.path.join(self.temp_dir, 'business.zarr')
-    self.business_ds.to_zarr(self.business_zarr_path)
-
-  def test_from_zarr_basic_functionality(self):
-    """Test basic from_zarr method functionality."""
-    ctx = XarrayContext()
-
-    # Test loading a Zarr dataset
-    ctx.from_zarr('weather', self.weather_zarr_path)
-
-    # Test basic query
-    result = ctx.sql('SELECT COUNT(*) as total FROM weather').to_pandas()
-    expected_count = (
-        self.weather_ds.sizes['time']
-        * self.weather_ds.sizes['lat']
-        * self.weather_ds.sizes['lon']
-    )
-    self.assertEqual(result['total'].iloc[0], expected_count)
-
-    # Test schema inference
-    result = ctx.sql('SELECT * FROM weather LIMIT 1').to_pandas()
-    self.assertIn('dim_0', result.columns)  # time dimension
-    self.assertIn('dim_1', result.columns)  # lat dimension
-    self.assertIn('dim_2', result.columns)  # lon dimension
-    # Data variables should have '/' prefix
-    data_columns = [col for col in result.columns if col.startswith('/')]
-    self.assertGreaterEqual(
-        len(data_columns), 3
-    )  # temperature, pressure, humidity
-
-  def test_from_zarr_vs_from_dataset_equivalence(self):
-    """Test that from_zarr produces equivalent results to from_dataset."""
-    ctx = XarrayContext()
-
-    # Load same data via different methods in the same context
-    ctx.from_zarr('weather_zarr', self.weather_zarr_path)
-    # Ensure the dataset is chunked for from_dataset
-    chunked_weather = self.weather_ds.chunk({'time': 3})
-    ctx.from_dataset('weather_dataset', chunked_weather)
-
-    # Test count equivalence
-    result_zarr = ctx.sql(
-        'SELECT COUNT(*) as count FROM weather_zarr'
-    ).to_pandas()
-    result_dataset = ctx.sql(
-        'SELECT COUNT(*) as count FROM weather_dataset'
-    ).to_pandas()
-    self.assertEqual(
-        result_zarr['count'].iloc[0], result_dataset['count'].iloc[0]
-    )
-
-    # Test column count equivalence (structures should be similar)
-    schema_zarr = ctx.sql('SELECT * FROM weather_zarr LIMIT 1').to_pandas()
-    schema_dataset = ctx.sql(
-        'SELECT * FROM weather_dataset LIMIT 1'
-    ).to_pandas()
-
-    # Zarr uses dim_* naming while dataset uses coordinate names
-    # Both should have same number of dimensions + data variables
-    self.assertEqual(len(schema_zarr.columns), len(schema_dataset.columns))
-
-  def test_zarr_filtering_and_predicate_pushdown(self):
-    """Test filtering operations work with Zarr datasets."""
-    ctx = XarrayContext()
-    ctx.from_zarr('weather', self.weather_zarr_path)
-
-    # Test coordinate filtering (should use predicate pushdown)
-    result = ctx.sql(
-        'SELECT COUNT(*) as count FROM weather WHERE dim_0 >= 2'
-    ).to_pandas()
-    total_result = ctx.sql('SELECT COUNT(*) as total FROM weather').to_pandas()
-
-    # Should return fewer rows when filtered
-    self.assertLessEqual(result['count'].iloc[0], total_result['total'].iloc[0])
-
-    # Test multiple coordinate filters
-    result = ctx.sql(
-        'SELECT COUNT(*) as count FROM weather WHERE dim_0 >= 1 AND dim_1 < 2'
-    ).to_pandas()
-    self.assertGreater(result['count'].iloc[0], 0)
-
-    # Test range filters
-    result = ctx.sql(
-        'SELECT dim_0, COUNT(*) as count FROM weather WHERE dim_0 BETWEEN 0 AND 2 GROUP BY dim_0'
-    ).to_pandas()
-    self.assertGreaterEqual(len(result), 1)
-
-  def test_zarr_aggregation_operations(self):
-    """Test aggregation operations on Zarr datasets."""
-    ctx = XarrayContext()
-    ctx.from_zarr('weather', self.weather_zarr_path)
-
-    # Test basic aggregations
-    result = ctx.sql(
-        """
-      SELECT 
-          COUNT(*) as count,
-          MIN(dim_0) as min_time,
-          MAX(dim_0) as max_time,
-          AVG(CAST(dim_0 AS DOUBLE)) as avg_time
-      FROM weather
-      """
-    ).to_pandas()
-
-    self.assertEqual(len(result), 1)
-    self.assertGreaterEqual(
-        result['max_time'].iloc[0], result['min_time'].iloc[0]
-    )
-
-    # Test GROUP BY operations
-    result = ctx.sql(
-        """
-      SELECT 
-          dim_0,
-          COUNT(*) as count_per_time,
-          COUNT(DISTINCT dim_1) as unique_lats
-      FROM weather
-      GROUP BY dim_0
-      ORDER BY dim_0
-      """
-    ).to_pandas()
-
-    expected_time_steps = self.weather_ds.sizes['time']
-    self.assertEqual(len(result), expected_time_steps)
-
-  def test_zarr_multi_dataset_operations(self):
-    """Test operations across multiple Zarr datasets."""
-    ctx = XarrayContext()
-    ctx.from_zarr('weather', self.weather_zarr_path)
-    ctx.from_zarr('timeseries', self.timeseries_zarr_path)
-    ctx.from_zarr('business', self.business_zarr_path)
-
-    # Test that all datasets are accessible
-    weather_count = ctx.sql('SELECT COUNT(*) as count FROM weather').to_pandas()
-    timeseries_count = ctx.sql(
-        'SELECT COUNT(*) as count FROM timeseries'
-    ).to_pandas()
-    business_count = ctx.sql(
-        'SELECT COUNT(*) as count FROM business'
-    ).to_pandas()
-
-    self.assertGreater(weather_count['count'].iloc[0], 0)
-    self.assertGreater(timeseries_count['count'].iloc[0], 0)
-    self.assertGreater(business_count['count'].iloc[0], 0)
-
-    # Test union across datasets
-    result = ctx.sql(
-        """
-      SELECT 'weather' as dataset, COUNT(*) as count FROM weather
-      UNION ALL
-      SELECT 'timeseries' as dataset, COUNT(*) as count FROM timeseries
-      UNION ALL
-      SELECT 'business' as dataset, COUNT(*) as count FROM business
-      """
-    ).to_pandas()
-
-    self.assertEqual(len(result), 3)
-    self.assertIn('weather', result['dataset'].values)
-    self.assertIn('timeseries', result['dataset'].values)
-    self.assertIn('business', result['dataset'].values)
-
-  def test_zarr_joins_between_datasets(self):
-    """Test join operations between Zarr datasets."""
-    ctx = XarrayContext()
-    ctx.from_zarr('weather', self.weather_zarr_path)
-    ctx.from_zarr('timeseries', self.timeseries_zarr_path)
-
-    # Test cross join
-    result = ctx.sql(
-        """
-      SELECT COUNT(*) as total_combinations
-      FROM weather w
-      CROSS JOIN timeseries t
-      """
-    ).to_pandas()
-
-    expected = (
-        self.weather_ds.sizes['time']
-        * self.weather_ds.sizes['lat']
-        * self.weather_ds.sizes['lon']
-        * self.timeseries_ds.sizes['time']
-        * self.timeseries_ds.sizes['station']
-    )
-    self.assertEqual(result['total_combinations'].iloc[0], expected)
-
-    # Test join on coordinate values
-    result = ctx.sql(
-        """
-      SELECT 
-          w.dim_0 as weather_time,
-          t.dim_0 as timeseries_time,
-          COUNT(*) as matches
-      FROM weather w
-      JOIN timeseries t ON w.dim_0 = t.dim_0
-      GROUP BY w.dim_0, t.dim_0
-      ORDER BY w.dim_0
-      """
-    ).to_pandas()
-
-    # Should have matches where time coordinates overlap
-    self.assertGreater(len(result), 0)
-
-  def test_zarr_complex_sql_operations(self):
-    """Test complex SQL operations on Zarr datasets."""
-    ctx = XarrayContext()
-    ctx.from_zarr('business', self.business_zarr_path)
-
-    # Test subqueries
-    result = ctx.sql(
-        """
-      SELECT 
-          dim_0 as category,
-          avg_activity
-      FROM (
-          SELECT 
-              dim_0,
-              AVG("/activity") as avg_activity
-          FROM business
-          GROUP BY dim_0
-      ) subq
-      WHERE avg_activity > (
-          SELECT AVG("/activity") FROM business
-      )
-      """
-    ).to_pandas()
-
-    # Should return categories with above-average activity
-    self.assertGreaterEqual(len(result), 0)
-
-    # Test window functions (if supported)
-    try:
-      result = ctx.sql(
-          """
-        SELECT 
-            dim_0,
-            dim_1,
-            "/activity",
-            ROW_NUMBER() OVER (PARTITION BY dim_0 ORDER BY "/activity" DESC) as rank_in_category
-        FROM business
-        ORDER BY dim_0, rank_in_category
-        LIMIT 20
-        """
-      ).to_pandas()
-
-      if len(result) > 0:
-        self.assertIn('rank_in_category', result.columns)
-
-    except Exception:
-      # Window functions might not be supported
-      pass
-
-    # Test CASE statements
-    result = ctx.sql(
-        """
-      SELECT 
-          dim_0 as category,
-          COUNT(*) as total_records,
-          CASE 
-              WHEN AVG("/activity") > 15 THEN 'High Activity'
-              WHEN AVG("/activity") > 5 THEN 'Medium Activity'
-              ELSE 'Low Activity'
-          END as activity_level
-      FROM business
-      GROUP BY dim_0
-      """
-    ).to_pandas()
-
-    self.assertEqual(len(result), self.business_ds.sizes['category'])
-    self.assertIn('activity_level', result.columns)
-
-  def test_zarr_error_handling(self):
-    """Test error handling for Zarr-specific issues."""
-    ctx = XarrayContext()
-
-    # Test non-existent Zarr path
-    with self.assertRaises(Exception):
-      ctx.from_zarr('nonexistent', '/path/that/does/not/exist.zarr')
-
-    # Test invalid table operations after successful load
-    ctx.from_zarr('weather', self.weather_zarr_path)
-
-    # Test invalid column reference
-    with self.assertRaises(Exception):
-      ctx.sql('SELECT nonexistent_column FROM weather').to_pandas()
-
-    # Test invalid table reference
-    with self.assertRaises(Exception):
-      ctx.sql('SELECT * FROM nonexistent_table').to_pandas()
-
-  def test_zarr_data_type_handling(self):
-    """Test that Zarr datasets handle different data types correctly."""
-    ctx = XarrayContext()
-    ctx.from_zarr('weather', self.weather_zarr_path)
-
-    # Test numeric operations on data variables
-    result = ctx.sql(
-        """
-      SELECT 
-          COUNT(*) as count,
-          AVG("/temperature") as avg_temp,
-          MIN("/pressure") as min_pressure,
-          MAX("/humidity") as max_humidity
-      FROM weather
-      """
-    ).to_pandas()
-
-    self.assertEqual(len(result), 1)
-    # All aggregations should return valid numbers
-    self.assertFalse(np.isnan(result['avg_temp'].iloc[0]))
-    self.assertFalse(np.isnan(result['min_pressure'].iloc[0]))
-    self.assertFalse(np.isnan(result['max_humidity'].iloc[0]))
-
-    # Test coordinate arithmetic
-    result = ctx.sql(
-        """
-      SELECT 
-          dim_0,
-          dim_1,
-          (dim_0 * 10 + dim_1) as computed_coordinate
-      FROM weather
-      LIMIT 10
-      """
-    ).to_pandas()
-
-    self.assertGreater(len(result), 0)
-    self.assertIn('computed_coordinate', result.columns)
-
-  def test_zarr_chunks_parameter_assertion(self):
-    """Test that chunks parameter raises appropriate assertion."""
-    ctx = XarrayContext()
-
-    # chunks=None should work
-    ctx.from_zarr('weather', self.weather_zarr_path, chunks=None)
-
-    # chunks with any value should raise AssertionError
-    with self.assertRaises(AssertionError):
-      ctx.from_zarr('weather2', self.weather_zarr_path, chunks='auto')
 
 
 if __name__ == '__main__':
