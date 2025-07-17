@@ -1,5 +1,4 @@
 import xarray as xr
-import zarr.storage
 from datafusion import SessionContext
 from zarrquet import ZarrTableProvider
 
