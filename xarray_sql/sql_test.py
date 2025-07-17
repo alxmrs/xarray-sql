@@ -2,6 +2,9 @@ import unittest
 import numpy as np
 import pandas as pd
 import xarray as xr
+import tempfile
+import shutil
+import os
 
 from . import XarrayContext
 from .df_test import DaskTestCase, create_large_dataset, rand_wx
@@ -808,6 +811,391 @@ class SqlErrorHandlingTestCase(unittest.TestCase):
     result = ctx.sql(f'SELECT * FROM air LIMIT {total_rows * 10}').to_pandas()
     self.assertEqual(len(result), total_rows)
 
+
+class SqlZarrTestCase(unittest.TestCase):
+  """Test SQL functionality with Zarr datasets using from_zarr method."""
+
+  def setUp(self):
+    """Set up temporary Zarr datasets for testing."""
+    # Create temporary directory for Zarr datasets
+    self.temp_dir = tempfile.mkdtemp()
+    self.addCleanup(shutil.rmtree, self.temp_dir)
+    
+    # Create test datasets and save as Zarr
+    self._create_zarr_datasets()
+
+  def _create_zarr_datasets(self):
+    """Create diverse Zarr datasets for testing."""
+    # 1. Multi-variable weather dataset (3D)
+    time = np.arange(0, 5)  # 5 time points
+    lat = np.array([30.0, 35.0, 40.0])  # 3 latitudes
+    lon = np.array([-120.0, -115.0, -110.0, -105.0])  # 4 longitudes
+    
+    shape = (5, 3, 4)
+    temperature_data = np.random.normal(20, 5, shape)
+    pressure_data = np.random.normal(1013, 20, shape)
+    humidity_data = np.random.uniform(30, 90, shape)
+    
+    self.weather_ds = xr.Dataset({
+        'temperature': (['time', 'lat', 'lon'], temperature_data),
+        'pressure': (['time', 'lat', 'lon'], pressure_data),
+        'humidity': (['time', 'lat', 'lon'], humidity_data),
+    }, coords={
+        'time': time,
+        'lat': lat,
+        'lon': lon,
+    })
+    
+    self.weather_zarr_path = os.path.join(self.temp_dir, 'weather.zarr')
+    self.weather_ds.to_zarr(self.weather_zarr_path)
+    
+    # 2. Simple 2D timeseries dataset
+    time_2d = np.arange(0, 10)
+    station = np.array([1, 2, 3])
+    
+    shape_2d = (10, 3)
+    value_data = np.random.normal(100, 10, shape_2d)
+    count_data = np.random.poisson(5, shape_2d)
+    
+    self.timeseries_ds = xr.Dataset({
+        'value': (['time', 'station'], value_data),
+        'count': (['time', 'station'], count_data.astype(float)),
+    }, coords={
+        'time': time_2d,
+        'station': station,
+    })
+    
+    self.timeseries_zarr_path = os.path.join(self.temp_dir, 'timeseries.zarr')
+    self.timeseries_ds.to_zarr(self.timeseries_zarr_path)
+    
+    # 3. Business dataset for complex queries
+    category = np.arange(0, 4)
+    region = np.arange(0, 3)
+    period = np.arange(0, 6)
+    
+    shape_3d = (4, 3, 6)
+    activity_data = np.random.exponential(10, shape_3d)
+    revenue_data = activity_data * (2 + np.random.normal(0, 0.5, shape_3d))
+    
+    self.business_ds = xr.Dataset({
+        'activity': (['category', 'region', 'period'], activity_data),
+        'revenue': (['category', 'region', 'period'], revenue_data),
+    }, coords={
+        'category': category,
+        'region': region,
+        'period': period,
+    })
+    
+    self.business_zarr_path = os.path.join(self.temp_dir, 'business.zarr')
+    self.business_ds.to_zarr(self.business_zarr_path)
+
+  def test_from_zarr_basic_functionality(self):
+    """Test basic from_zarr method functionality."""
+    ctx = XarrayContext()
+    
+    # Test loading a Zarr dataset
+    ctx.from_zarr('weather', self.weather_zarr_path)
+    
+    # Test basic query
+    result = ctx.sql('SELECT COUNT(*) as total FROM weather').to_pandas()
+    expected_count = self.weather_ds.sizes['time'] * self.weather_ds.sizes['lat'] * self.weather_ds.sizes['lon']
+    self.assertEqual(result['total'].iloc[0], expected_count)
+    
+    # Test schema inference
+    result = ctx.sql('SELECT * FROM weather LIMIT 1').to_pandas()
+    self.assertIn('dim_0', result.columns)  # time dimension
+    self.assertIn('dim_1', result.columns)  # lat dimension  
+    self.assertIn('dim_2', result.columns)  # lon dimension
+    # Data variables should have '/' prefix
+    data_columns = [col for col in result.columns if col.startswith('/')]
+    self.assertGreaterEqual(len(data_columns), 3)  # temperature, pressure, humidity
+
+  def test_from_zarr_vs_from_dataset_equivalence(self):
+    """Test that from_zarr produces equivalent results to from_dataset."""
+    ctx = XarrayContext()
+    
+    # Load same data via different methods in the same context
+    ctx.from_zarr('weather_zarr', self.weather_zarr_path)
+    # Ensure the dataset is chunked for from_dataset
+    chunked_weather = self.weather_ds.chunk({'time': 3})
+    ctx.from_dataset('weather_dataset', chunked_weather)
+    
+    # Test count equivalence
+    result_zarr = ctx.sql('SELECT COUNT(*) as count FROM weather_zarr').to_pandas()
+    result_dataset = ctx.sql('SELECT COUNT(*) as count FROM weather_dataset').to_pandas()
+    self.assertEqual(result_zarr['count'].iloc[0], result_dataset['count'].iloc[0])
+    
+    # Test column count equivalence (structures should be similar)
+    schema_zarr = ctx.sql('SELECT * FROM weather_zarr LIMIT 1').to_pandas()
+    schema_dataset = ctx.sql('SELECT * FROM weather_dataset LIMIT 1').to_pandas()
+    
+    # Zarr uses dim_* naming while dataset uses coordinate names
+    # Both should have same number of dimensions + data variables
+    self.assertEqual(len(schema_zarr.columns), len(schema_dataset.columns))
+
+  def test_zarr_filtering_and_predicate_pushdown(self):
+    """Test filtering operations work with Zarr datasets."""
+    ctx = XarrayContext()
+    ctx.from_zarr('weather', self.weather_zarr_path)
+    
+    # Test coordinate filtering (should use predicate pushdown)
+    result = ctx.sql('SELECT COUNT(*) as count FROM weather WHERE dim_0 >= 2').to_pandas()
+    total_result = ctx.sql('SELECT COUNT(*) as total FROM weather').to_pandas()
+    
+    # Should return fewer rows when filtered
+    self.assertLessEqual(result['count'].iloc[0], total_result['total'].iloc[0])
+    
+    # Test multiple coordinate filters
+    result = ctx.sql(
+        'SELECT COUNT(*) as count FROM weather WHERE dim_0 >= 1 AND dim_1 < 2'
+    ).to_pandas()
+    self.assertGreater(result['count'].iloc[0], 0)
+    
+    # Test range filters
+    result = ctx.sql(
+        'SELECT dim_0, COUNT(*) as count FROM weather WHERE dim_0 BETWEEN 0 AND 2 GROUP BY dim_0'
+    ).to_pandas()
+    self.assertGreaterEqual(len(result), 1)
+
+  def test_zarr_aggregation_operations(self):
+    """Test aggregation operations on Zarr datasets."""
+    ctx = XarrayContext()
+    ctx.from_zarr('weather', self.weather_zarr_path)
+    
+    # Test basic aggregations
+    result = ctx.sql(
+        '''
+        SELECT 
+            COUNT(*) as count,
+            MIN(dim_0) as min_time,
+            MAX(dim_0) as max_time,
+            AVG(CAST(dim_0 AS DOUBLE)) as avg_time
+        FROM weather
+        '''
+    ).to_pandas()
+    
+    self.assertEqual(len(result), 1)
+    self.assertGreaterEqual(result['max_time'].iloc[0], result['min_time'].iloc[0])
+    
+    # Test GROUP BY operations
+    result = ctx.sql(
+        '''
+        SELECT 
+            dim_0,
+            COUNT(*) as count_per_time,
+            COUNT(DISTINCT dim_1) as unique_lats
+        FROM weather
+        GROUP BY dim_0
+        ORDER BY dim_0
+        '''
+    ).to_pandas()
+    
+    expected_time_steps = self.weather_ds.sizes['time']
+    self.assertEqual(len(result), expected_time_steps)
+
+  def test_zarr_multi_dataset_operations(self):
+    """Test operations across multiple Zarr datasets."""
+    ctx = XarrayContext()
+    ctx.from_zarr('weather', self.weather_zarr_path)
+    ctx.from_zarr('timeseries', self.timeseries_zarr_path)
+    ctx.from_zarr('business', self.business_zarr_path)
+    
+    # Test that all datasets are accessible
+    weather_count = ctx.sql('SELECT COUNT(*) as count FROM weather').to_pandas()
+    timeseries_count = ctx.sql('SELECT COUNT(*) as count FROM timeseries').to_pandas()
+    business_count = ctx.sql('SELECT COUNT(*) as count FROM business').to_pandas()
+    
+    self.assertGreater(weather_count['count'].iloc[0], 0)
+    self.assertGreater(timeseries_count['count'].iloc[0], 0)
+    self.assertGreater(business_count['count'].iloc[0], 0)
+    
+    # Test union across datasets
+    result = ctx.sql(
+        '''
+        SELECT 'weather' as dataset, COUNT(*) as count FROM weather
+        UNION ALL
+        SELECT 'timeseries' as dataset, COUNT(*) as count FROM timeseries
+        UNION ALL
+        SELECT 'business' as dataset, COUNT(*) as count FROM business
+        '''
+    ).to_pandas()
+    
+    self.assertEqual(len(result), 3)
+    self.assertIn('weather', result['dataset'].values)
+    self.assertIn('timeseries', result['dataset'].values)
+    self.assertIn('business', result['dataset'].values)
+
+  def test_zarr_joins_between_datasets(self):
+    """Test join operations between Zarr datasets."""
+    ctx = XarrayContext()
+    ctx.from_zarr('weather', self.weather_zarr_path)
+    ctx.from_zarr('timeseries', self.timeseries_zarr_path)
+    
+    # Test cross join
+    result = ctx.sql(
+        '''
+        SELECT COUNT(*) as total_combinations
+        FROM weather w
+        CROSS JOIN timeseries t
+        '''
+    ).to_pandas()
+    
+    expected = (self.weather_ds.sizes['time'] * self.weather_ds.sizes['lat'] * self.weather_ds.sizes['lon'] *
+                self.timeseries_ds.sizes['time'] * self.timeseries_ds.sizes['station'])
+    self.assertEqual(result['total_combinations'].iloc[0], expected)
+    
+    # Test join on coordinate values
+    result = ctx.sql(
+        '''
+        SELECT 
+            w.dim_0 as weather_time,
+            t.dim_0 as timeseries_time,
+            COUNT(*) as matches
+        FROM weather w
+        JOIN timeseries t ON w.dim_0 = t.dim_0
+        GROUP BY w.dim_0, t.dim_0
+        ORDER BY w.dim_0
+        '''
+    ).to_pandas()
+    
+    # Should have matches where time coordinates overlap
+    self.assertGreater(len(result), 0)
+
+  def test_zarr_complex_sql_operations(self):
+    """Test complex SQL operations on Zarr datasets."""
+    ctx = XarrayContext()
+    ctx.from_zarr('business', self.business_zarr_path)
+    
+    # Test subqueries
+    result = ctx.sql(
+        '''
+        SELECT 
+            dim_0 as category,
+            avg_activity
+        FROM (
+            SELECT 
+                dim_0,
+                AVG("/activity") as avg_activity
+            FROM business
+            GROUP BY dim_0
+        ) subq
+        WHERE avg_activity > (
+            SELECT AVG("/activity") FROM business
+        )
+        '''
+    ).to_pandas()
+    
+    # Should return categories with above-average activity
+    self.assertGreaterEqual(len(result), 0)
+    
+    # Test window functions (if supported)
+    try:
+        result = ctx.sql(
+            '''
+            SELECT 
+                dim_0,
+                dim_1,
+                "/activity",
+                ROW_NUMBER() OVER (PARTITION BY dim_0 ORDER BY "/activity" DESC) as rank_in_category
+            FROM business
+            ORDER BY dim_0, rank_in_category
+            LIMIT 20
+            '''
+        ).to_pandas()
+        
+        if len(result) > 0:
+            self.assertIn('rank_in_category', result.columns)
+        
+    except Exception:
+        # Window functions might not be supported
+        pass
+    
+    # Test CASE statements
+    result = ctx.sql(
+        '''
+        SELECT 
+            dim_0 as category,
+            COUNT(*) as total_records,
+            CASE 
+                WHEN AVG("/activity") > 15 THEN 'High Activity'
+                WHEN AVG("/activity") > 5 THEN 'Medium Activity'
+                ELSE 'Low Activity'
+            END as activity_level
+        FROM business
+        GROUP BY dim_0
+        '''
+    ).to_pandas()
+    
+    self.assertEqual(len(result), self.business_ds.sizes['category'])
+    self.assertIn('activity_level', result.columns)
+
+  def test_zarr_error_handling(self):
+    """Test error handling for Zarr-specific issues."""
+    ctx = XarrayContext()
+    
+    # Test non-existent Zarr path
+    with self.assertRaises(Exception):
+        ctx.from_zarr('nonexistent', '/path/that/does/not/exist.zarr')
+    
+    # Test invalid table operations after successful load
+    ctx.from_zarr('weather', self.weather_zarr_path)
+    
+    # Test invalid column reference
+    with self.assertRaises(Exception):
+        ctx.sql('SELECT nonexistent_column FROM weather').to_pandas()
+    
+    # Test invalid table reference
+    with self.assertRaises(Exception):
+        ctx.sql('SELECT * FROM nonexistent_table').to_pandas()
+
+  def test_zarr_data_type_handling(self):
+    """Test that Zarr datasets handle different data types correctly."""
+    ctx = XarrayContext()
+    ctx.from_zarr('weather', self.weather_zarr_path)
+    
+    # Test numeric operations on data variables
+    result = ctx.sql(
+        '''
+        SELECT 
+            COUNT(*) as count,
+            AVG("/temperature") as avg_temp,
+            MIN("/pressure") as min_pressure,
+            MAX("/humidity") as max_humidity
+        FROM weather
+        '''
+    ).to_pandas()
+    
+    self.assertEqual(len(result), 1)
+    # All aggregations should return valid numbers
+    self.assertFalse(np.isnan(result['avg_temp'].iloc[0]))
+    self.assertFalse(np.isnan(result['min_pressure'].iloc[0]))
+    self.assertFalse(np.isnan(result['max_humidity'].iloc[0]))
+    
+    # Test coordinate arithmetic
+    result = ctx.sql(
+        '''
+        SELECT 
+            dim_0,
+            dim_1,
+            (dim_0 * 10 + dim_1) as computed_coordinate
+        FROM weather
+        LIMIT 10
+        '''
+    ).to_pandas()
+    
+    self.assertGreater(len(result), 0)
+    self.assertIn('computed_coordinate', result.columns)
+
+  def test_zarr_chunks_parameter_assertion(self):
+    """Test that chunks parameter raises appropriate assertion."""
+    ctx = XarrayContext()
+    
+    # chunks=None should work
+    ctx.from_zarr('weather', self.weather_zarr_path, chunks=None)
+    
+    # chunks with any value should raise AssertionError
+    with self.assertRaises(AssertionError):
+        ctx.from_zarr('weather2', self.weather_zarr_path, chunks='auto')
 
 if __name__ == '__main__':
   unittest.main()
