@@ -345,17 +345,17 @@ class SqlJoinTestCase(SQLBaseTestCase):
 
     self.assertGreater(result['match_count'].iloc[0], 0)
 
-  def test_region_classification_join(self):
+  @with_session_context_combinations
+  def test_region_classification_join(self, as_zarr):
     """Test joining with region classification."""
-    ctx = XarrayContext()
-    ctx.from_dataset('air_data', self.air_small)
-    ctx.from_dataset('regions', self.regions)
+    self.load('air_data', self.air_small, as_zarr=as_zarr)
+    self.load('regions', self.regions, as_zarr=as_zarr)
 
     # Test that both datasets can be queried independently
-    air_result = ctx.sql(
+    air_result = self.ctx.sql(
       'SELECT COUNT(*) as air_count FROM air_data'
     ).to_pandas()
-    region_result = ctx.sql(
+    region_result = self.ctx.sql(
       'SELECT COUNT(*) as region_count FROM regions'
     ).to_pandas()
 
@@ -363,7 +363,7 @@ class SqlJoinTestCase(SQLBaseTestCase):
     self.assertGreater(region_result['region_count'].iloc[0], 0)
 
     # Test a simpler region-based query without complex joins
-    result = ctx.sql(
+    result = self.ctx.sql(
       """
     SELECT 
       region_name,
@@ -377,14 +377,14 @@ class SqlJoinTestCase(SQLBaseTestCase):
     self.assertGreater(len(result), 0)
     self.assertIn('region_name', result.columns)
 
-  def test_multiple_dataset_aggregation(self):
+  @with_session_context_combinations
+  def test_multiple_dataset_aggregation(self, as_zarr):
     """Test aggregating across multiple datasets."""
-    ctx = XarrayContext()
-    ctx.from_dataset('air_data', self.air_small)
-    ctx.from_dataset('stations', self.stations)
+    self.load('air_data', self.air_small, as_zarr=as_zarr)
+    self.load('stations', self.stations, as_zarr=as_zarr)
 
     # Get statistics by elevation bands using station data
-    result = ctx.sql(
+    result = self.ctx.sql(
       """
     SELECT 
       CASE 
