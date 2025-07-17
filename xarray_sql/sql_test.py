@@ -14,7 +14,7 @@ from .df_test import DaskTestCase, create_large_dataset, rand_wx
 # Shared Test Data Creation Functions
 # =============================================================================
 
-def create_standard_air_dataset(time_steps=24, lat_points=10, lon_points=15):
+def air(time_steps=24, lat_points=10, lon_points=15):
   """Create standardized air temperature dataset."""
   air = xr.tutorial.open_dataset('air_temperature')
   return air.isel(
@@ -24,7 +24,7 @@ def create_standard_air_dataset(time_steps=24, lat_points=10, lon_points=15):
   ).chunk({'time': time_steps // 2})
 
 
-def create_standard_weather_dataset(time_steps=6, lat_points=10, lon_points=10):
+def weather(time_steps=6, lat_points=10, lon_points=10):
   """Create standardized multi-variable weather dataset."""
   weather = rand_wx('2023-01-01T00', '2023-01-01T12')
   return weather.isel(
@@ -34,7 +34,7 @@ def create_standard_weather_dataset(time_steps=6, lat_points=10, lon_points=10):
   ).chunk({'time': time_steps // 2})
 
 
-def create_standard_synthetic_dataset(time_steps=50, lat_points=20, lon_points=20):
+def synthetic(time_steps=50, lat_points=20, lon_points=20):
   """Create standardized synthetic dataset."""
   return create_large_dataset(
     time_steps=time_steps, 
@@ -43,7 +43,7 @@ def create_standard_synthetic_dataset(time_steps=50, lat_points=20, lon_points=2
   ).chunk({'time': time_steps // 2})
 
 
-def create_standard_stations_dataset():
+def stations():
   """Create standardized 1D stations dataset."""
   return xr.Dataset({
     'station_id': (['station'], [1, 2, 3, 4, 5]),
@@ -54,31 +54,15 @@ def create_standard_stations_dataset():
   }).chunk({'station': 5})
 
 
-def create_zarr_weather_dataset(temp_dir):
+def weather_zarr(temp_dir):
   """Create Zarr weather dataset with known properties."""
-  time = np.arange(0, 5)
-  lat = np.array([30.0, 35.0, 40.0])
-  lon = np.array([-120.0, -115.0, -110.0, -105.0])
-  
-  shape = (5, 3, 4)
-  # Use fixed seed for reproducible test data
-  np.random.seed(42)
-  temperature_data = np.random.normal(20, 5, shape)
-  pressure_data = np.random.normal(1013, 20, shape)
-  humidity_data = np.random.uniform(30, 90, shape)
-  
-  ds = xr.Dataset({
-    'temperature': (['time', 'lat', 'lon'], temperature_data),
-    'pressure': (['time', 'lat', 'lon'], pressure_data),
-    'humidity': (['time', 'lat', 'lon'], humidity_data),
-  }, coords={'time': time, 'lat': lat, 'lon': lon})
-  
+  ds = weather()
   zarr_path = os.path.join(temp_dir, 'weather.zarr')
   ds.to_zarr(zarr_path)
   return ds, zarr_path
 
 
-def create_zarr_timeseries_dataset(temp_dir):
+def timeseries_zarr(temp_dir):
   """Create Zarr timeseries dataset with known properties."""
   time = np.arange(0, 10)
   station = np.array([1, 2, 3])
@@ -113,12 +97,12 @@ class XarrayTestBase(unittest.TestCase):
   def _setup_standard_datasets(self):
     """Create and register standard test datasets."""
     # Create standard datasets
-    self.air_small = create_standard_air_dataset(24, 10, 15)
-    self.air_medium = create_standard_air_dataset(100, 20, 30)
-    self.weather_small = create_standard_weather_dataset(6, 10, 10)
-    self.weather_medium = create_standard_weather_dataset(12, 15, 20)
-    self.synthetic = create_standard_synthetic_dataset(50, 20, 20)
-    self.stations = create_standard_stations_dataset()
+    self.air_small = air(24, 10, 15)
+    self.air_medium = air(100, 20, 30)
+    self.weather_small = weather(6, 10, 10)
+    self.weather_medium = weather(12, 15, 20)
+    self.synthetic = synthetic(50, 20, 20)
+    self.stations = stations()
   
   def load_dataset(self, table_name, dataset):
     """Load a dataset into the context with error handling."""
@@ -195,8 +179,8 @@ class XarrayZarrTestBase(XarrayTestBase):
   
   def _setup_zarr_datasets(self):
     """Create standard Zarr datasets."""
-    self.weather_ds, self.weather_zarr_path = create_zarr_weather_dataset(self.temp_dir)
-    self.timeseries_ds, self.timeseries_zarr_path = create_zarr_timeseries_dataset(self.temp_dir)
+    self.weather_ds, self.weather_zarr_path = weather_zarr(self.temp_dir)
+    self.timeseries_ds, self.timeseries_zarr_path = timeseries_zarr(self.temp_dir)
   
   def load_zarr_dataset(self, table_name, zarr_path):
     """Load a Zarr dataset into the context with error handling."""
