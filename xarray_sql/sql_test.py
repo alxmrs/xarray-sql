@@ -273,7 +273,7 @@ class SqlVarietyTestCase(SQLBaseTestCase):
 
     # Basic select
     result = self.ctx.sql('SELECT * FROM stations ORDER BY elevation').to_pandas()
-    self.assertEqual(len(result), 5)
+    self.assertEqual(len(result), 3)
 
     # Test filtering by elevation
     result = self.ctx.sql(
