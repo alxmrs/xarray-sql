@@ -14,6 +14,7 @@ use pyo3::types::PyCapsule;
 use pyo3::{pyclass, pymethods, Bound, PyResult, Python};
 use std::path::Path;
 use std::sync::Arc;
+use std::collections::HashSet;
 use async_trait::async_trait;
 use zarrs::filesystem::FilesystemStore;
 use zarrs::group::Group;
@@ -21,7 +22,7 @@ use zarrs::array::Array;
 use zarrs::array::data_type::DataType as ZarrDataType;
 use zarrs::array_subset::ArraySubset;
 use zarrs::array::chunk_grid::ChunkGrid;
-use arrow_array::{Int64Array, Float64Array, Int32Array, Float32Array};
+use arrow_array::{Int64Array, Float64Array, Int32Array, Float32Array, Int16Array};
 
 /// Represents a coordinate range constraint for chunk filtering
 #[derive(Debug, Clone)]
@@ -211,6 +212,28 @@ impl ToArrowArray for i32 {
     }
 }
 
+impl ToArrowArray for i16 {
+    type ArrowArray = arrow_array::Int16Array;
+    
+    fn to_arrow_array(
+        flat_data: &ndarray::ArrayBase<ndarray::CowRepr<'_, Self>, ndarray::Dim<[usize; 1]>>,
+    ) -> Vec<Self> {
+        if flat_data.is_standard_layout() {
+            flat_data.as_slice().unwrap().to_vec()
+        } else {
+            flat_data.iter().cloned().collect()
+        }
+    }
+    
+    fn arrow_data_type() -> DataType {
+        DataType::Int16
+    }
+    
+    fn from_vec(data: Vec<Self>) -> Arc<Self::ArrowArray> {
+        Arc::new(arrow_array::Int16Array::from(data))
+    }
+}
+
 
 /// A DataFusion TableProvider that reads from Zarr stores
 #[pyclass(name = "ZarrTableProvider", module = "zarrquet", subclass)]
@@ -324,20 +347,106 @@ impl ZarrTableProvider {
         // Build unified schema: dimensions first, then data variables
         let mut fields = Vec::new();
         
-        // Add coordinate/dimension fields
+        // Add coordinate/dimension fields using actual coordinate names
         if let Some(ref shape) = reference_shape {
-            for (dim_idx, &_dim_size) in shape.iter().enumerate() {
-                // TODO: Extract actual coordinate names from metadata
+            // For typical xarray-generated Zarr, we expect coordinates in a specific order
+            // The air dataset has dimensions (time, lat, lon) 
+            // We need to match coordinate arrays to dimensions
+            
+            // First, collect all 1D coordinate arrays that match dimension sizes
+            let mut valid_coords: Vec<(String, usize)> = Vec::new();
+            
+            for (name, coord_shape, _) in &coordinate_arrays {
+                if coord_shape.len() == 1 {
+                    let size = coord_shape[0];
+                    // Find all dimension indices that match this size
+                    for (dim_idx, &dim_size) in shape.iter().enumerate() {
+                        if dim_size == size {
+                            let clean_name = if name.starts_with('/') {
+                                name.chars().skip(1).collect()
+                            } else {
+                                name.clone()
+                            };
+                            valid_coords.push((clean_name, dim_idx));
+                        }
+                    }
+                }
+            }
+            
+            // Sort by the typical xarray dimension order: time, lat, lon, etc.
+            // We'll use a simple heuristic based on common coordinate names
+            valid_coords.sort_by(|a, b| {
+                let name_a = &a.0;
+                let name_b = &b.0;
+                
+                // Define priority order for common coordinate names
+                let priority = |name: &str| -> i32 {
+                    match name {
+                        "time" => 0,
+                        "lat" | "latitude" => 1,
+                        "lon" | "longitude" => 2,
+                        "level" | "lev" => 3,
+                        _ => 100
+                    }
+                };
+                
+                let priority_a = priority(name_a);
+                let priority_b = priority(name_b);
+                
+                if priority_a != priority_b {
+                    priority_a.cmp(&priority_b)
+                } else {
+                    // If same priority, sort by dimension index
+                    a.1.cmp(&b.1)
+                }
+            });
+            
+            // Add coordinate fields, avoiding duplicates
+            let mut added_coords: HashSet<String> = HashSet::new();
+            
+            for (coord_name, _) in valid_coords {
+                if !added_coords.contains(&coord_name) {
+                    fields.push(Field::new(coord_name.clone(), DataType::Int64, false));
+                    added_coords.insert(coord_name);
+                }
+            }
+            
+            // If we didn't find enough coordinates, add generic dimension names
+            // Only add generic names if we have fewer coordinates than dimensions
+            for dim_idx in added_coords.len()..shape.len() {
                 let dim_name = format!("dim_{}", dim_idx);
-                fields.push(Field::new(dim_name, DataType::Int64, false));
+                fields.push(Field::new(dim_name.clone(), DataType::Int64, false));
+                added_coords.insert(dim_name);
             }
         }
         
-        // Add data variable fields
+        // Add data variable fields (remove leading slash if present)
+        // But exclude coordinate arrays that are already added as dimensions
+        let coord_names: HashSet<String> = coordinate_arrays.iter()
+            .map(|(name, _, _)| {
+                if name.starts_with('/') {
+                    name.chars().skip(1).collect()
+                } else {
+                    name.clone()
+                }
+            })
+            .collect();
+        
         for (var_name, _shape, data_type) in &data_variables {
             let arrow_type = self.zarr_type_to_arrow(data_type)
                 .unwrap_or(DataType::Float64); // Default fallback
-            fields.push(Field::new(var_name.clone(), arrow_type, true));
+            
+            // Remove leading slash from variable name if present
+            let clean_name = if var_name.starts_with('/') {
+                var_name.chars().skip(1).collect()
+            } else {
+                var_name.clone()
+            };
+            
+            // Only add if this is not a coordinate array
+            if !coord_names.contains(&clean_name) {
+                fields.push(Field::new(clean_name, arrow_type, true));
+            }
         }
         
         Ok(Arc::new(Schema::new(fields)))
@@ -592,6 +701,11 @@ impl ZarrTableProvider {
                         .map_err(|e| DataFusionError::External(Box::new(e)))?;
                     self.create_data_array_i32(chunk_data)?
                 }
+                ZarrDataType::Int16 => {
+                    let chunk_data = array.retrieve_chunk_ndarray::<i16>(chunk_indices)
+                        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                    self.create_data_array_i16(chunk_data)?
+                }
                 other => {
                     return Err(DataFusionError::External(
                         format!("Unsupported zarr data type for variable '{}': {:?}", var_name, other).into()
@@ -615,22 +729,8 @@ impl ZarrTableProvider {
             arrows.push(data_array);
         }
         
-        // Create the schema
-        let mut fields = Vec::new();
-        
-        // Add dimension fields
-        for dim_idx in 0..ndim {
-            fields.push(Field::new(format!("dim_{}", dim_idx), DataType::Int64, false));
-        }
-        
-        // Add data variable fields
-        for (var_name, array, _) in &arrays_data {
-            let arrow_type = self.zarr_type_to_arrow(array.data_type())
-                .unwrap_or(DataType::Float64);
-            fields.push(Field::new(var_name.clone(), arrow_type, true));
-        }
-        
-        let schema = Arc::new(Schema::new(fields));
+        // Create the schema using the same logic as infer_schema
+        let schema = self.infer_schema()?;
         
         // Create the RecordBatch
         RecordBatch::try_new(schema, arrows)
@@ -686,6 +786,16 @@ impl ZarrTableProvider {
         
         let data_vec = i32::to_arrow_array(&flat_data);
         Ok(i32::from_vec(data_vec) as Arc<dyn arrow_array::Array>)
+    }
+    
+    /// Create Arrow array from i16 ndarray
+    fn create_data_array_i16(&self, data: ndarray::ArrayD<i16>) -> Result<Arc<dyn arrow_array::Array>, DataFusionError> {
+        let total_elements = data.len();
+        let flat_data = data.to_shape(total_elements)
+            .map_err(|e| DataFusionError::External(format!("Failed to reshape i16 array: {}", e).into()))?;
+        
+        let data_vec = i16::to_arrow_array(&flat_data);
+        Ok(i16::from_vec(data_vec) as Arc<dyn arrow_array::Array>)
     }
     
     /// Convert a specific array chunk to RecordBatch
@@ -798,12 +908,20 @@ impl ZarrTableProvider {
         let data_array = T::from_vec(data_vec);
         arrays.push(data_array as Arc<dyn arrow_array::Array>);
         
-        // Create the schema
+        // Create the schema using the same logic as infer_schema  
+        // For single array case, we need to create a minimal schema
         let mut fields = Vec::new();
         for dim_idx in 0..ndim {
             fields.push(Field::new(format!("dim_{}", dim_idx), DataType::Int64, false));
         }
-        fields.push(Field::new(array_name, T::arrow_data_type(), true));
+        
+        // Remove leading slash from array name if present
+        let clean_name = if array_name.starts_with('/') {
+            array_name.chars().skip(1).collect()
+        } else {
+            array_name.to_string()
+        };
+        fields.push(Field::new(clean_name, T::arrow_data_type(), true));
         
         let schema = Arc::new(Schema::new(fields));
         
