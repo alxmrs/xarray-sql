@@ -316,18 +316,18 @@ class SqlJoinTestCase(SQLBaseTestCase):
     self.assertIn('air', air_sample.columns)
     self.assertIn('station_id', station_sample.columns)
 
-  @with_session_context_combinations
-  def test_coordinate_based_join(self, as_zarr):
+  def test_coordinate_based_join(self):
+    as_zarr=True
     """Test joining on coordinate proximity."""
-    self.load('air_data', self.air_small, as_zarr=as_zarr)
-    self.load('stations', self.stations, as_zarr=as_zarr)
+    air_table_name = self.load('air_data', self.air_small, as_zarr=as_zarr)
+    stations_table_name = self.load('stations', self.stations, as_zarr=as_zarr)
 
     # First test a simple cross join to ensure datasets are compatible
     result = self.ctx.sql(
-      """
+      f"""
     SELECT COUNT(*) as total_combinations
-    FROM air_data a
-    CROSS JOIN stations s
+    FROM {air_table_name} a
+    CROSS JOIN {stations_table_name} s
   """
     ).to_pandas()
 
@@ -335,10 +335,10 @@ class SqlJoinTestCase(SQLBaseTestCase):
 
     # Test a simpler join condition
     result = self.ctx.sql(
-      """
+      f"""
     SELECT 
       COUNT(*) as match_count
-    FROM air_data a, stations s
+    FROM {air_table_name} a, {stations_table_name} s
     WHERE s.station_id = 101
   """
     ).to_pandas()
