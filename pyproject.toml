@@ -1,3 +1,7 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
 [project]
 name = "xarray_sql"
 dynamic = ["version"]
@@ -22,6 +26,9 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
   "Topic :: Scientific/Engineering :: Atmospheric Science",
   "Topic :: Database :: Front-Ends",
 ]
@@ -30,6 +37,7 @@ dependencies = [
     "datafusion>=47.0.0",
     "xarray>=2024.7.0",
 ]
+
 
 [project.optional-dependencies]
 test = [
@@ -42,9 +50,8 @@ test = [
 Homepage = "https://github.com/alxmrs/xarray-sql"
 Issues = "https://github.com/alxmrs/xarray-sql/issues"
 
-[build-system]
-requires = ["setuptools>=64", "setuptools_scm>=8"]
-build-backend = "setuptools.build_meta"
+[tool.maturin]
+features = ["pyo3/extension-module"]
 
 [tool.setuptools.packages.find]
 exclude = ["demo", "perf_tests"]

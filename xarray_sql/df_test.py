@@ -77,7 +77,7 @@ class DaskTestCase(unittest.TestCase):
     self.air_small = self.air.isel(
         time=slice(0, 12), lat=slice(0, 11), lon=slice(0, 10)
     ).chunk(self.chunks)
-    self.randwx = rand_wx('1995-01-13T00', '1995-01-13T01')
+    self.weather = rand_wx('1995-01-13T00', '1995-01-13T01')
 
 
 class ExplodeTest(DaskTestCase):
