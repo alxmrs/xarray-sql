@@ -294,7 +294,14 @@ impl ZarrTableProvider {
             if let Ok(array) = Array::open(store.clone(), &path_str) {
                 let shape = array.shape().to_vec();
                 let data_type = array.data_type().clone();
-                all_arrays.push((path_str, shape, data_type));
+                
+                // Try to get dimension names from metadata
+                let dimension_names = array.dimension_names()
+                    .as_ref()
+                    .map(|names| names.iter().filter_map(|name| name.clone()).collect())
+                    .unwrap_or_else(|| vec![]);
+                
+                all_arrays.push((path_str, shape, data_type, dimension_names));
             }
         }
         
@@ -302,149 +309,239 @@ impl ZarrTableProvider {
             return Err(DataFusionError::External("No arrays found in Zarr store".into()));
         }
         
-        // Identify data variables vs coordinates
-        // Data variables typically have the highest dimensionality
-        // Coordinates are typically 1D arrays
-        let max_dims = all_arrays.iter()
-            .map(|(_, shape, _)| shape.len())
-            .max()
-            .unwrap_or(0);
-        
+        // Identify data variables vs coordinates using dimension_names
+        // Data variables have dimension_names that reference other arrays
+        // Coordinates have dimension_names that reference themselves
         let mut data_variables = Vec::new();
         let mut coordinate_arrays = Vec::new();
         
-        for (name, shape, data_type) in all_arrays {
-            if shape.len() == max_dims && shape.len() > 1 {
-                // This is likely a data variable (multi-dimensional)
-                data_variables.push((name, shape, data_type));
+        for (name, shape, data_type, dimension_names) in all_arrays {
+            // Remove leading slash from name for comparison
+            let clean_name = if name.starts_with('/') {
+                name.chars().skip(1).collect()
             } else {
-                // This is likely a coordinate array (1D or lower dimensionality)
+                name.clone()
+            };
+            
+            // Check if this is a coordinate (dimension_names contains only itself)
+            let is_coordinate = dimension_names.len() == 1 && dimension_names[0] == clean_name;
+            
+            if is_coordinate {
                 coordinate_arrays.push((name, shape, data_type));
+            } else {
+                // This is a data variable
+                data_variables.push((name, shape, data_type));
             }
         }
         
-        // Validate that data variables have consistent dimensions
+        // Handle different cases: multi-dimensional data variables or tabular data
         let mut reference_shape: Option<Vec<u64>> = None;
-        for (name, shape, _) in &data_variables {
-            if let Some(ref ref_shape) = reference_shape {
-                if shape != ref_shape {
+        
+        if !data_variables.is_empty() {
+            // Check if all data variables are 1D (tabular data)
+            let all_1d = data_variables.iter().all(|(_, shape, _)| shape.len() == 1);
+            
+            if all_1d {
+                // Case 1a: Tabular data - all arrays are 1D data variables
+                // Validate that all data variables have the same 1D shape
+                let first_shape = data_variables[0].1.clone();
+                for (name, shape, _) in &data_variables {
+                    if shape != &first_shape {
+                        return Err(DataFusionError::External(
+                            format!(
+                                "Inconsistent shapes in tabular data. Variable '{}' has shape {:?}, but expected {:?}.",
+                                name, shape, first_shape
+                            ).into()
+                        ));
+                    }
+                }
+                reference_shape = Some(first_shape);
+            } else {
+                // Case 1b: Multi-dimensional data variables (like air temperature)
+                // Validate that data variables have consistent dimensions
+                for (name, shape, _) in &data_variables {
+                    if let Some(ref ref_shape) = reference_shape {
+                        if shape != ref_shape {
+                            return Err(DataFusionError::External(
+                                format!(
+                                    "Inconsistent dimensions across data variables. Variable '{}' has shape {:?}, but expected {:?}. All data variables must have the same dimensional structure.",
+                                    name, shape, ref_shape
+                                ).into()
+                            ));
+                        }
+                    } else {
+                        reference_shape = Some(shape.clone());
+                    }
+                }
+            }
+        } else if !coordinate_arrays.is_empty() {
+            // Case 2: We have only coordinate arrays (tabular data like stations)
+            // In this case, all coordinate arrays should have the same 1D shape
+            let first_shape = coordinate_arrays[0].1.clone();
+            for (name, shape, _) in &coordinate_arrays {
+                if shape != &first_shape {
                     return Err(DataFusionError::External(
                         format!(
-                            "Inconsistent dimensions across data variables. Variable '{}' has shape {:?}, but expected {:?}. All data variables must have the same dimensional structure.",
-                            name, shape, ref_shape
+                            "Inconsistent shapes in tabular data. Variable '{}' has shape {:?}, but expected {:?}.",
+                            name, shape, first_shape
                         ).into()
                     ));
                 }
-            } else {
-                reference_shape = Some(shape.clone());
             }
-        }
-        
-        if data_variables.is_empty() {
+            reference_shape = Some(first_shape);
+        } else {
             return Err(DataFusionError::External("No arrays found in Zarr store".into()));
         }
         
-        // Build unified schema: dimensions first, then data variables
+        // Build unified schema based on the type of data
         let mut fields = Vec::new();
         
-        // Add coordinate/dimension fields using actual coordinate names
-        if let Some(ref shape) = reference_shape {
-            // For typical xarray-generated Zarr, we expect coordinates in a specific order
-            // The air dataset has dimensions (time, lat, lon) 
-            // We need to match coordinate arrays to dimensions
+        if !data_variables.is_empty() {
+            // Check if all data variables are 1D (tabular data)
+            let all_1d = data_variables.iter().all(|(_, shape, _)| shape.len() == 1);
             
-            // First, collect all 1D coordinate arrays that match dimension sizes
-            let mut valid_coords: Vec<(String, usize)> = Vec::new();
-            
-            for (name, coord_shape, _) in &coordinate_arrays {
-                if coord_shape.len() == 1 {
-                    let size = coord_shape[0];
-                    // Find all dimension indices that match this size
-                    for (dim_idx, &dim_size) in shape.iter().enumerate() {
-                        if dim_size == size {
-                            let clean_name = if name.starts_with('/') {
-                                name.chars().skip(1).collect()
-                            } else {
-                                name.clone()
-                            };
-                            valid_coords.push((clean_name, dim_idx));
+            if all_1d {
+                // Case 1a: Tabular data - all arrays are 1D data variables
+                // Don't add coordinate fields since we're dealing with tabular data
+            } else {
+                // Case 1b: Multi-dimensional data with coordinates
+                // Add coordinate/dimension fields using actual coordinate names
+                if let Some(ref shape) = reference_shape {
+                    // For typical xarray-generated Zarr, we expect coordinates in a specific order
+                    // The air dataset has dimensions (time, lat, lon) 
+                    // We need to match coordinate arrays to dimensions
+                    
+                    // First, collect all 1D coordinate arrays that match dimension sizes
+                    let mut valid_coords: Vec<(String, usize)> = Vec::new();
+                    
+                    for (name, coord_shape, _) in &coordinate_arrays {
+                        if coord_shape.len() == 1 {
+                            let size = coord_shape[0];
+                            // Find all dimension indices that match this size
+                            for (dim_idx, &dim_size) in shape.iter().enumerate() {
+                                if dim_size == size {
+                                    let clean_name = if name.starts_with('/') {
+                                        name.chars().skip(1).collect()
+                                    } else {
+                                        name.clone()
+                                    };
+                                    valid_coords.push((clean_name, dim_idx));
+                                }
+                            }
                         }
                     }
-                }
-            }
-            
-            // Sort by the typical xarray dimension order: time, lat, lon, etc.
-            // We'll use a simple heuristic based on common coordinate names
-            valid_coords.sort_by(|a, b| {
-                let name_a = &a.0;
-                let name_b = &b.0;
-                
-                // Define priority order for common coordinate names
-                let priority = |name: &str| -> i32 {
-                    match name {
-                        "time" => 0,
-                        "lat" | "latitude" => 1,
-                        "lon" | "longitude" => 2,
-                        "level" | "lev" => 3,
-                        _ => 100
+                    
+                    // Sort by the typical xarray dimension order: time, lat, lon, etc.
+                    // We'll use a simple heuristic based on common coordinate names
+                    valid_coords.sort_by(|a, b| {
+                        let name_a = &a.0;
+                        let name_b = &b.0;
+                        
+                        // Define priority order for common coordinate names
+                        let priority = |name: &str| -> i32 {
+                            match name {
+                                "time" => 0,
+                                "lat" | "latitude" => 1,
+                                "lon" | "longitude" => 2,
+                                "level" | "lev" => 3,
+                                _ => 100
+                            }
+                        };
+                        
+                        let priority_a = priority(name_a);
+                        let priority_b = priority(name_b);
+                        
+                        if priority_a != priority_b {
+                            priority_a.cmp(&priority_b)
+                        } else {
+                            // If same priority, sort by dimension index
+                            a.1.cmp(&b.1)
+                        }
+                    });
+                    
+                    // Add coordinate fields, avoiding duplicates
+                    let mut added_coords: HashSet<String> = HashSet::new();
+                    
+                    for (coord_name, _) in valid_coords {
+                        if !added_coords.contains(&coord_name) {
+                            fields.push(Field::new(coord_name.clone(), DataType::Int64, false));
+                            added_coords.insert(coord_name);
+                        }
                     }
-                };
-                
-                let priority_a = priority(name_a);
-                let priority_b = priority(name_b);
-                
-                if priority_a != priority_b {
-                    priority_a.cmp(&priority_b)
-                } else {
-                    // If same priority, sort by dimension index
-                    a.1.cmp(&b.1)
-                }
-            });
-            
-            // Add coordinate fields, avoiding duplicates
-            let mut added_coords: HashSet<String> = HashSet::new();
-            
-            for (coord_name, _) in valid_coords {
-                if !added_coords.contains(&coord_name) {
-                    fields.push(Field::new(coord_name.clone(), DataType::Int64, false));
-                    added_coords.insert(coord_name);
+                    
+                    // If we didn't find enough coordinates, add generic dimension names
+                    // Only add generic names if we have fewer coordinates than dimensions
+                    for dim_idx in added_coords.len()..shape.len() {
+                        let dim_name = format!("dim_{}", dim_idx);
+                        fields.push(Field::new(dim_name.clone(), DataType::Int64, false));
+                        added_coords.insert(dim_name);
+                    }
                 }
             }
-            
-            // If we didn't find enough coordinates, add generic dimension names
-            // Only add generic names if we have fewer coordinates than dimensions
-            for dim_idx in added_coords.len()..shape.len() {
-                let dim_name = format!("dim_{}", dim_idx);
-                fields.push(Field::new(dim_name.clone(), DataType::Int64, false));
-                added_coords.insert(dim_name);
-            }
+        } else {
+            // Case 2: Tabular data (only coordinate arrays, no multi-dimensional data)
+            // In this case, coordinate_arrays actually contains the data variables
+            // We don't need to add coordinate fields since there are no true coordinates
+            // The data will be handled in the data variables section below
         }
         
         // Add data variable fields (remove leading slash if present)
-        // But exclude coordinate arrays that are already added as dimensions
-        let coord_names: HashSet<String> = coordinate_arrays.iter()
-            .map(|(name, _, _)| {
-                if name.starts_with('/') {
-                    name.chars().skip(1).collect()
-                } else {
-                    name.clone()
+        if !data_variables.is_empty() {
+            // Check if all data variables are 1D (tabular data)
+            let all_1d = data_variables.iter().all(|(_, shape, _)| shape.len() == 1);
+            
+            if all_1d {
+                // Case 1a: Tabular data - add all data variables as regular columns
+                for (var_name, _shape, data_type) in &data_variables {
+                    let arrow_type = self.zarr_type_to_arrow(data_type)?;
+                    let clean_name = if var_name.starts_with('/') {
+                        var_name.chars().skip(1).collect()
+                    } else {
+                        var_name.clone()
+                    };
+                    fields.push(Field::new(clean_name, arrow_type, true));
                 }
-            })
-            .collect();
-        
-        for (var_name, _shape, data_type) in &data_variables {
-            let arrow_type = self.zarr_type_to_arrow(data_type)
-                .unwrap_or(DataType::Float64); // Default fallback
-            
-            // Remove leading slash from variable name if present
-            let clean_name = if var_name.starts_with('/') {
-                var_name.chars().skip(1).collect()
             } else {
-                var_name.clone()
-            };
-            
-            // Only add if this is not a coordinate array
-            if !coord_names.contains(&clean_name) {
+                // Case 1b: Multi-dimensional data variables
+                // Exclude coordinate arrays that are already added as dimensions
+                let coord_names: HashSet<String> = coordinate_arrays.iter()
+                    .map(|(name, _, _)| {
+                        if name.starts_with('/') {
+                            name.chars().skip(1).collect()
+                        } else {
+                            name.clone()
+                        }
+                    })
+                    .collect();
+                
+                for (var_name, _shape, data_type) in &data_variables {
+                    let arrow_type = self.zarr_type_to_arrow(data_type)?;
+                    
+                    // Remove leading slash from variable name if present
+                    let clean_name = if var_name.starts_with('/') {
+                        var_name.chars().skip(1).collect()
+                    } else {
+                        var_name.clone()
+                    };
+                    
+                    // Only add if this is not a coordinate array
+                    if !coord_names.contains(&clean_name) {
+                        fields.push(Field::new(clean_name, arrow_type, true));
+                    }
+                }
+            }
+        } else {
+            // Case 2: Tabular data - coordinate_arrays actually contains the data variables
+            for (var_name, _shape, data_type) in &coordinate_arrays {
+                let arrow_type = self.zarr_type_to_arrow(data_type)?;
+                
+                // Remove leading slash from variable name if present
+                let clean_name = if var_name.starts_with('/') {
+                    var_name.chars().skip(1).collect()
+                } else {
+                    var_name.clone()
+                };
+                
                 fields.push(Field::new(clean_name, arrow_type, true));
             }
         }
@@ -479,7 +576,9 @@ impl ZarrTableProvider {
                 Err(DataFusionError::External("RawBits not yet supported".into()))
             }
             _ => {
-                Err(DataFusionError::External(format!("Unsupported zarr data type: {:?}", zarr_type).into()))
+                // For string types and other unsupported types, default to String
+                // This handles xarray's string variables
+                Ok(DataType::Utf8)
             }
         }
     }
@@ -589,7 +688,14 @@ impl ZarrTableProvider {
             let path_str = child.path().to_string();
             if let Ok(array) = Array::open(store.clone(), &path_str) {
                 let shape = array.shape().to_vec();
-                all_arrays.push((path_str, array, shape));
+                
+                // Try to get dimension names from metadata
+                let dimension_names = array.dimension_names()
+                    .as_ref()
+                    .map(|names| names.iter().filter_map(|name| name.clone()).collect())
+                    .unwrap_or_else(|| vec![]);
+                
+                all_arrays.push((path_str, array, shape, dimension_names));
             }
         }
         
@@ -597,66 +703,175 @@ impl ZarrTableProvider {
             return Err(DataFusionError::External("No arrays found in Zarr store".into()));
         }
         
-        // Identify data variables (highest dimensionality, >1D)
-        let max_dims = all_arrays.iter()
-            .map(|(_, _, shape)| shape.len())
-            .max()
-            .unwrap_or(0);
+        // Identify data variables vs coordinates using dimension_names
+        let mut data_variables = Vec::new();
+        let mut coordinate_arrays = Vec::new();
         
-        let mut arrays_data = Vec::new();
-        let mut reference_shape: Option<Vec<u64>> = None;
-        let mut reference_chunk_subset: Option<ArraySubset> = None;
-        
-        // Second pass: process only data variables
-        for (path_str, array, shape) in all_arrays {
-            // Only process data variables (multi-dimensional arrays)
-            if shape.len() == max_dims && shape.len() > 1 {
-                // Validate chunk alignment
-                let chunk_subset = array.chunk_subset(chunk_indices)
-                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                
-                // Check shape and chunk consistency
-                if let Some(ref ref_shape) = reference_shape {
-                    if shape != *ref_shape {
-                        return Err(DataFusionError::External(
-                            format!(
-                                "Inconsistent array shapes. Variable '{}' has shape {:?}, expected {:?}",
-                                path_str, shape, ref_shape
-                            ).into()
-                        ));
-                    }
-                } else {
-                    reference_shape = Some(shape);
-                }
-                
-                // Check chunk subset consistency  
-                if let Some(ref ref_subset) = reference_chunk_subset {
-                    if chunk_subset.shape() != ref_subset.shape() {
-                        return Err(DataFusionError::External(
-                            format!(
-                                "Inconsistent chunk shapes. Variable '{}' chunk has shape {:?}, expected {:?}. All variables must have aligned chunks.",
-                                path_str, chunk_subset.shape(), ref_subset.shape()
-                            ).into()
-                        ));
-                    }
-                } else {
-                    reference_chunk_subset = Some(chunk_subset.clone());
-                }
-                
-                arrays_data.push((path_str, array, chunk_subset));
+        for (name, array, shape, dimension_names) in all_arrays {
+            // Remove leading slash from name for comparison
+            let clean_name = if name.starts_with('/') {
+                name.chars().skip(1).collect()
+            } else {
+                name.clone()
+            };
+            
+            // Check if this is a coordinate (dimension_names contains only itself)
+            let is_coordinate = dimension_names.len() == 1 && dimension_names[0] == clean_name;
+            
+            if is_coordinate {
+                coordinate_arrays.push((name, array, shape));
+            } else {
+                // This is a data variable
+                data_variables.push((name, array, shape));
             }
         }
         
-        if arrays_data.is_empty() {
-            return Err(DataFusionError::External("No arrays found in Zarr store".into()));
+        // Handle different cases: multi-dimensional data variables or tabular data
+        if !data_variables.is_empty() {
+            // Check if all data variables are 1D (tabular data)
+            let all_1d = data_variables.iter().all(|(_, _, shape)| shape.len() == 1);
+            
+            if all_1d {
+                // Case 1: Tabular data - all arrays are 1D data variables
+                return self.create_tabular_record_batch(data_variables, chunk_indices);
+            } else {
+                // Case 2: Multi-dimensional data variables
+                return self.create_multi_variable_record_batch(
+                    data_variables.into_iter().map(|(name, array, shape)| {
+                        let chunk_subset = array.chunk_subset(chunk_indices)
+                            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                        Ok((name, array, chunk_subset))
+                    }).collect::<Result<Vec<_>, DataFusionError>>()?,
+                    chunk_indices
+                );
+            }
+        } else {
+            // Case 3: Only coordinate arrays (should not happen in normal zarr)
+            return self.create_tabular_record_batch(coordinate_arrays, chunk_indices);
         }
-        
-        // Now create the multi-variable RecordBatch
-        self.create_multi_variable_record_batch(arrays_data, chunk_indices)
     }
     
-    /// Create a RecordBatch from multiple variables with proper cartesian product
+    /// Create a RecordBatch from 1D tabular data
+    fn create_tabular_record_batch(
+        &self,
+        arrays: Vec<(String, Array<FilesystemStore>, Vec<u64>)>,
+        chunk_indices: &[u64],
+    ) -> Result<RecordBatch, DataFusionError> {
+        if arrays.is_empty() {
+            return Err(DataFusionError::External("No arrays provided".into()));
+        }
+        
+        let mut arrow_arrays: Vec<Arc<dyn arrow_array::Array>> = Vec::new();
+        let mut fields = Vec::new();
+        
+        for (name, array, _shape) in arrays {
+            // Clean the name
+            let clean_name = if name.starts_with('/') {
+                name.chars().skip(1).collect()
+            } else {
+                name.clone()
+            };
+            
+            // Get the data type and create appropriate Arrow array
+            let data_array = match array.data_type() {
+                ZarrDataType::Float64 => {
+                    let chunk_data = array.retrieve_chunk_ndarray::<f64>(chunk_indices)
+                        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                    self.create_data_array_f64(chunk_data)?
+                }
+                ZarrDataType::Float32 => {
+                    let chunk_data = array.retrieve_chunk_ndarray::<f32>(chunk_indices)
+                        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                    self.create_data_array_f32(chunk_data)?
+                }
+                ZarrDataType::Int64 => {
+                    let chunk_data = array.retrieve_chunk_ndarray::<i64>(chunk_indices)
+                        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                    self.create_data_array_i64(chunk_data)?
+                }
+                ZarrDataType::Int32 => {
+                    let chunk_data = array.retrieve_chunk_ndarray::<i32>(chunk_indices)
+                        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                    self.create_data_array_i32(chunk_data)?
+                }
+                ZarrDataType::Int16 => {
+                    let chunk_data = array.retrieve_chunk_ndarray::<i16>(chunk_indices)
+                        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                    self.create_data_array_i16(chunk_data)?
+                }
+                other => {
+                    // For string types and other unsupported types, skip for now
+                    // TODO: Add proper string support with zarrs library
+                    eprintln!("Warning: Skipping unsupported zarr data type for tabular data variable '{}': {:?}", clean_name, other);
+                    continue;
+                }
+            };
+            
+            arrow_arrays.push(data_array);
+            let arrow_type = self.zarr_type_to_arrow(array.data_type())?;
+            fields.push(Field::new(clean_name, arrow_type, true));
+        }
+        
+        let schema = Arc::new(Schema::new(fields));
+        RecordBatch::try_new(schema, arrow_arrays)
+            .map_err(|e| DataFusionError::External(Box::new(e)))
+    }
+    
+    /// Create a RecordBatch from multiple variables with proper cartesian product (existing method)
     fn create_multi_variable_record_batch(
+        &self,
+        arrays_data: Vec<(String, Array<FilesystemStore>, ArraySubset)>,
+        chunk_indices: &[u64],
+    ) -> Result<RecordBatch, DataFusionError> {
+        if arrays_data.is_empty() {
+            return Err(DataFusionError::External("No arrays provided".into()));
+        }
+        
+        // Continue with existing logic for multi-dimensional data
+        let mut arrays_data_processed = Vec::new();
+        let mut reference_shape: Option<Vec<u64>> = None;
+        let mut reference_chunk_subset: Option<ArraySubset> = None;
+        
+        for (path_str, array, chunk_subset) in arrays_data {
+            let shape = array.shape().to_vec();
+            
+            // Validate chunk alignment
+            if let Some(ref ref_shape) = reference_shape {
+                if shape != *ref_shape {
+                    return Err(DataFusionError::External(
+                        format!(
+                            "Inconsistent array shapes. Variable '{}' has shape {:?}, expected {:?}",
+                            path_str, shape, ref_shape
+                        ).into()
+                    ));
+                }
+            } else {
+                reference_shape = Some(shape);
+            }
+            
+            // Check chunk subset consistency  
+            if let Some(ref ref_subset) = reference_chunk_subset {
+                if chunk_subset.shape() != ref_subset.shape() {
+                    return Err(DataFusionError::External(
+                        format!(
+                            "Inconsistent chunk shapes. Variable '{}' chunk has shape {:?}, expected {:?}. All variables must have aligned chunks.",
+                            path_str, chunk_subset.shape(), ref_subset.shape()
+                        ).into()
+                    ));
+                }
+            } else {
+                reference_chunk_subset = Some(chunk_subset.clone());
+            }
+            
+            arrays_data_processed.push((path_str, array, chunk_subset));
+        }
+        
+        // Now create the multi-variable RecordBatch using the existing logic
+        return self.create_multi_variable_record_batch_internal(arrays_data_processed, chunk_indices);
+    }
+    
+    /// Internal method to create multi-variable record batch (continuation of existing logic)
+    fn create_multi_variable_record_batch_internal(
         &self,
         arrays_data: Vec<(String, Array<FilesystemStore>, ArraySubset)>,
         chunk_indices: &[u64],
@@ -1148,13 +1363,20 @@ impl ZarrTableProvider {
         let children = group.children(false)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         
-        // Collect data variables (same logic as before)
+        // Collect data variables using same logic as infer_schema
         let mut all_arrays = Vec::new();
         for child in &children {
             let path_str = child.path().to_string();
             if let Ok(array) = Array::open(store.clone(), &path_str) {
                 let shape = array.shape().to_vec();
-                all_arrays.push((path_str, array, shape));
+                
+                // Try to get dimension names from metadata
+                let dimension_names = array.dimension_names()
+                    .as_ref()
+                    .map(|names| names.iter().filter_map(|name| name.clone()).collect())
+                    .unwrap_or_else(|| vec![]);
+                
+                all_arrays.push((path_str, array, shape, dimension_names));
             }
         }
         
@@ -1162,22 +1384,40 @@ impl ZarrTableProvider {
             return Err(DataFusionError::External("No arrays found in Zarr store".into()));
         }
         
-        // Identify data variables (highest dimensionality, >1D)
-        let max_dims = all_arrays.iter()
-            .map(|(_, _, shape)| shape.len())
-            .max()
-            .unwrap_or(0);
+        // Identify data variables vs coordinates using dimension_names (same logic as infer_schema)
+        let mut data_variables = Vec::new();
+        let mut coordinate_arrays = Vec::new();
         
-        let data_variables: Vec<_> = all_arrays.into_iter()
-            .filter(|(_, _, shape)| shape.len() == max_dims && shape.len() > 1)
-            .collect();
-        
-        if data_variables.is_empty() {
-            return Err(DataFusionError::External("No data variables found".into()));
+        for (name, array, shape, dimension_names) in all_arrays {
+            // Remove leading slash from name for comparison
+            let clean_name = if name.starts_with('/') {
+                name.chars().skip(1).collect()
+            } else {
+                name.clone()
+            };
+            
+            // Check if this is a coordinate (dimension_names contains only itself)
+            let is_coordinate = dimension_names.len() == 1 && dimension_names[0] == clean_name;
+            
+            if is_coordinate {
+                coordinate_arrays.push((name, array, shape));
+            } else {
+                // This is a data variable
+                data_variables.push((name, array, shape));
+            }
         }
         
-        // Get chunk grid from the first data variable
-        let (_, ref_array, ref_shape) = &data_variables[0];
+        // Handle different cases: multi-dimensional data variables or tabular data
+        if data_variables.is_empty() && coordinate_arrays.is_empty() {
+            return Err(DataFusionError::External("No arrays found in Zarr store".into()));
+        }
+        
+        // Get chunk grid from the first available array
+        let (_, ref_array, ref_shape) = if !data_variables.is_empty() {
+            &data_variables[0]
+        } else {
+            &coordinate_arrays[0]
+        };
         let chunk_grid = ref_array.chunk_grid();
         
         // Generate all possible chunk indices and filter them
