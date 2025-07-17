@@ -26,16 +26,3 @@ pyo3-build-config = "0.23"
 [lib]
 name = "zarrquet"
 crate-type = ["cdylib", "rlib"]
-
-[[example]]
-name = "test_predicate_pushdown"
-path = "examples/test_predicate_pushdown.rs"
-
-[[example]]
-name = "sql_integration_tests"
-path = "examples/sql_integration_tests.rs"
-
-[[example]]
-name = "test_dimensional_joins"
-path = "examples/test_dimensional_joins.rs"
-
