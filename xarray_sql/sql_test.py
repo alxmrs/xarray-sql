@@ -24,75 +24,93 @@ class SQLBaseTestCase(DaskTestCase):
       time_steps=50, lat_points=20, lon_points=20
     ).chunk({'time': 25})
 
-    # Create 1D dataset for testing joins
+    # Create station metadata as a simple tabular dataset
+    # Use coordinates that overlap with air dataset
+    air_lats = self.air_small.lat.values
+    air_lons = self.air_small.lon.values
+
+    # Create stations at specific lat/lon points
     self.stations = xr.Dataset(
       {
-        'station_id': (['station'], [1, 2, 3, 4, 5]),
-        'elevation': (['station'], [100, 250, 500, 750, 1000]),
-        'name': (
-          ['station'],
-          [
-            'Station_A',
-            'Station_B',
-            'Station_C',
-            'Station_D',
-            'Station_E',
-          ],
-        ),
+        'station_id': (['station'], [101, 102, 103]),
+        'lat': (['station'], [air_lats[0], air_lats[2], air_lats[4]]),
+        'lon': (['station'], [air_lons[1], air_lons[3], air_lons[5]]),
+        'elevation': (['station'], [100, 250, 500]),
+        'name': (['station'], ['Downtown', 'Airport', 'Mountain']),
       }
-    ).chunk({'station': 5})
+    ).chunk({'station': 3})
+
+    # Create region lookup table
+    self.regions = xr.Dataset(
+      {
+        'region_id': (['region'], [1, 2, 3, 4]),
+        'region_name': (['region'], ['North', 'South', 'East', 'West']),
+        'min_lat': (['region'], [60, 30, 40, 40]),
+        'max_lat': (['region'], [90, 60, 80, 80]),
+        'min_lon': (['region'], [-180, -180, -90, -180]),
+        'max_lon': (['region'], [180, 180, 180, -90]),
+      }
+    ).chunk({'region': 4})
+
 
   def tearDown(self):
     # Clean up the temporary directory after each test method
     self.temp_dir.cleanup()
 
-  def load(self, name: str, ds: xr.Dataset, chunks=None, as_zarr=False):
+  def load(self, name: str, ds: xr.Dataset, chunks=None, as_zarr=False) -> str:
     """Load a dataset into the test context; sometimes writing the data to Zarr first."""
+    actual_table_name = name
     if as_zarr:
       path = os.path.join(self.temp_dir.name, name + '.zarr')
       ds.to_zarr(path)
-      self.ctx.from_zarr(name + "_zarr", path)
+      actual_table_name = name + '_zarr'
+      self.ctx.from_zarr(actual_table_name,  path)
     else:
-      self.ctx.from_dataset(name, ds, chunks)
+      self.ctx.from_dataset(actual_table_name, ds, chunks)
+
+    return actual_table_name
 
 
-def test_ctx_combos(test_func):
+
+
+def with_session_context_combinations(test_func):
   # test_name, options
-  test_combinations = [("from_dataset", dict(as_zarr=False)),
-                       ("from_zarr", dict(as_zarr=True))]
+  test_combinations = [
+    ("from_dataset", dict(as_zarr=False)),
+    ("from_zarr", dict(as_zarr=True)),
+  ]
 
-  functools.wraps(test_func)
+  @functools.wraps(test_func)
   def wrapper(self, *args, **kwargs):
     for case, opt in test_combinations:
-      with self.subTest(case):
-        result = test_func(self, *args, **opt, **kwargs)
-    return result
+      with self.subTest(case, **opt):
+        test_func(self, *args, **opt, **kwargs)
 
   return wrapper
 
 
 class SqlTestCase(SQLBaseTestCase):
 
-  @test_ctx_combos
+  @with_session_context_combinations
   def test_sanity(self, as_zarr):
-    self.load('air', self.air_small, as_zarr=as_zarr)
-    query = self.ctx.sql('SELECT "lat", "lon", "time", "air" FROM "air" LIMIT 100')
+    table_name = self.load('air', self.air_small, as_zarr=as_zarr)
+    query = self.ctx.sql(f'SELECT "lat", "lon", "time", "air" FROM "{table_name}" LIMIT 100')
 
     result = query.to_pandas()
     self.assertIsNotNone(result)
     self.assertLessEqual(len(result), 1320)  # Should be all rows or less
     self.assertGreater(len(result), 0)  # Should have some rows
 
-  @test_ctx_combos
+  @with_session_context_combinations
   def test_agg_small(self, as_zarr):
-    self.load('air', self.air_small, as_zarr=as_zarr)
+    table_name = self.load('air', self.air_small, as_zarr=as_zarr)
 
     query = self.ctx.sql(
-      """
+      f"""
 SELECT
   "lat", "lon", SUM("air") as air_total
 FROM 
-  "air" 
+  "{table_name}" 
 GROUP BY
  "lat", "lon"
 """
@@ -104,16 +122,17 @@ GROUP BY
     expected = self.air_small.sizes['lat'] * self.air_small.sizes['lon']
     self.assertEqual(len(result), expected)
 
-  @test_ctx_combos
+  @with_session_context_combinations
   def test_agg_regular(self, as_zarr):
-    self.load('air', self.air, as_zarr=as_zarr)
+    self.ctx = XarrayContext()
+    table_name = self.load('air', self.air, as_zarr=as_zarr)
 
     query = self.ctx.sql(
-      """
+      f"""
   SELECT
     "lat", "lon", AVG("air") as air_total
   FROM 
-    "air" 
+    "{table_name}" 
   GROUP BY
    "lat", "lon"
   """
@@ -129,7 +148,7 @@ GROUP BY
 class SqlVarietyTestCase(SQLBaseTestCase):
   """Test SQL functionality with various types of Xarray datasets."""
 
-  @test_ctx_combos
+  @with_session_context_combinations
   def test_basic_select_all(self, as_zarr):
     """Test basic SELECT * queries on different datasets."""
     # Test with air temperature dataset
@@ -143,7 +162,7 @@ class SqlVarietyTestCase(SQLBaseTestCase):
     self.assertIn('lon', result.columns)
     self.assertIn('time', result.columns)
 
-  @test_ctx_combos
+  @with_session_context_combinations
   def test_weather_dataset_queries(self, as_zarr):
     """Test queries on weather dataset with multiple variables."""
     self.load('weather', self.weather_small, as_zarr=as_zarr)
@@ -166,7 +185,7 @@ class SqlVarietyTestCase(SQLBaseTestCase):
     # All temperatures should be > 10
     self.assertTrue((result['temperature'] > 10).all())
 
-  @test_ctx_combos
+  @with_session_context_combinations
   def test_synthetic_dataset_aggregations(self, as_zarr):
     """Test aggregation queries on synthetic dataset."""
     self.load('synthetic', self.synthetic, as_zarr=as_zarr)
@@ -196,7 +215,7 @@ class SqlVarietyTestCase(SQLBaseTestCase):
     )
     self.assertLessEqual(result['avg_temp'].iloc[0], result['max_temp'].iloc[0])
 
-  @test_ctx_combos
+  @with_session_context_combinations
   def test_spatial_grouping(self, as_zarr):
     """Test spatial grouping queries."""
     self.load('air', self.air_small, as_zarr=as_zarr)
@@ -224,7 +243,7 @@ class SqlVarietyTestCase(SQLBaseTestCase):
       (result['time_count'] == self.air_small.sizes['time']).all()
     )
 
-  @test_ctx_combos
+  @with_session_context_combinations
   def test_temporal_filtering(self, as_zarr):
     """Test temporal filtering and grouping."""
     self.load("weather", self.weather_small, as_zarr=as_zarr)
@@ -247,7 +266,7 @@ class SqlVarietyTestCase(SQLBaseTestCase):
 
       self.assertGreater(result['count_after'].iloc[0], 0)
 
-  @test_ctx_combos
+  @with_session_context_combinations
   def test_station_dataset_queries(self, as_zarr):
     """Test queries on 1D station dataset."""
     self.load("stations", self.stations, as_zarr=as_zarr)
@@ -265,56 +284,20 @@ class SqlVarietyTestCase(SQLBaseTestCase):
     self.assertTrue((result['elevation'] > 300).all())
 
 
-class SqlJoinTestCase(unittest.TestCase):
+class SqlJoinTestCase(SQLBaseTestCase):
   """Test joining tabular data with raster data using from_dataset."""
 
-  def setUp(self):
-    """Set up datasets for join testing."""
-    # Create a small air temperature dataset
-    self.air = xr.tutorial.open_dataset('air_temperature')
-    self.air_small = self.air.isel(
-      time=slice(0, 12), lat=slice(0, 5), lon=slice(0, 8)
-    ).chunk({'time': 6})
-
-    # Create station metadata as a simple tabular dataset
-    # Use coordinates that overlap with air dataset
-    air_lats = self.air_small.lat.values
-    air_lons = self.air_small.lon.values
-
-    # Create stations at specific lat/lon points
-    self.stations = xr.Dataset(
-      {
-        'station_id': (['station'], [101, 102, 103]),
-        'lat': (['station'], [air_lats[0], air_lats[2], air_lats[4]]),
-        'lon': (['station'], [air_lons[1], air_lons[3], air_lons[5]]),
-        'elevation': (['station'], [100, 250, 500]),
-        'name': (['station'], ['Downtown', 'Airport', 'Mountain']),
-      }
-    ).chunk({'station': 3})
-
-    # Create region lookup table
-    self.regions = xr.Dataset(
-      {
-        'region_id': (['region'], [1, 2, 3, 4]),
-        'region_name': (['region'], ['North', 'South', 'East', 'West']),
-        'min_lat': (['region'], [60, 30, 40, 40]),
-        'max_lat': (['region'], [90, 60, 80, 80]),
-        'min_lon': (['region'], [-180, -180, -90, -180]),
-        'max_lon': (['region'], [180, 180, 180, -90]),
-      }
-    ).chunk({'region': 4})
-
-  def test_simple_cross_join(self):
+  @with_session_context_combinations
+  def test_simple_cross_join(self, as_zarr):
     """Test cross join between raster and tabular data."""
-    ctx = XarrayContext()
-    ctx.from_dataset('air_data', self.air_small)
-    ctx.from_dataset('stations', self.stations)
+    self.load('air_data', self.air_small, as_zarr=as_zarr)
+    self.load('stations', self.stations, as_zarr=as_zarr)
 
     # Test separate queries first to ensure both datasets work
-    air_result = ctx.sql(
+    air_result = self.ctx.sql(
       'SELECT COUNT(*) as air_count FROM air_data'
     ).to_pandas()
-    station_result = ctx.sql(
+    station_result = self.ctx.sql(
       'SELECT COUNT(*) as station_count FROM stations'
     ).to_pandas()
 
@@ -323,8 +306,8 @@ class SqlJoinTestCase(unittest.TestCase):
 
     # Test that we can query both datasets in the same context
     # This demonstrates multi-dataset capability without complex joins
-    air_sample = ctx.sql('SELECT air FROM air_data LIMIT 5').to_pandas()
-    station_sample = ctx.sql(
+    air_sample = self.ctx.sql('SELECT air FROM air_data LIMIT 5').to_pandas()
+    station_sample = self.ctx.sql(
       'SELECT station_id FROM stations LIMIT 5'
     ).to_pandas()
 
@@ -333,14 +316,14 @@ class SqlJoinTestCase(unittest.TestCase):
     self.assertIn('air', air_sample.columns)
     self.assertIn('station_id', station_sample.columns)
 
-  def test_coordinate_based_join(self):
+  @with_session_context_combinations
+  def test_coordinate_based_join(self, as_zarr):
     """Test joining on coordinate proximity."""
-    ctx = XarrayContext()
-    ctx.from_dataset('air_data', self.air_small)
-    ctx.from_dataset('stations', self.stations)
+    self.load('air_data', self.air_small, as_zarr=as_zarr)
+    self.load('stations', self.stations, as_zarr=as_zarr)
 
     # First test a simple cross join to ensure datasets are compatible
-    result = ctx.sql(
+    result = self.ctx.sql(
       """
     SELECT COUNT(*) as total_combinations
     FROM air_data a
@@ -351,7 +334,7 @@ class SqlJoinTestCase(unittest.TestCase):
     self.assertGreater(result['total_combinations'].iloc[0], 0)
 
     # Test a simpler join condition
-    result = ctx.sql(
+    result = self.ctx.sql(
       """
     SELECT 
       COUNT(*) as match_count
