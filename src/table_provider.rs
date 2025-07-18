@@ -22,7 +22,7 @@ use zarrs::array::Array;
 use zarrs::array::data_type::DataType as ZarrDataType;
 use zarrs::array_subset::ArraySubset;
 use zarrs::array::chunk_grid::ChunkGrid;
-use arrow_array::{Int64Array, Float64Array, Int32Array, Float32Array, Int16Array};
+use arrow_array::{Int16Array, Int64Array, Float64Array, Int32Array, Float32Array};
 
 /// Represents a coordinate range constraint for chunk filtering
 #[derive(Debug, Clone)]
@@ -63,25 +63,6 @@ impl CoordinateRange {
 #[derive(Debug, Clone)]
 pub struct CoordinateFilter {
     ranges: Vec<CoordinateRange>,
-}
-
-/// Helper function to generate all chunk index combinations
-fn generate_chunk_indices(
-    chunks_per_dim: &[u64],
-    current: &mut Vec<u64>,
-    results: &mut Vec<Vec<u64>>,
-) {
-    if current.len() == chunks_per_dim.len() {
-        results.push(current.clone());
-        return;
-    }
-    
-    let dim_idx = current.len();
-    for chunk_idx in 0..chunks_per_dim[dim_idx] {
-        current.push(chunk_idx);
-        generate_chunk_indices(chunks_per_dim, current, results);
-        current.pop();
-    }
 }
 
 impl CoordinateFilter {
@@ -213,7 +194,7 @@ impl ToArrowArray for i32 {
 }
 
 impl ToArrowArray for i16 {
-    type ArrowArray = arrow_array::Int16Array;
+    type ArrowArray = Int16Array;
     
     fn to_arrow_array(
         flat_data: &ndarray::ArrayBase<ndarray::CowRepr<'_, Self>, ndarray::Dim<[usize; 1]>>,
@@ -230,7 +211,7 @@ impl ToArrowArray for i16 {
     }
     
     fn from_vec(data: Vec<Self>) -> Arc<Self::ArrowArray> {
-        Arc::new(arrow_array::Int16Array::from(data))
+        Arc::new(Int16Array::from(data))
     }
 }
 
@@ -737,7 +718,7 @@ impl ZarrTableProvider {
             } else {
                 // Case 2: Multi-dimensional data variables
                 return self.create_multi_variable_record_batch(
-                    data_variables.into_iter().map(|(name, array, shape)| {
+                    data_variables.into_iter().map(|(name, array, _shape)| {
                         let chunk_subset = array.chunk_subset(chunk_indices)
                             .map_err(|e| DataFusionError::External(Box::new(e)))?;
                         Ok((name, array, chunk_subset))
@@ -883,7 +864,6 @@ impl ZarrTableProvider {
         // Get reference dimensions from the first array
         let (_, _ref_array, ref_chunk_subset) = &arrays_data[0];
         let chunk_shape = ref_chunk_subset.shape();
-        let ndim = chunk_shape.len();
         let total_elements = chunk_shape.iter().product::<u64>() as usize;
         
         // Generate coordinate arrays (same for all variables)
@@ -1413,13 +1393,12 @@ impl ZarrTableProvider {
         }
         
         // Get chunk grid from the first available array
-        let (_, ref_array, ref_shape) = if !data_variables.is_empty() {
+        let (_, _ref_array, ref_shape) = if !data_variables.is_empty() {
             &data_variables[0]
         } else {
             &coordinate_arrays[0]
         };
-        let chunk_grid = ref_array.chunk_grid();
-        
+
         // Generate all possible chunk indices and filter them
         let mut filtered_batches = Vec::new();
         let mut row_count = 0;
