@@ -45,7 +45,7 @@ class SQLBaseTestCase(DaskTestCase):
     # Create stations at specific lat/lon points
     self.stations = xr.Dataset(
       {
-        'station_id': (['station'], [101, 102, 103]),
+        'station': (['station'], [101, 102, 103]),
         'lat': (['station'], [air_lats[0], air_lats[2], air_lats[4]]),
         'lon': (['station'], [air_lons[1], air_lons[3], air_lons[5]]),
         'elevation': (['station'], [100, 250, 500]),
@@ -332,13 +332,13 @@ class SqlJoinTestCase(SQLBaseTestCase):
     # This demonstrates multi-dataset capability without complex joins
     air_sample = ctx.sql('SELECT air FROM air_data LIMIT 5').to_pandas()
     station_sample = ctx.sql(
-      'SELECT station_id FROM stations LIMIT 5'
+      'SELECT station FROM stations LIMIT 5'
     ).to_pandas()
 
     self.assertGreater(len(air_sample), 0)
     self.assertGreater(len(station_sample), 0)
     self.assertIn('air', air_sample.columns)
-    self.assertIn('station_id', station_sample.columns)
+    self.assertIn('station', station_sample.columns)
 
   @unittest.skip('Hit DataFusion error')
   @with_test_combinations
@@ -364,7 +364,7 @@ class SqlJoinTestCase(SQLBaseTestCase):
     SELECT 
       COUNT(*) as match_count
     FROM {air_table_name} a, {stations_table_name} s
-    WHERE s.station_id = 101
+    WHERE s.station = 101
   """
     ).to_pandas()
 
@@ -418,7 +418,7 @@ class SqlJoinTestCase(SQLBaseTestCase):
       WHEN s.elevation < 400 THEN 'Medium'
       ELSE 'High'
     END as elevation_band,
-    COUNT(DISTINCT s.station_id) as station_count,
+    COUNT(DISTINCT s.station) as station_count,
     COUNT(*) as air_measurements,
     AVG(a.air) as avg_air
   FROM air_data a
