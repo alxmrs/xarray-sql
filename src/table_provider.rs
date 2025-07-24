@@ -86,10 +86,9 @@ impl CoordinateFilter {
     /// Check if a set of coordinates satisfies all constraints
     pub fn matches(&self, coordinates: &[i64]) -> bool {
         for range in &self.ranges {
-            if range.dimension < coordinates.len() {
-                if !range.contains(coordinates[range.dimension]) {
-                    return false;
-                }
+            if range.dimension < coordinates.len() && !range.contains(coordinates[range.dimension])
+            {
+                return false;
             }
         }
         true
@@ -251,7 +250,7 @@ impl ZarrTableProvider {
             FilesystemStore::new(path).map_err(|e| DataFusionError::External(Box::new(e)))
         } else {
             Err(DataFusionError::External(
-                format!("Zarr store path does not exist: {}", store_path).into(),
+                format!("Zarr store path does not exist: {store_path}").into(),
             ))
         }
     }
@@ -291,7 +290,7 @@ impl ZarrTableProvider {
                     .dimension_names()
                     .as_ref()
                     .map(|names| names.iter().filter_map(|name| name.clone()).collect())
-                    .unwrap_or_else(|| vec![]);
+                    .unwrap_or_else(Vec::new);
 
                 all_arrays.push((path_str, shape, data_type, dimension_names));
             }
@@ -344,8 +343,7 @@ impl ZarrTableProvider {
                     if shape != ref_shape {
                         return Err(DataFusionError::External(
                             format!(
-                                "Inconsistent dimensions across data variables. Variable '{}' has shape {:?}, but expected {:?}. All data variables must have the same dimensional structure.",
-                                name, shape, ref_shape
+                                "Inconsistent dimensions across data variables. Variable '{name}' has shape {shape:?}, but expected {ref_shape:?}. All data variables must have the same dimensional structure."
                             ).into()
                         ));
                     }
@@ -596,7 +594,7 @@ impl ZarrTableProvider {
                     .dimension_names()
                     .as_ref()
                     .map(|names| names.iter().filter_map(|name| name.clone()).collect())
-                    .unwrap_or_else(|| vec![]);
+                    .unwrap_or_else(Vec::new);
 
                 all_arrays.push((path_str, array, shape, dimension_names));
             }
@@ -638,10 +636,10 @@ impl ZarrTableProvider {
 
             if all_1d {
                 // Case 1: Tabular data - all arrays are 1D data variables
-                return self.create_tabular_record_batch(data_variables, chunk_indices);
+                self.create_tabular_record_batch(data_variables, chunk_indices)
             } else {
                 // Case 2: Multi-dimensional data variables
-                return self.create_multi_variable_record_batch(
+                self.create_multi_variable_record_batch(
                     data_variables
                         .into_iter()
                         .map(|(name, array, _shape)| {
@@ -652,11 +650,11 @@ impl ZarrTableProvider {
                         })
                         .collect::<Result<Vec<_>, DataFusionError>>()?,
                     chunk_indices,
-                );
+                )
             }
         } else {
             // Case 3: Only coordinate arrays (should not happen in normal zarr)
-            return self.create_tabular_record_batch(dimension_arrays, chunk_indices);
+            self.create_tabular_record_batch(dimension_arrays, chunk_indices)
         }
     }
 
@@ -716,7 +714,7 @@ impl ZarrTableProvider {
                 other => {
                     // For string types and other unsupported types, skip for now
                     // TODO: Add proper string support with zarrs library
-                    eprintln!("Warning: Skipping unsupported zarr data type for tabular data variable '{}': {:?}", clean_name, other);
+                    eprintln!("Warning: Skipping unsupported zarr data type for tabular data variable '{clean_name}': {other:?}");
                     continue;
                 }
             };
@@ -754,8 +752,7 @@ impl ZarrTableProvider {
                 if shape != *ref_shape {
                     return Err(DataFusionError::External(
                         format!(
-                            "Inconsistent array shapes. Variable '{}' has shape {:?}, expected {:?}",
-                            path_str, shape, ref_shape
+                            "Inconsistent array shapes. Variable '{path_str}' has shape {shape:?}, expected {ref_shape:?}"
                         ).into()
                     ));
                 }
@@ -781,8 +778,7 @@ impl ZarrTableProvider {
         }
 
         // Now create the multi-variable RecordBatch using the existing logic
-        return self
-            .create_multi_variable_record_batch_internal(arrays_data_processed, chunk_indices);
+        self.create_multi_variable_record_batch_internal(arrays_data_processed, chunk_indices)
     }
 
     /// Internal method to create multi-variable record batch (continuation of existing logic)
@@ -893,7 +889,7 @@ impl ZarrTableProvider {
     ) -> Result<Arc<dyn arrow_array::Array>, DataFusionError> {
         let total_elements = data.len();
         let flat_data = data.to_shape(total_elements).map_err(|e| {
-            DataFusionError::External(format!("Failed to reshape f64 array: {}", e).into())
+            DataFusionError::External(format!("Failed to reshape f64 array: {e}").into())
         })?;
 
         let data_vec = f64::to_arrow_array(&flat_data);
@@ -907,7 +903,7 @@ impl ZarrTableProvider {
     ) -> Result<Arc<dyn arrow_array::Array>, DataFusionError> {
         let total_elements = data.len();
         let flat_data = data.to_shape(total_elements).map_err(|e| {
-            DataFusionError::External(format!("Failed to reshape f32 array: {}", e).into())
+            DataFusionError::External(format!("Failed to reshape f32 array: {e}").into())
         })?;
 
         let data_vec = f32::to_arrow_array(&flat_data);
@@ -921,7 +917,7 @@ impl ZarrTableProvider {
     ) -> Result<Arc<dyn arrow_array::Array>, DataFusionError> {
         let total_elements = data.len();
         let flat_data = data.to_shape(total_elements).map_err(|e| {
-            DataFusionError::External(format!("Failed to reshape i64 array: {}", e).into())
+            DataFusionError::External(format!("Failed to reshape i64 array: {e}").into())
         })?;
 
         let data_vec = i64::to_arrow_array(&flat_data);
@@ -935,7 +931,7 @@ impl ZarrTableProvider {
     ) -> Result<Arc<dyn arrow_array::Array>, DataFusionError> {
         let total_elements = data.len();
         let flat_data = data.to_shape(total_elements).map_err(|e| {
-            DataFusionError::External(format!("Failed to reshape i32 array: {}", e).into())
+            DataFusionError::External(format!("Failed to reshape i32 array: {e}").into())
         })?;
 
         let data_vec = i32::to_arrow_array(&flat_data);
@@ -949,7 +945,7 @@ impl ZarrTableProvider {
     ) -> Result<Arc<dyn arrow_array::Array>, DataFusionError> {
         let total_elements = data.len();
         let flat_data = data.to_shape(total_elements).map_err(|e| {
-            DataFusionError::External(format!("Failed to reshape i16 array: {}", e).into())
+            DataFusionError::External(format!("Failed to reshape i16 array: {e}").into())
         })?;
 
         let data_vec = i16::to_arrow_array(&flat_data);
@@ -1049,7 +1045,7 @@ impl ZarrTableProvider {
 
         // Reshape to 1D for efficient processing (zero-copy when possible)
         let flat_data = data.to_shape(total_elements).map_err(|e| {
-            DataFusionError::External(format!("Failed to reshape array: {}", e).into())
+            DataFusionError::External(format!("Failed to reshape array: {e}").into())
         })?;
 
         // Get the chunk start indices from the subset
@@ -1076,11 +1072,7 @@ impl ZarrTableProvider {
         // For single array case, we need to create a minimal schema
         let mut fields = Vec::new();
         for dim_idx in 0..ndim {
-            fields.push(Field::new(
-                format!("dim_{}", dim_idx),
-                DataType::Int64,
-                false,
-            ));
+            fields.push(Field::new(format!("dim_{dim_idx}"), DataType::Int64, false));
         }
 
         // Remove leading slash from array name if present
@@ -1258,8 +1250,8 @@ impl ZarrTableProvider {
 
     /// Parse dimension name like "dim_0", "dim_1" into dimension index
     fn parse_dimension_name(&self, name: &str) -> Option<usize> {
-        if name.starts_with("dim_") {
-            name[4..].parse::<usize>().ok()
+        if let Some(rest) = name.strip_prefix("dim_") {
+            rest.parse::<usize>().ok()
         } else {
             None
         }
@@ -1344,7 +1336,7 @@ impl ZarrTableProvider {
                     .dimension_names()
                     .as_ref()
                     .map(|names| names.iter().filter_map(|name| name.clone()).collect())
-                    .unwrap_or_else(|| vec![]);
+                    .unwrap_or_else(Vec::new);
 
                 all_arrays.push((path_str, array, shape, dimension_names));
             }
@@ -1670,8 +1662,13 @@ impl ZarrTableProvider {
 
 #[cfg(test)]
 mod tests {
+    use datafusion::execution::context::SessionConfig;
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+    use datafusion::execution::SessionStateBuilder;
+    use datafusion::logical_expr::lit;
+
     use super::*;
-    use std::path::PathBuf;
+    use std::sync::Arc;
 
     #[test]
     fn test_zarr_table_provider_creation() {
@@ -1792,14 +1789,12 @@ mod tests {
         };
 
         // Create a mock session state
-        use datafusion::execution::context::SessionConfig;
-        use datafusion::execution::context::SessionState;
-        use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
-
         let config = SessionConfig::new();
-        let runtime_config = RuntimeConfig::new();
-        let runtime = Arc::new(RuntimeEnv::new(runtime_config).unwrap());
-        let state = SessionState::new_with_config_rt(config, runtime);
+        let runtime_env = Arc::new(RuntimeEnvBuilder::new().build().unwrap());
+        let state = SessionStateBuilder::new_with_default_features()
+            .with_config(config)
+            .with_runtime_env(runtime_env)
+            .build();
 
         // Test scan with empty filters
         let filters = vec![];
@@ -1820,15 +1815,13 @@ mod tests {
         };
 
         // Create a mock session state
-        use datafusion::execution::context::SessionConfig;
-        use datafusion::execution::context::SessionState;
-        use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
-        use datafusion::logical_expr::lit;
 
         let config = SessionConfig::new();
-        let runtime_config = RuntimeConfig::new();
-        let runtime = Arc::new(RuntimeEnv::new(runtime_config).unwrap());
-        let state = SessionState::new_with_config_rt(config, runtime);
+        let runtime_env = Arc::new(RuntimeEnvBuilder::new().build().unwrap());
+        let state = SessionStateBuilder::new_with_default_features()
+            .with_config(config)
+            .with_runtime_env(runtime_env)
+            .build();
 
         // Create a simple filter expression
         let filter_expr = lit(true); // Simple boolean literal
@@ -1859,14 +1852,12 @@ mod tests {
         };
 
         // Create a mock session state
-        use datafusion::execution::context::SessionConfig;
-        use datafusion::execution::context::SessionState;
-        use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
-
         let config = SessionConfig::new();
-        let runtime_config = RuntimeConfig::new();
-        let runtime = Arc::new(RuntimeEnv::new(runtime_config).unwrap());
-        let state = SessionState::new_with_config_rt(config, runtime);
+        let runtime_env = Arc::new(RuntimeEnvBuilder::new().build().unwrap());
+        let state = SessionStateBuilder::new_with_default_features()
+            .with_config(config)
+            .with_runtime_env(runtime_env)
+            .build();
 
         // Test scan with projection - should work even with empty schema
         let projection = vec![]; // Empty projection
