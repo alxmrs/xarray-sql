@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
-use arrow_array::RecordBatch;
+use arrow::buffer::ScalarBuffer;
+use arrow::datatypes::{Float32Type, Float64Type, Int16Type, Int32Type, Int64Type};
+use arrow_array::{ArrayRef, ArrowPrimitiveType, PrimitiveArray, RecordBatch};
 use arrow_array::{Float32Array, Float64Array, Int16Array, Int32Array, Int64Array};
 use arrow_schema::{DataType, Field, Schema};
 use async_trait::async_trait;
@@ -95,6 +97,22 @@ impl CoordinateFilter {
         }
         true
     }
+}
+
+fn primitive_ndarray_to_arrow<T: ArrowPrimitiveType>(
+    data: ndarray::ArrayD<T::Native>,
+) -> datafusion::error::Result<ArrayRef> {
+    let total_elements = data.len();
+    let flat_data = data
+        .to_shape(total_elements)
+        .map_err(|e| DataFusionError::External(format!("Failed to reshape array: {e}").into()))?;
+    let data_vec = if flat_data.is_standard_layout() {
+        flat_data.as_slice().unwrap().to_vec()
+    } else {
+        flat_data.iter().cloned().collect()
+    };
+    let values = ScalarBuffer::from(data_vec);
+    Ok(Arc::new(PrimitiveArray::<T>::new(values, None)))
 }
 
 /// Trait for types that can be converted to Arrow arrays with minimal copying
@@ -687,31 +705,31 @@ impl ZarrTableProvider {
                     let chunk_data = array
                         .retrieve_chunk_ndarray::<f64>(chunk_indices)
                         .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                    self.create_data_array_f64(chunk_data)?
+                    primitive_ndarray_to_arrow::<Float64Type>(chunk_data)?
                 }
                 ZarrDataType::Float32 => {
                     let chunk_data = array
                         .retrieve_chunk_ndarray::<f32>(chunk_indices)
                         .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                    self.create_data_array_f32(chunk_data)?
+                    primitive_ndarray_to_arrow::<Float32Type>(chunk_data)?
                 }
                 ZarrDataType::Int64 => {
                     let chunk_data = array
                         .retrieve_chunk_ndarray::<i64>(chunk_indices)
                         .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                    self.create_data_array_i64(chunk_data)?
+                    primitive_ndarray_to_arrow::<Int64Type>(chunk_data)?
                 }
                 ZarrDataType::Int32 => {
                     let chunk_data = array
                         .retrieve_chunk_ndarray::<i32>(chunk_indices)
                         .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                    self.create_data_array_i32(chunk_data)?
+                    primitive_ndarray_to_arrow::<Int32Type>(chunk_data)?
                 }
                 ZarrDataType::Int16 => {
                     let chunk_data = array
                         .retrieve_chunk_ndarray::<i16>(chunk_indices)
                         .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                    self.create_data_array_i16(chunk_data)?
+                    primitive_ndarray_to_arrow::<Int16Type>(chunk_data)?
                 }
                 other => {
                     // For string types and other unsupported types, skip for now
@@ -813,31 +831,31 @@ impl ZarrTableProvider {
                     let chunk_data = array
                         .retrieve_chunk_ndarray::<f64>(chunk_indices)
                         .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                    self.create_data_array_f64(chunk_data)?
+                    primitive_ndarray_to_arrow::<Float64Type>(chunk_data)?
                 }
                 ZarrDataType::Float32 => {
                     let chunk_data = array
                         .retrieve_chunk_ndarray::<f32>(chunk_indices)
                         .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                    self.create_data_array_f32(chunk_data)?
+                    primitive_ndarray_to_arrow::<Float32Type>(chunk_data)?
                 }
                 ZarrDataType::Int64 => {
                     let chunk_data = array
                         .retrieve_chunk_ndarray::<i64>(chunk_indices)
                         .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                    self.create_data_array_i64(chunk_data)?
+                    primitive_ndarray_to_arrow::<Int64Type>(chunk_data)?
                 }
                 ZarrDataType::Int32 => {
                     let chunk_data = array
                         .retrieve_chunk_ndarray::<i32>(chunk_indices)
                         .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                    self.create_data_array_i32(chunk_data)?
+                    primitive_ndarray_to_arrow::<Int32Type>(chunk_data)?
                 }
                 ZarrDataType::Int16 => {
                     let chunk_data = array
                         .retrieve_chunk_ndarray::<i16>(chunk_indices)
                         .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                    self.create_data_array_i16(chunk_data)?
+                    primitive_ndarray_to_arrow::<Int16Type>(chunk_data)?
                 }
                 other => {
                     return Err(DataFusionError::External(
@@ -879,76 +897,6 @@ impl ZarrTableProvider {
     ) -> Vec<Vec<i64>> {
         let shape: Vec<usize> = chunk_shape.iter().map(|&x| x as usize).collect();
         self.generate_coordinates(&shape, chunk_start, total_elements)
-    }
-
-    /// Create Arrow array from f64 ndarray
-    fn create_data_array_f64(
-        &self,
-        data: ndarray::ArrayD<f64>,
-    ) -> Result<Arc<dyn arrow_array::Array>, DataFusionError> {
-        let total_elements = data.len();
-        let flat_data = data.to_shape(total_elements).map_err(|e| {
-            DataFusionError::External(format!("Failed to reshape f64 array: {e}").into())
-        })?;
-
-        let data_vec = f64::to_arrow_array(&flat_data);
-        Ok(f64::from_vec(data_vec) as Arc<dyn arrow_array::Array>)
-    }
-
-    /// Create Arrow array from f32 ndarray
-    fn create_data_array_f32(
-        &self,
-        data: ndarray::ArrayD<f32>,
-    ) -> Result<Arc<dyn arrow_array::Array>, DataFusionError> {
-        let total_elements = data.len();
-        let flat_data = data.to_shape(total_elements).map_err(|e| {
-            DataFusionError::External(format!("Failed to reshape f32 array: {e}").into())
-        })?;
-
-        let data_vec = f32::to_arrow_array(&flat_data);
-        Ok(f32::from_vec(data_vec) as Arc<dyn arrow_array::Array>)
-    }
-
-    /// Create Arrow array from i64 ndarray
-    fn create_data_array_i64(
-        &self,
-        data: ndarray::ArrayD<i64>,
-    ) -> Result<Arc<dyn arrow_array::Array>, DataFusionError> {
-        let total_elements = data.len();
-        let flat_data = data.to_shape(total_elements).map_err(|e| {
-            DataFusionError::External(format!("Failed to reshape i64 array: {e}").into())
-        })?;
-
-        let data_vec = i64::to_arrow_array(&flat_data);
-        Ok(i64::from_vec(data_vec) as Arc<dyn arrow_array::Array>)
-    }
-
-    /// Create Arrow array from i32 ndarray
-    fn create_data_array_i32(
-        &self,
-        data: ndarray::ArrayD<i32>,
-    ) -> Result<Arc<dyn arrow_array::Array>, DataFusionError> {
-        let total_elements = data.len();
-        let flat_data = data.to_shape(total_elements).map_err(|e| {
-            DataFusionError::External(format!("Failed to reshape i32 array: {e}").into())
-        })?;
-
-        let data_vec = i32::to_arrow_array(&flat_data);
-        Ok(i32::from_vec(data_vec) as Arc<dyn arrow_array::Array>)
-    }
-
-    /// Create Arrow array from i16 ndarray
-    fn create_data_array_i16(
-        &self,
-        data: ndarray::ArrayD<i16>,
-    ) -> Result<Arc<dyn arrow_array::Array>, DataFusionError> {
-        let total_elements = data.len();
-        let flat_data = data.to_shape(total_elements).map_err(|e| {
-            DataFusionError::External(format!("Failed to reshape i16 array: {e}").into())
-        })?;
-
-        let data_vec = i16::to_arrow_array(&flat_data);
-        Ok(i16::from_vec(data_vec) as Arc<dyn arrow_array::Array>)
     }
 
     /// Convert a specific array chunk to RecordBatch
