@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use arrow_array::RecordBatch;
 use arrow_array::{Float32Array, Float64Array, Int16Array, Int32Array, Int64Array};
 use arrow_schema::{DataType, Field, Schema};
@@ -799,7 +801,7 @@ impl ZarrTableProvider {
         // Generate coordinate arrays (same for all variables)
         let chunk_start = ref_chunk_subset.start();
         let coord_arrays =
-            self.generate_coordinates_from_shape(&chunk_shape, chunk_start, total_elements);
+            self.generate_coordinates_from_shape(chunk_shape, chunk_start, total_elements);
 
         // Collect data from all variables
         let mut all_data_arrays = Vec::new();
@@ -839,11 +841,8 @@ impl ZarrTableProvider {
                 }
                 other => {
                     return Err(DataFusionError::External(
-                        format!(
-                            "Unsupported zarr data type for variable '{}': {:?}",
-                            var_name, other
-                        )
-                        .into(),
+                        format!("Unsupported zarr data type for variable '{var_name}': {other:?}",)
+                            .into(),
                     ));
                 }
             };
@@ -991,7 +990,7 @@ impl ZarrTableProvider {
                 self.ndarray_to_record_batch(chunk_data, &chunk_subset, array_name)
             }
             other => Err(DataFusionError::External(
-                format!("Unsupported zarr data type for chunk reading: {:?}", other).into(),
+                format!("Unsupported zarr data type for chunk reading: {other:?}").into(),
             )),
         }
     }
@@ -1396,7 +1395,7 @@ impl ZarrTableProvider {
 
         for chunk_indices in chunk_combinations {
             // Check if this chunk potentially contains data matching our filter
-            if self.chunk_matches_filter(&chunk_indices, &ref_shape, &coordinate_filter)? {
+            if self.chunk_matches_filter(&chunk_indices, ref_shape, &coordinate_filter)? {
                 // Read the chunk and apply row-level filtering
                 match self.chunk_to_record_batch(&chunk_indices) {
                     Ok(batch) => {
