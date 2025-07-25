@@ -1,5 +1,6 @@
-use crate::table_provider::ZarrTableProvider;
 use pyo3::prelude::*;
+
+use crate::table_provider::ZarrTableProvider;
 
 pub mod table_provider;
 

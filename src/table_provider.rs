@@ -1,12 +1,14 @@
 #![allow(dead_code)]
 
-use arrow_array::RecordBatch;
-use arrow_array::{Float32Array, Float64Array, Int16Array, Int32Array, Int64Array};
+use std::collections::HashSet;
+use std::path::Path;
+use std::sync::Arc;
+
+use arrow_array::{Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::catalog::MemTable;
-use datafusion::catalog::Session;
+use datafusion::catalog::{MemTable, Session};
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator, TableProviderFilterPushDown};
@@ -16,9 +18,6 @@ use datafusion_ffi::table_provider::FFI_TableProvider;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::types::PyCapsule;
 use pyo3::{pyclass, pymethods, Bound, PyResult, Python};
-use std::collections::HashSet;
-use std::path::Path;
-use std::sync::Arc;
 use zarrs::array::chunk_grid::ChunkGrid;
 use zarrs::array::data_type::DataType as ZarrDataType;
 use zarrs::array::Array;
@@ -280,7 +279,6 @@ impl ZarrTableProvider {
         // Tuple of (path_str, shape, data_type, dimension_names)
         let mut all_arrays = Vec::new();
 
-
         // First pass: collect all arrays with their metadata
         for child in &children {
             let path_str = child.path().to_string();
@@ -330,7 +328,12 @@ impl ZarrTableProvider {
             } else if shape.len() == 0 {
                 // Scalar coordinate (like reference_time)
                 coordinate_arrays.push((clean_name, shape, data_type));
-            } else if dimension_names.len() == 1 && dimension_names.get(0).map(|s| s == &clean_name).unwrap_or(false) {
+            } else if dimension_names.len() == 1
+                && dimension_names
+                    .get(0)
+                    .map(|s| s == &clean_name)
+                    .unwrap_or(false)
+            {
                 // This is a dimension coordinate (1D array named after itself)
                 dimension_arrays.push((clean_name, shape, data_type));
             } else if dimension_names.len() == 1 {
@@ -385,7 +388,6 @@ impl ZarrTableProvider {
         // Build unified schema based on the type of data
         let mut fields = Vec::new();
 
-
         if !data_variables.is_empty() {
             // Case 1: Multi-dimensional data with coordinates
             // Get dimension names from the first data variable
@@ -399,13 +401,16 @@ impl ZarrTableProvider {
                 if let Some(store) = &self.store {
                     if let Ok(first_array) = Array::open(store.clone(), &first_var_path) {
                         // Try to get dimension names from the first data variable
-                        let dimension_names = first_array.dimension_names()
+                        let dimension_names = first_array
+                            .dimension_names()
                             .as_ref()
                             .map(|names| names.iter().filter_map(|name| name.clone()).collect())
                             .unwrap_or_else(|| vec![]);
 
                         // Add coordinate fields using actual names if available
-                        if dimension_names.len() == reference_shape.as_ref().map(|s| s.len()).unwrap_or(0) {
+                        if dimension_names.len()
+                            == reference_shape.as_ref().map(|s| s.len()).unwrap_or(0)
+                        {
                             for dim_name in dimension_names {
                                 fields.push(Field::new(dim_name.clone(), DataType::Int64, false));
                             }
@@ -414,7 +419,11 @@ impl ZarrTableProvider {
                             if let Some(ref shape) = reference_shape {
                                 for dim_idx in 0..shape.len() {
                                     let field_name = format!("dim_{}", dim_idx);
-                                    fields.push(Field::new(field_name.clone(), DataType::Int64, false));
+                                    fields.push(Field::new(
+                                        field_name.clone(),
+                                        DataType::Int64,
+                                        false,
+                                    ));
                                 }
                             }
                         }
@@ -422,7 +431,11 @@ impl ZarrTableProvider {
                         // Fallback to generic names
                         if let Some(ref shape) = reference_shape {
                             for dim_idx in 0..shape.len() {
-                                fields.push(Field::new(format!("dim_{}", dim_idx), DataType::Int64, false));
+                                fields.push(Field::new(
+                                    format!("dim_{}", dim_idx),
+                                    DataType::Int64,
+                                    false,
+                                ));
                             }
                         }
                     }
@@ -459,13 +472,16 @@ impl ZarrTableProvider {
         if !data_variables.is_empty() {
             // Case 1b: Multi-dimensional data variables
             // Exclude coordinate arrays that are already added as dimensions
-            let coord_names: HashSet<String> = dimension_arrays.iter().map(|(name, _, _)| {
-                if name.starts_with('/') {
-                    name.chars().skip(1).collect()
-                } else {
-                    name.clone()
-                }
-            }).collect();
+            let coord_names: HashSet<String> = dimension_arrays
+                .iter()
+                .map(|(name, _, _)| {
+                    if name.starts_with('/') {
+                        name.chars().skip(1).collect()
+                    } else {
+                        name.clone()
+                    }
+                })
+                .collect();
 
             for (var_name, _shape, data_type) in &data_variables {
                 let arrow_type = self.zarr_type_to_arrow(data_type)?;
@@ -687,7 +703,12 @@ impl ZarrTableProvider {
             } else if shape.len() == 0 {
                 // Scalar coordinate (like reference_time) - skip for data reading
                 continue;
-            } else if dimension_names.len() == 1 && dimension_names.get(0).map(|s| s == &clean_name).unwrap_or(false) {
+            } else if dimension_names.len() == 1
+                && dimension_names
+                    .get(0)
+                    .map(|s| s == &clean_name)
+                    .unwrap_or(false)
+            {
                 // This is a dimension coordinate (1D array named after itself)
                 dimension_arrays.push((name, array, shape));
             } else if dimension_names.len() == 1 {
@@ -734,15 +755,25 @@ impl ZarrTableProvider {
         } else {
             // No arrays available - return empty result
             let schema = self.infer_schema()?;
-            let empty_arrays: Vec<Arc<dyn arrow_array::Array>> = schema.fields()
+            let empty_arrays: Vec<Arc<dyn arrow_array::Array>> = schema
+                .fields()
                 .iter()
                 .map(|field| {
                     match field.data_type() {
-                        DataType::Int64 => Arc::new(Int64Array::new_null(0)) as Arc<dyn arrow_array::Array>,
-                        DataType::Float64 => Arc::new(Float64Array::new_null(0)) as Arc<dyn arrow_array::Array>,
-                        DataType::Int32 => Arc::new(Int32Array::new_null(0)) as Arc<dyn arrow_array::Array>,
-                        DataType::Float32 => Arc::new(Float32Array::new_null(0)) as Arc<dyn arrow_array::Array>,
-                        DataType::Utf8 => Arc::new(arrow_array::StringArray::new_null(0)) as Arc<dyn arrow_array::Array>,
+                        DataType::Int64 => {
+                            Arc::new(Int64Array::new_null(0)) as Arc<dyn arrow_array::Array>
+                        }
+                        DataType::Float64 => {
+                            Arc::new(Float64Array::new_null(0)) as Arc<dyn arrow_array::Array>
+                        }
+                        DataType::Int32 => {
+                            Arc::new(Int32Array::new_null(0)) as Arc<dyn arrow_array::Array>
+                        }
+                        DataType::Float32 => {
+                            Arc::new(Float32Array::new_null(0)) as Arc<dyn arrow_array::Array>
+                        }
+                        DataType::Utf8 => Arc::new(arrow_array::StringArray::new_null(0))
+                            as Arc<dyn arrow_array::Array>,
                         _ => Arc::new(Int64Array::new_null(0)) as Arc<dyn arrow_array::Array>, // Default fallback
                     }
                 })
@@ -761,15 +792,25 @@ impl ZarrTableProvider {
         if arrays.is_empty() {
             // Create empty RecordBatch with appropriate schema
             let schema = self.infer_schema()?;
-            let empty_arrays: Vec<Arc<dyn arrow_array::Array>> = schema.fields()
+            let empty_arrays: Vec<Arc<dyn arrow_array::Array>> = schema
+                .fields()
                 .iter()
                 .map(|field| {
                     match field.data_type() {
-                        DataType::Int64 => Arc::new(Int64Array::new_null(0)) as Arc<dyn arrow_array::Array>,
-                        DataType::Float64 => Arc::new(Float64Array::new_null(0)) as Arc<dyn arrow_array::Array>,
-                        DataType::Int32 => Arc::new(Int32Array::new_null(0)) as Arc<dyn arrow_array::Array>,
-                        DataType::Float32 => Arc::new(Float32Array::new_null(0)) as Arc<dyn arrow_array::Array>,
-                        DataType::Utf8 => Arc::new(arrow_array::StringArray::new_null(0)) as Arc<dyn arrow_array::Array>,
+                        DataType::Int64 => {
+                            Arc::new(Int64Array::new_null(0)) as Arc<dyn arrow_array::Array>
+                        }
+                        DataType::Float64 => {
+                            Arc::new(Float64Array::new_null(0)) as Arc<dyn arrow_array::Array>
+                        }
+                        DataType::Int32 => {
+                            Arc::new(Int32Array::new_null(0)) as Arc<dyn arrow_array::Array>
+                        }
+                        DataType::Float32 => {
+                            Arc::new(Float32Array::new_null(0)) as Arc<dyn arrow_array::Array>
+                        }
+                        DataType::Utf8 => Arc::new(arrow_array::StringArray::new_null(0))
+                            as Arc<dyn arrow_array::Array>,
                         _ => Arc::new(Int64Array::new_null(0)) as Arc<dyn arrow_array::Array>, // Default fallback
                     }
                 })
@@ -790,7 +831,6 @@ impl ZarrTableProvider {
                 name.clone()
             };
 
-
             // Check if this is an empty array
             let is_empty = shape.iter().any(|&s| s == 0);
 
@@ -798,12 +838,22 @@ impl ZarrTableProvider {
                 // Create empty array of appropriate type
                 let arrow_type = self.zarr_type_to_arrow(array.data_type())?;
                 let empty_array = match arrow_type {
-                    DataType::Float64 => Arc::new(Float64Array::new_null(0)) as Arc<dyn arrow_array::Array>,
-                    DataType::Float32 => Arc::new(Float32Array::new_null(0)) as Arc<dyn arrow_array::Array>,
-                    DataType::Int64 => Arc::new(Int64Array::new_null(0)) as Arc<dyn arrow_array::Array>,
-                    DataType::Int32 => Arc::new(Int32Array::new_null(0)) as Arc<dyn arrow_array::Array>,
-                    DataType::Int16 => Arc::new(arrow_array::Int16Array::new_null(0)) as Arc<dyn arrow_array::Array>,
-                    DataType::Utf8 => Arc::new(arrow_array::StringArray::new_null(0)) as Arc<dyn arrow_array::Array>,
+                    DataType::Float64 => {
+                        Arc::new(Float64Array::new_null(0)) as Arc<dyn arrow_array::Array>
+                    }
+                    DataType::Float32 => {
+                        Arc::new(Float32Array::new_null(0)) as Arc<dyn arrow_array::Array>
+                    }
+                    DataType::Int64 => {
+                        Arc::new(Int64Array::new_null(0)) as Arc<dyn arrow_array::Array>
+                    }
+                    DataType::Int32 => {
+                        Arc::new(Int32Array::new_null(0)) as Arc<dyn arrow_array::Array>
+                    }
+                    DataType::Int16 => Arc::new(arrow_array::Int16Array::new_null(0))
+                        as Arc<dyn arrow_array::Array>,
+                    DataType::Utf8 => Arc::new(arrow_array::StringArray::new_null(0))
+                        as Arc<dyn arrow_array::Array>,
                     _ => Arc::new(Int64Array::new_null(0)) as Arc<dyn arrow_array::Array>, // Default fallback
                 };
                 arrow_arrays.push(empty_array);
@@ -851,14 +901,17 @@ impl ZarrTableProvider {
                             match array.retrieve_chunk_ndarray::<String>(chunk_indices) {
                                 Ok(chunk_data) => {
                                     // Convert ndarray of strings to Arrow StringArray
-                                    let strings: Vec<Option<String>> = chunk_data.iter()
+                                    let strings: Vec<Option<String>> = chunk_data
+                                        .iter()
                                         .map(|s| if s.is_empty() { None } else { Some(s.clone()) })
                                         .collect();
-                                    Arc::new(arrow_array::StringArray::from(strings)) as Arc<dyn arrow_array::Array>
+                                    Arc::new(arrow_array::StringArray::from(strings))
+                                        as Arc<dyn arrow_array::Array>
                                 }
                                 Err(_) => {
                                     // If string reading fails, create empty string array
-                                    Arc::new(arrow_array::StringArray::new_null(0)) as Arc<dyn arrow_array::Array>
+                                    Arc::new(arrow_array::StringArray::new_null(0))
+                                        as Arc<dyn arrow_array::Array>
                                 }
                             }
                         } else {
@@ -1521,7 +1574,12 @@ impl ZarrTableProvider {
             } else if shape.len() == 0 {
                 // Scalar coordinate (like reference_time) - skip for data reading
                 continue;
-            } else if dimension_names.len() == 1 && dimension_names.get(0).map(|s| s == &clean_name).unwrap_or(false) {
+            } else if dimension_names.len() == 1
+                && dimension_names
+                    .get(0)
+                    .map(|s| s == &clean_name)
+                    .unwrap_or(false)
+            {
                 // This is a dimension coordinate (1D array named after itself)
                 dimension_arrays.push((name, array, shape));
             } else if dimension_names.len() == 1 {
@@ -1538,7 +1596,8 @@ impl ZarrTableProvider {
 
         // Handle different cases: multi-dimensional data variables or tabular data
 
-        if data_variables.is_empty() && dimension_arrays.is_empty() && coordinate_arrays.is_empty() {
+        if data_variables.is_empty() && dimension_arrays.is_empty() && coordinate_arrays.is_empty()
+        {
             return Err(DataFusionError::External(
                 "No arrays found in Zarr store".into(),
             ));
@@ -1556,7 +1615,7 @@ impl ZarrTableProvider {
         // Generate all possible chunk indices and filter them
         let mut filtered_batches = Vec::new();
         let mut row_count = 0;
-        
+
         // Get proper chunk indices from the first available array
         let chunk_combinations = if !data_variables.is_empty() {
             let (_, first_array, _) = &data_variables[0];
@@ -1566,7 +1625,7 @@ impl ZarrTableProvider {
                     // For now, just read the first chunk - chunk indices should match chunk grid dimensions
                     let chunk_indices = vec![0u64; chunk_grid_shape.len()];
                     vec![chunk_indices]
-                },
+                }
                 None => {
                     vec![]
                 }
@@ -1577,7 +1636,7 @@ impl ZarrTableProvider {
                 Some(chunk_grid_shape) => {
                     let chunk_indices = vec![0u64; chunk_grid_shape.len()];
                     vec![chunk_indices]
-                },
+                }
                 None => {
                     vec![]
                 }
@@ -1588,7 +1647,7 @@ impl ZarrTableProvider {
                 Some(chunk_grid_shape) => {
                     let chunk_indices = vec![0u64; chunk_grid_shape.len()];
                     vec![chunk_indices]
-                },
+                }
                 None => {
                     vec![]
                 }
@@ -1596,7 +1655,7 @@ impl ZarrTableProvider {
         } else {
             vec![]
         };
-        
+
         for chunk_indices in chunk_combinations {
             // Check if this chunk potentially contains data matching our filter
             if self.chunk_matches_filter(&chunk_indices, ref_shape, &coordinate_filter)? {
@@ -1865,13 +1924,14 @@ impl ZarrTableProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use datafusion::execution::context::SessionConfig;
     use datafusion::execution::runtime_env::RuntimeEnvBuilder;
     use datafusion::execution::SessionStateBuilder;
     use datafusion::logical_expr::lit;
 
     use super::*;
-    use std::sync::Arc;
 
     #[test]
     fn test_zarr_table_provider_creation() {
