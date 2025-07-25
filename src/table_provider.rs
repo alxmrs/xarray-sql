@@ -790,6 +790,7 @@ impl ZarrTableProvider {
                 name.clone()
             };
 
+
             // Check if this is an empty array
             let is_empty = shape.iter().any(|&s| s == 0);
 
@@ -1556,13 +1557,35 @@ impl ZarrTableProvider {
         let mut filtered_batches = Vec::new();
         let mut row_count = 0;
         
-        // Get proper chunk indices from the first data variable
+        // Get proper chunk indices from the first available array
         let chunk_combinations = if !data_variables.is_empty() {
             let (_, first_array, _) = &data_variables[0];
             // Get chunk grid shape to determine proper chunk indices
             match first_array.chunk_grid_shape() {
                 Some(chunk_grid_shape) => {
                     // For now, just read the first chunk - chunk indices should match chunk grid dimensions
+                    let chunk_indices = vec![0u64; chunk_grid_shape.len()];
+                    vec![chunk_indices]
+                },
+                None => {
+                    vec![]
+                }
+            }
+        } else if !dimension_arrays.is_empty() {
+            let (_, first_array, _) = &dimension_arrays[0];
+            match first_array.chunk_grid_shape() {
+                Some(chunk_grid_shape) => {
+                    let chunk_indices = vec![0u64; chunk_grid_shape.len()];
+                    vec![chunk_indices]
+                },
+                None => {
+                    vec![]
+                }
+            }
+        } else if !coordinate_arrays.is_empty() {
+            let (_, first_array, _) = &coordinate_arrays[0];
+            match first_array.chunk_grid_shape() {
+                Some(chunk_grid_shape) => {
                     let chunk_indices = vec![0u64; chunk_grid_shape.len()];
                     vec![chunk_indices]
                 },
