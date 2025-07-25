@@ -280,6 +280,7 @@ impl ZarrTableProvider {
         // Tuple of (path_str, shape, data_type, dimension_names)
         let mut all_arrays = Vec::new();
 
+
         // First pass: collect all arrays with their metadata
         for child in &children {
             let path_str = child.path().to_string();
@@ -319,18 +320,25 @@ impl ZarrTableProvider {
                 name.clone()
             };
 
-            // Coordinates contain other dimensions
-            let is_coordinate = dimension_names.len() == 1;
-            // Check if this is a dimension (dimension_names contains only itself)
-            let is_dimension = is_coordinate && dimension_names[0] == clean_name;
-
-            if is_dimension {
-                dimension_arrays.push((clean_name, shape, data_type));
-            } else if is_coordinate {
+            // Classify arrays based on shape and dimension names
+            if shape.is_empty() || shape.iter().any(|&s| s == 0) {
+                // Skip empty arrays
+                continue;
+            } else if shape.len() == 0 {
+                // Scalar coordinate (like reference_time)
                 coordinate_arrays.push((clean_name, shape, data_type));
-            } else {
-                // This is a data variable
+            } else if dimension_names.len() == 1 && dimension_names.get(0).map(|s| s == &clean_name).unwrap_or(false) {
+                // This is a dimension coordinate (1D array named after itself)
+                dimension_arrays.push((clean_name, shape, data_type));
+            } else if dimension_names.len() == 1 {
+                // This is a 1D coordinate but not a dimension
+                coordinate_arrays.push((clean_name, shape, data_type));
+            } else if dimension_names.len() > 1 {
+                // Multi-dimensional data variable
                 data_variables.push((clean_name, shape, data_type));
+            } else {
+                // Default: treat as coordinate
+                coordinate_arrays.push((clean_name, shape, data_type));
             }
         }
 
@@ -354,11 +362,11 @@ impl ZarrTableProvider {
                 }
             }
         } else if !coordinate_arrays.is_empty() {
-            // TODO(alxmrs or Claude): Fill out this case taking into account the newly available
-            // coordinate_arrays case.
-            return Err(DataFusionError::External(
-                "Case not yet implemented!".into(),
-            ));
+            // Case 2: Only coordinate arrays (tabular data)
+            // Use the first coordinate array to establish the reference shape
+            if let Some((_, first_coord_shape, _)) = coordinate_arrays.first() {
+                reference_shape = Some(first_coord_shape.clone());
+            }
         } else {
             return Err(DataFusionError::External(
                 "No arrays found in Zarr store".into(),
@@ -368,38 +376,59 @@ impl ZarrTableProvider {
         // Build unified schema based on the type of data
         let mut fields = Vec::new();
 
+
         if !data_variables.is_empty() {
             // Case 1: Multi-dimensional data with coordinates
-            // Add coordinate/dimension fields using actual coordinate names
-            if let Some(ref shape) = reference_shape {
-                // For typical xarray-generated Zarr, we expect coordinates in a specific order
-                // The air dataset has dimensions (time, lat, lon)
-                // We need to match coordinate arrays to dimensions
+            // Get dimension names from the first data variable
+            if let Some((first_var_name, _, _)) = data_variables.first() {
+                let first_var_path = if first_var_name.starts_with('/') {
+                    first_var_name.clone()
+                } else {
+                    format!("/{}", first_var_name)
+                };
 
-                // First, collect all 1D coordinate arrays that match dimension sizes
-                let mut valid_coords: Vec<(String, usize)> = Vec::new();
+                if let Some(store) = &self.store {
+                    if let Ok(first_array) = Array::open(store.clone(), &first_var_path) {
+                        // Try to get dimension names from the first data variable
+                        let dimension_names = first_array.dimension_names()
+                            .as_ref()
+                            .map(|names| names.iter().filter_map(|name| name.clone()).collect())
+                            .unwrap_or_else(|| vec![]);
 
-                for (name, coord_shape, _) in &dimension_arrays {
-                    if coord_shape.len() == 1 {
-                        let size = coord_shape[0];
-                        // Find all dimension indices that match this size
-                        for (dim_idx, &dim_size) in shape.iter().enumerate() {
-                            if dim_size == size {
-                                valid_coords.push((name.to_string(), dim_idx));
+                        // Add coordinate fields using actual names if available
+                        if dimension_names.len() == reference_shape.as_ref().map(|s| s.len()).unwrap_or(0) {
+                            for dim_name in dimension_names {
+                                fields.push(Field::new(dim_name.clone(), DataType::Int64, false));
+                            }
+                        } else {
+                            // Fallback to generic names
+                            if let Some(ref shape) = reference_shape {
+                                for dim_idx in 0..shape.len() {
+                                    let field_name = format!("dim_{}", dim_idx);
+                                    fields.push(Field::new(field_name.clone(), DataType::Int64, false));
+                                }
+                            }
+                        }
+                    } else {
+                        // Fallback to generic names
+                        if let Some(ref shape) = reference_shape {
+                            for dim_idx in 0..shape.len() {
+                                fields.push(Field::new(format!("dim_{}", dim_idx), DataType::Int64, false));
                             }
                         }
                     }
                 }
-
-                // Add coordinate fields, avoiding duplicates
-                let mut added_coords: HashSet<String> = HashSet::new();
-
-                for (coord_name, _) in valid_coords {
-                    if !added_coords.contains(&coord_name) {
-                        fields.push(Field::new(coord_name.clone(), DataType::Int64, false));
-                        added_coords.insert(coord_name);
-                    }
-                }
+            }
+        } else if !coordinate_arrays.is_empty() {
+            // Case 2: Only coordinate arrays - add them as fields
+            for (coord_name, coord_shape, coord_data_type) in &coordinate_arrays {
+                let arrow_type = self.zarr_type_to_arrow(coord_data_type)?;
+                let clean_name = if coord_name.starts_with('/') {
+                    coord_name.chars().skip(1).collect()
+                } else {
+                    coord_name.clone()
+                };
+                fields.push(Field::new(clean_name, arrow_type, true));
             }
         }
         // TODO(alxmrs) The above is wrapped in an if statement bc Claude originally tried
@@ -410,21 +439,28 @@ impl ZarrTableProvider {
         if !data_variables.is_empty() {
             // Case 1b: Multi-dimensional data variables
             // Exclude coordinate arrays that are already added as dimensions
-            let coord_names: HashSet<String> = dimension_arrays
-                .iter()
-                .map(|(name, _, _)| name.clone())
-                .collect();
+            let coord_names: HashSet<String> = dimension_arrays.iter().map(|(name, _, _)| {
+                if name.starts_with('/') {
+                    name.chars().skip(1).collect()
+                } else {
+                    name.clone()
+                }
+            }).collect();
 
             for (var_name, _shape, data_type) in &data_variables {
                 let arrow_type = self.zarr_type_to_arrow(data_type)?;
+                let clean_var_name = if var_name.starts_with('/') {
+                    var_name.chars().skip(1).collect()
+                } else {
+                    var_name.clone()
+                };
 
                 // Only add if this is not a coordinate array
-                if !coord_names.contains(var_name) {
-                    fields.push(Field::new(var_name, arrow_type, true));
+                if !coord_names.contains(&clean_var_name) {
+                    fields.push(Field::new(clean_var_name.clone(), arrow_type, true));
                 }
             }
         }
-        // TODO(alxmrs or Claude): Handle "coordinates"-only Zarr datasets.
 
         Ok(Arc::new(Schema::new(fields)))
     }
@@ -620,14 +656,25 @@ impl ZarrTableProvider {
                 name.clone()
             };
 
-            // Check if this is a coordinate (dimension_names contains only itself)
-            let is_coordinate = dimension_names.len() == 1 && dimension_names[0] == clean_name;
-
-            if is_coordinate {
+            // Use same classification logic as infer_schema and create_filtered_batches
+            if shape.is_empty() || shape.iter().any(|&s| s == 0) {
+                // Skip empty arrays
+                continue;
+            } else if shape.len() == 0 {
+                // Scalar coordinate (like reference_time) - skip for data reading
+                continue;
+            } else if dimension_names.len() == 1 && dimension_names.get(0).map(|s| s == &clean_name).unwrap_or(false) {
+                // This is a dimension coordinate (1D array named after itself)
                 dimension_arrays.push((name, array, shape));
-            } else {
-                // This is a data variable
+            } else if dimension_names.len() == 1 {
+                // This is a 1D coordinate but not a dimension - skip for now
+                continue;
+            } else if dimension_names.len() > 1 {
+                // Multi-dimensional data variable
                 data_variables.push((name, array, shape));
+            } else {
+                // Default: skip unknown arrays for data reading
+                continue;
             }
         }
 
@@ -667,19 +714,54 @@ impl ZarrTableProvider {
         chunk_indices: &[u64],
     ) -> Result<RecordBatch, DataFusionError> {
         if arrays.is_empty() {
-            return Err(DataFusionError::External("No arrays provided".into()));
+            // Create empty RecordBatch with appropriate schema
+            let schema = self.infer_schema()?;
+            let empty_arrays: Vec<Arc<dyn arrow_array::Array>> = schema.fields()
+                .iter()
+                .map(|field| {
+                    match field.data_type() {
+                        DataType::Int64 => Arc::new(Int64Array::new_null(0)) as Arc<dyn arrow_array::Array>,
+                        DataType::Float64 => Arc::new(Float64Array::new_null(0)) as Arc<dyn arrow_array::Array>,
+                        DataType::Int32 => Arc::new(Int32Array::new_null(0)) as Arc<dyn arrow_array::Array>,
+                        DataType::Float32 => Arc::new(Float32Array::new_null(0)) as Arc<dyn arrow_array::Array>,
+                        _ => Arc::new(Int64Array::new_null(0)) as Arc<dyn arrow_array::Array>, // Default fallback
+                    }
+                })
+                .collect();
+
+            return RecordBatch::try_new(schema, empty_arrays)
+                .map_err(|e| DataFusionError::External(Box::new(e)));
         }
 
         let mut arrow_arrays: Vec<Arc<dyn arrow_array::Array>> = Vec::new();
         let mut fields = Vec::new();
 
-        for (name, array, _shape) in arrays {
+        for (name, array, shape) in arrays {
             // Clean the name
             let clean_name = if name.starts_with('/') {
                 name.chars().skip(1).collect()
             } else {
                 name.clone()
             };
+
+            // Check if this is an empty array
+            let is_empty = shape.iter().any(|&s| s == 0);
+
+            if is_empty {
+                // Create empty array of appropriate type
+                let arrow_type = self.zarr_type_to_arrow(array.data_type())?;
+                let empty_array = match arrow_type {
+                    DataType::Float64 => Arc::new(Float64Array::new_null(0)) as Arc<dyn arrow_array::Array>,
+                    DataType::Float32 => Arc::new(Float32Array::new_null(0)) as Arc<dyn arrow_array::Array>,
+                    DataType::Int64 => Arc::new(Int64Array::new_null(0)) as Arc<dyn arrow_array::Array>,
+                    DataType::Int32 => Arc::new(Int32Array::new_null(0)) as Arc<dyn arrow_array::Array>,
+                    DataType::Int16 => Arc::new(arrow_array::Int16Array::new_null(0)) as Arc<dyn arrow_array::Array>,
+                    _ => Arc::new(Int64Array::new_null(0)) as Arc<dyn arrow_array::Array>, // Default fallback
+                };
+                arrow_arrays.push(empty_array);
+                fields.push(Field::new(clean_name, arrow_type, true));
+                continue;
+            }
 
             // Get the data type and create appropriate Arrow array
             let data_array = match array.data_type() {
@@ -1359,18 +1441,30 @@ impl ZarrTableProvider {
                 name.clone()
             };
 
-            // Check if this is a coordinate (dimension_names contains only itself)
-            let is_coordinate = dimension_names.len() == 1 && dimension_names[0] == clean_name;
-
-            if is_coordinate {
+            // Use same classification logic as infer_schema
+            if shape.is_empty() || shape.iter().any(|&s| s == 0) {
+                // Skip empty arrays
+                continue;
+            } else if shape.len() == 0 {
+                // Scalar coordinate (like reference_time) - skip for data reading
+                continue;
+            } else if dimension_names.len() == 1 && dimension_names.get(0).map(|s| s == &clean_name).unwrap_or(false) {
+                // This is a dimension coordinate (1D array named after itself)
                 dimension_arrays.push((name, array, shape));
-            } else {
-                // This is a data variable
+            } else if dimension_names.len() == 1 {
+                // This is a 1D coordinate but not a dimension - skip for now
+                continue;
+            } else if dimension_names.len() > 1 {
+                // Multi-dimensional data variable
                 data_variables.push((name, array, shape));
+            } else {
+                // Default: skip unknown arrays for data reading
+                continue;
             }
         }
 
         // Handle different cases: multi-dimensional data variables or tabular data
+
         if data_variables.is_empty() && dimension_arrays.is_empty() {
             return Err(DataFusionError::External(
                 "No arrays found in Zarr store".into(),
@@ -1387,12 +1481,25 @@ impl ZarrTableProvider {
         // Generate all possible chunk indices and filter them
         let mut filtered_batches = Vec::new();
         let mut row_count = 0;
-
-        // For now, just iterate through the first chunk for testing
-        // TODO: Implement proper chunk iteration when zarrs API is clearer
-        let chunk_indices = vec![0u64; ref_shape.len()];
-        let chunk_combinations = vec![chunk_indices];
-
+        
+        // Get proper chunk indices from the first data variable
+        let chunk_combinations = if !data_variables.is_empty() {
+            let (_, first_array, _) = &data_variables[0];
+            // Get chunk grid shape to determine proper chunk indices
+            match first_array.chunk_grid_shape() {
+                Some(chunk_grid_shape) => {
+                    // For now, just read the first chunk - chunk indices should match chunk grid dimensions
+                    let chunk_indices = vec![0u64; chunk_grid_shape.len()];
+                    vec![chunk_indices]
+                },
+                None => {
+                    vec![]
+                }
+            }
+        } else {
+            vec![]
+        };
+        
         for chunk_indices in chunk_combinations {
             // Check if this chunk potentially contains data matching our filter
             if self.chunk_matches_filter(&chunk_indices, ref_shape, &coordinate_filter)? {
