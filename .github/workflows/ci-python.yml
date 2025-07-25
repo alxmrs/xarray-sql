@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-name: ci
+name: ci-python
 
 on:
   # Triggers the workflow on push or pull request events but only for the main branch
@@ -47,5 +47,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install xarray_sql
         run: uv sync --dev
+      - name: Prepare bindings for tests
+        run: maturin develop
       - name: Run unit tests
         run: uv run pytest
