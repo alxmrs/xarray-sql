@@ -322,15 +322,15 @@ impl ZarrTableProvider {
             if shape.is_empty() {
                 // Skip arrays with completely undefined shape
                 continue;
-            } else if shape.iter().any(|&s| s == 0) {
+            } else if shape.contains(&0) {
                 // Empty arrays (zero-size dimensions) - include in schema but handle specially in data reading
                 coordinate_arrays.push((clean_name, shape, data_type));
-            } else if shape.len() == 0 {
+            } else if shape.is_empty() {
                 // Scalar coordinate (like reference_time)
                 coordinate_arrays.push((clean_name, shape, data_type));
             } else if dimension_names.len() == 1
                 && dimension_names
-                    .get(0)
+                    .first()
                     .map(|s| s == &clean_name)
                     .unwrap_or(false)
             {
@@ -395,7 +395,7 @@ impl ZarrTableProvider {
                 let first_var_path = if first_var_name.starts_with('/') {
                     first_var_name.clone()
                 } else {
-                    format!("/{}", first_var_name)
+                    format!("/{first_var_name}")
                 };
 
                 if let Some(store) = &self.store {
@@ -405,7 +405,7 @@ impl ZarrTableProvider {
                             .dimension_names()
                             .as_ref()
                             .map(|names| names.iter().filter_map(|name| name.clone()).collect())
-                            .unwrap_or_else(|| vec![]);
+                            .unwrap_or_else(Vec::new);
 
                         // Add coordinate fields using actual names if available
                         if dimension_names.len()
@@ -418,7 +418,7 @@ impl ZarrTableProvider {
                             // Fallback to generic names
                             if let Some(ref shape) = reference_shape {
                                 for dim_idx in 0..shape.len() {
-                                    let field_name = format!("dim_{}", dim_idx);
+                                    let field_name = format!("dim_{dim_idx}");
                                     fields.push(Field::new(
                                         field_name.clone(),
                                         DataType::Int64,
@@ -432,7 +432,7 @@ impl ZarrTableProvider {
                         if let Some(ref shape) = reference_shape {
                             for dim_idx in 0..shape.len() {
                                 fields.push(Field::new(
-                                    format!("dim_{}", dim_idx),
+                                    format!("dim_{dim_idx}"),
                                     DataType::Int64,
                                     false,
                                 ));
@@ -443,7 +443,7 @@ impl ZarrTableProvider {
             }
         } else if !coordinate_arrays.is_empty() {
             // Case 2: Only coordinate arrays - add them as fields
-            for (coord_name, coord_shape, coord_data_type) in &coordinate_arrays {
+            for (coord_name, _coord_shape, coord_data_type) in &coordinate_arrays {
                 let arrow_type = self.zarr_type_to_arrow(coord_data_type)?;
                 let clean_name = if coord_name.starts_with('/') {
                     coord_name.chars().skip(1).collect()
@@ -454,7 +454,7 @@ impl ZarrTableProvider {
             }
         } else if !dimension_arrays.is_empty() {
             // Case 3: Only dimension arrays - add them as fields
-            for (dim_name, dim_shape, dim_data_type) in &dimension_arrays {
+            for (dim_name, _dim_shape, dim_data_type) in &dimension_arrays {
                 let arrow_type = self.zarr_type_to_arrow(dim_data_type)?;
                 let clean_name = if dim_name.starts_with('/') {
                     dim_name.chars().skip(1).collect()
@@ -697,15 +697,15 @@ impl ZarrTableProvider {
             if shape.is_empty() {
                 // Skip arrays with completely undefined shape
                 continue;
-            } else if shape.iter().any(|&s| s == 0) {
+            } else if shape.contains(&0) {
                 // Empty arrays (zero-size dimensions) - include in tabular data but handle specially
                 coordinate_arrays.push((name, array, shape));
-            } else if shape.len() == 0 {
+            } else if shape.is_empty() {
                 // Scalar coordinate (like reference_time) - skip for data reading
                 continue;
             } else if dimension_names.len() == 1
                 && dimension_names
-                    .get(0)
+                    .first()
                     .map(|s| s == &clean_name)
                     .unwrap_or(false)
             {
@@ -832,7 +832,7 @@ impl ZarrTableProvider {
             };
 
             // Check if this is an empty array
-            let is_empty = shape.iter().any(|&s| s == 0);
+            let is_empty = shape.contains(&0);
 
             if is_empty {
                 // Create empty array of appropriate type
@@ -1568,15 +1568,15 @@ impl ZarrTableProvider {
             if shape.is_empty() {
                 // Skip arrays with completely undefined shape
                 continue;
-            } else if shape.iter().any(|&s| s == 0) {
+            } else if shape.contains(&0) {
                 // Empty arrays (zero-size dimensions) - include in tabular data but handle specially
                 coordinate_arrays.push((name, array, shape));
-            } else if shape.len() == 0 {
+            } else if shape.is_empty() {
                 // Scalar coordinate (like reference_time) - skip for data reading
                 continue;
             } else if dimension_names.len() == 1
                 && dimension_names
-                    .get(0)
+                    .first()
                     .map(|s| s == &clean_name)
                     .unwrap_or(false)
             {
@@ -2045,11 +2045,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_table_provider_scan() {
-        // Test scan method with empty store
-        let provider = ZarrTableProvider {
-            store_path: "test".to_string(),
-            store: None,
-        };
+        // Test scan method with valid test data
+        let store_path = "test_data/single_dim.zarr".to_string();
+        let provider = ZarrTableProvider::from_path(store_path).unwrap();
 
         // Create a mock session state
         let config = SessionConfig::new();
@@ -2066,16 +2064,14 @@ mod tests {
 
         // The execution plan should be valid
         let execution_plan = scan_result.unwrap();
-        assert_eq!(execution_plan.schema().fields().len(), 0);
+        assert!(!execution_plan.schema().fields().is_empty());
     }
 
     #[tokio::test]
     async fn test_table_scanning_with_predicates() {
         // Test that the table provider can handle basic scanning with predicates
-        let provider = ZarrTableProvider {
-            store_path: "test".to_string(),
-            store: None,
-        };
+        let store_path = "test_data/single_dim.zarr".to_string();
+        let provider = ZarrTableProvider::from_path(store_path).unwrap();
 
         // Create a mock session state
 
@@ -2109,10 +2105,8 @@ mod tests {
     #[tokio::test]
     async fn test_table_scanning_with_projection() {
         // Test that the table provider can handle projection
-        let provider = ZarrTableProvider {
-            store_path: "test".to_string(),
-            store: None,
-        };
+        let store_path = "test_data/single_dim.zarr".to_string();
+        let provider = ZarrTableProvider::from_path(store_path).unwrap();
 
         // Create a mock session state
         let config = SessionConfig::new();
@@ -2122,17 +2116,17 @@ mod tests {
             .with_runtime_env(runtime_env)
             .build();
 
-        // Test scan with projection - should work even with empty schema
-        let projection = vec![]; // Empty projection
+        // Test scan with projection - project only the first column
+        let projection = vec![0]; // Project first column
         let filters = vec![];
         let scan_result = provider
             .scan(&state, Some(&projection), &filters, None)
             .await;
         assert!(scan_result.is_ok());
 
-        // The execution plan should have empty schema for empty projection
+        // The execution plan should have one field for single column projection
         let execution_plan = scan_result.unwrap();
-        assert_eq!(execution_plan.schema().fields().len(), 0);
+        assert_eq!(execution_plan.schema().fields().len(), 1);
     }
 
     #[test]
