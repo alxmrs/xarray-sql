@@ -12,8 +12,8 @@ from .df_test import DaskTestCase, create_large_dataset
 
 class SQLBaseTestCase(DaskTestCase):
   TEST_COMBINATIONS = [
-    ('from_dataset', dict(as_zarr=False)),
-    ('from_zarr', dict(as_zarr=True)),
+      ('from_dataset', dict(as_zarr=False)),
+      ('from_zarr', dict(as_zarr=True)),
   ]
 
   def setUp(self):
@@ -22,19 +22,19 @@ class SQLBaseTestCase(DaskTestCase):
     self.ctx = XarrayContext()
 
     self.weather_small = self.weather.isel(
-      time=slice(0, 6), lat=slice(0, 10), lon=slice(0, 10)
+        time=slice(0, 6), lat=slice(0, 10), lon=slice(0, 10)
     ).chunk({'time': 3})
 
     self.weather_medium = self.weather.isel(
-      time=slice(0, 12), lat=slice(0, 15), lon=slice(0, 20)
+        time=slice(0, 12), lat=slice(0, 15), lon=slice(0, 20)
     ).chunk({'time': 6})
 
     self.synthetic = create_large_dataset(
-      time_steps=50, lat_points=20, lon_points=20
+        time_steps=50, lat_points=20, lon_points=20
     ).chunk({'time': 25})
 
     self.air_medium = self.air.isel(
-      time=slice(0, 100), lat=slice(0, 20), lon=slice(0, 30)
+        time=slice(0, 100), lat=slice(0, 20), lon=slice(0, 30)
     ).chunk({'time': 50})
 
     # Create station metadata as a simple tabular dataset
@@ -44,25 +44,25 @@ class SQLBaseTestCase(DaskTestCase):
 
     # Create stations at specific lat/lon points
     self.stations = xr.Dataset(
-      {
-        'station': (['station'], [101, 102, 103]),
-        'lat': (['station'], [air_lats[0], air_lats[2], air_lats[4]]),
-        'lon': (['station'], [air_lons[1], air_lons[3], air_lons[5]]),
-        'elevation': (['station'], [100, 250, 500]),
-        'name': (['station'], ['Downtown', 'Airport', 'Mountain']),
-      }
+        {
+            'station': (['station'], [101, 102, 103]),
+            'lat': (['station'], [air_lats[0], air_lats[2], air_lats[4]]),
+            'lon': (['station'], [air_lons[1], air_lons[3], air_lons[5]]),
+            'elevation': (['station'], [100, 250, 500]),
+            'name': (['station'], ['Downtown', 'Airport', 'Mountain']),
+        }
     ).chunk({'station': 3})
 
     # Create region lookup table
     self.regions = xr.Dataset(
-      {
-        'region_id': (['region'], [1, 2, 3, 4]),
-        'region_name': (['region'], ['North', 'South', 'East', 'West']),
-        'min_lat': (['region'], [60, 30, 40, 40]),
-        'max_lat': (['region'], [90, 60, 80, 80]),
-        'min_lon': (['region'], [-180, -180, -90, -180]),
-        'max_lon': (['region'], [180, 180, 180, -90]),
-      }
+        {
+            'region_id': (['region'], [1, 2, 3, 4]),
+            'region_name': (['region'], ['North', 'South', 'East', 'West']),
+            'min_lat': (['region'], [60, 30, 40, 40]),
+            'max_lat': (['region'], [90, 60, 80, 80]),
+            'min_lon': (['region'], [-180, -180, -90, -180]),
+            'max_lon': (['region'], [180, 180, 180, -90]),
+        }
     ).chunk({'region': 4})
 
   def tearDown(self):
@@ -78,12 +78,21 @@ class SQLBaseTestCase(DaskTestCase):
     else:
       self.ctx.from_dataset(name, ds, chunks)
 
-  def make_context(self, name: str, ds: xr.Dataset, *, chunks=None,
-                   as_zarr=False) -> XarrayContext:
+  def make_context(
+      self, name: str, ds: xr.Dataset, *, chunks=None, as_zarr=False
+  ) -> XarrayContext:
     ctx = XarrayContext()
     return self.add_to_context(ctx, name, ds, chunks=chunks, as_zarr=as_zarr)
 
-  def add_to_context(self, ctx: XarrayContext, name: str, ds: xr.Dataset, *, chunks=None, as_zarr=False) -> XarrayContext:
+  def add_to_context(
+      self,
+      ctx: XarrayContext,
+      name: str,
+      ds: xr.Dataset,
+      *,
+      chunks=None,
+      as_zarr=False,
+  ) -> XarrayContext:
     if as_zarr:
       path = os.path.join(self.temp_dir.name, name + '.zarr')
       ds.to_zarr(path)
@@ -92,11 +101,12 @@ class SQLBaseTestCase(DaskTestCase):
       ctx.from_dataset(name, ds, chunks=chunks)
     return ctx
 
+
 def with_test_combinations(test_func):
   # test_name, options
   test_combinations = [
-    ('from_dataset', dict(as_zarr=False)),
-    ('from_zarr', dict(as_zarr=True)),
+      ('from_dataset', dict(as_zarr=False)),
+      ('from_zarr', dict(as_zarr=True)),
   ]
 
   @functools.wraps(test_func)
@@ -114,22 +124,20 @@ class SqlTestCase(SQLBaseTestCase):
 
   @with_test_combinations
   def test_sanity(self, as_zarr):
-      ctx = self.make_context('air', self.air_small, as_zarr=as_zarr)
-      query = ctx.sql(
-        f'SELECT "lat", "lon", "time", "air" FROM air LIMIT 100'
-      )
+    ctx = self.make_context('air', self.air_small, as_zarr=as_zarr)
+    query = ctx.sql(f'SELECT "lat", "lon", "time", "air" FROM air LIMIT 100')
 
-      result = query.to_pandas()
-      self.assertIsNotNone(result)
-      self.assertLessEqual(len(result), 1320)  # Should be all rows or less
-      self.assertGreater(len(result), 0)  # Should have some rows
+    result = query.to_pandas()
+    self.assertIsNotNone(result)
+    self.assertLessEqual(len(result), 1320)  # Should be all rows or less
+    self.assertGreater(len(result), 0)  # Should have some rows
 
   @with_test_combinations
   def test_agg_small(self, as_zarr):
     ctx = self.make_context('air', self.air_small, as_zarr=as_zarr)
 
     query = ctx.sql(
-      f"""
+        f"""
   SELECT
     "lat", "lon", SUM("air") as air_total
   FROM 
@@ -150,7 +158,7 @@ class SqlTestCase(SQLBaseTestCase):
     ctx = self.make_context('air', self.air, as_zarr=as_zarr)
 
     query = ctx.sql(
-      f"""
+        f"""
   SELECT
     "lat", "lon", AVG("air") as air_total
   FROM 
@@ -191,7 +199,7 @@ class SqlVarietyTestCase(SQLBaseTestCase):
 
     # Test selecting specific columns
     result = ctx.sql(
-      'SELECT lat, lon, temperature, precipitation FROM weather LIMIT 20'
+        'SELECT lat, lon, temperature, precipitation FROM weather LIMIT 20'
     ).to_pandas()
 
     self.assertGreater(len(result), 0)
@@ -200,7 +208,7 @@ class SqlVarietyTestCase(SQLBaseTestCase):
 
     # Test filtering
     result = ctx.sql(
-      'SELECT * FROM weather WHERE temperature > 10 LIMIT 50'
+        'SELECT * FROM weather WHERE temperature > 10 LIMIT 50'
     ).to_pandas()
 
     self.assertGreater(len(result), 0)
@@ -214,14 +222,14 @@ class SqlVarietyTestCase(SQLBaseTestCase):
 
     # Test COUNT
     result = ctx.sql(
-      'SELECT COUNT(*) as total_count FROM synthetic'
+        'SELECT COUNT(*) as total_count FROM synthetic'
     ).to_pandas()
     self.assertEqual(len(result), 1)
     self.assertGreater(result['total_count'].iloc[0], 0)
 
     # Test MIN, MAX, AVG
     result = ctx.sql(
-      """
+        """
   SELECT 
     MIN(temperature) as min_temp,
     MAX(temperature) as max_temp,
@@ -233,7 +241,7 @@ class SqlVarietyTestCase(SQLBaseTestCase):
     self.assertEqual(len(result), 1)
     self.assertLess(result['min_temp'].iloc[0], result['max_temp'].iloc[0])
     self.assertGreaterEqual(
-      result['avg_temp'].iloc[0], result['min_temp'].iloc[0]
+        result['avg_temp'].iloc[0], result['min_temp'].iloc[0]
     )
     self.assertLessEqual(result['avg_temp'].iloc[0], result['max_temp'].iloc[0])
 
@@ -244,7 +252,7 @@ class SqlVarietyTestCase(SQLBaseTestCase):
 
     # Group by spatial coordinates
     result = ctx.sql(
-      """
+        """
   SELECT 
     lat, lon,
     AVG(air) as avg_air,
@@ -262,7 +270,7 @@ class SqlVarietyTestCase(SQLBaseTestCase):
 
     # Each spatial point should have same number of time steps
     self.assertTrue(
-      (result['time_count'] == self.air_small.sizes['time']).all()
+        (result['time_count'] == self.air_small.sizes['time']).all()
     )
 
   @with_test_combinations
@@ -272,14 +280,14 @@ class SqlVarietyTestCase(SQLBaseTestCase):
 
     # Get unique time values for filtering
     all_data = ctx.sql(
-      'SELECT DISTINCT time FROM weather ORDER BY time'
+        'SELECT DISTINCT time FROM weather ORDER BY time'
     ).to_pandas()
     if len(all_data) > 2:
       mid_time = all_data['time'].iloc[len(all_data) // 2]
 
       # Filter by time
       result = ctx.sql(
-        f"""
+          f"""
         SELECT COUNT(*) as count_after
         FROM weather 
         WHERE time >= '{mid_time}'
@@ -288,21 +296,19 @@ class SqlVarietyTestCase(SQLBaseTestCase):
 
       self.assertGreater(result['count_after'].iloc[0], 0)
 
-  @unittest.skip("station data -- wait till later")
+  @unittest.skip('station data -- wait till later')
   @with_test_combinations
   def test_station_dataset_queries(self, as_zarr):
     """Test queries on 1D station dataset."""
     ctx = self.make_context('stations', self.stations, as_zarr=as_zarr)
 
     # Basic select
-    result = ctx.sql(
-      'SELECT * FROM stations ORDER BY elevation'
-    ).to_pandas()
+    result = ctx.sql('SELECT * FROM stations ORDER BY elevation').to_pandas()
     self.assertEqual(len(result), 3)
 
     # Test filtering by elevation
     result = ctx.sql(
-      'SELECT name, elevation FROM stations WHERE elevation > 300 ORDER BY elevation'
+        'SELECT name, elevation FROM stations WHERE elevation > 300 ORDER BY elevation'
     ).to_pandas()
 
     self.assertGreater(len(result), 0)
@@ -312,7 +318,7 @@ class SqlVarietyTestCase(SQLBaseTestCase):
 class SqlJoinTestCase(SQLBaseTestCase):
   """Test joining tabular data with raster data using from_dataset."""
 
-  @unittest.skip("station data -- wait till later")
+  @unittest.skip('station data -- wait till later')
   @with_test_combinations
   def test_simple_cross_join(self, as_zarr):
     """Test cross join between raster and tabular data."""
@@ -321,10 +327,10 @@ class SqlJoinTestCase(SQLBaseTestCase):
 
     # Test separate queries first to ensure both datasets work
     air_result = ctx.sql(
-      'SELECT COUNT(*) as air_count FROM air_data'
+        'SELECT COUNT(*) as air_count FROM air_data'
     ).to_pandas()
     station_result = ctx.sql(
-      'SELECT COUNT(*) as station_count FROM stations'
+        'SELECT COUNT(*) as station_count FROM stations'
     ).to_pandas()
 
     self.assertGreater(air_result['air_count'].iloc[0], 0)
@@ -333,9 +339,7 @@ class SqlJoinTestCase(SQLBaseTestCase):
     # Test that we can query both datasets in the same context
     # This demonstrates multi-dataset capability without complex joins
     air_sample = ctx.sql('SELECT air FROM air_data LIMIT 5').to_pandas()
-    station_sample = ctx.sql(
-      'SELECT station FROM stations LIMIT 5'
-    ).to_pandas()
+    station_sample = ctx.sql('SELECT station FROM stations LIMIT 5').to_pandas()
 
     self.assertGreater(len(air_sample), 0)
     self.assertGreater(len(station_sample), 0)
@@ -346,12 +350,16 @@ class SqlJoinTestCase(SQLBaseTestCase):
   @with_test_combinations
   def test_coordinate_based_join(self, as_zarr):
     """Test joining on coordinate proximity."""
-    air_table_name = ctx = self.make_context('air_data', self.air_small, as_zarr=as_zarr)
-    stations_table_name = ctx = self.add_to_context(ctx, 'stations', self.stations, as_zarr=as_zarr)
+    air_table_name = ctx = self.make_context(
+        'air_data', self.air_small, as_zarr=as_zarr
+    )
+    stations_table_name = ctx = self.add_to_context(
+        ctx, 'stations', self.stations, as_zarr=as_zarr
+    )
 
     # First test a simple cross join to ensure datasets are compatible
     result = ctx.sql(
-      f"""
+        f"""
     SELECT COUNT(*) as total_combinations
     FROM {air_table_name} a
     CROSS JOIN {stations_table_name} s
@@ -362,7 +370,7 @@ class SqlJoinTestCase(SQLBaseTestCase):
 
     # Test a simpler join condition
     result = ctx.sql(
-      f"""
+        f"""
     SELECT 
       COUNT(*) as match_count
     FROM {air_table_name} a, {stations_table_name} s
@@ -380,10 +388,10 @@ class SqlJoinTestCase(SQLBaseTestCase):
 
     # Test that both datasets can be queried independently
     air_result = ctx.sql(
-      'SELECT COUNT(*) as air_count FROM air_data'
+        'SELECT COUNT(*) as air_count FROM air_data'
     ).to_pandas()
     region_result = ctx.sql(
-      'SELECT COUNT(*) as region_count FROM regions'
+        'SELECT COUNT(*) as region_count FROM regions'
     ).to_pandas()
 
     self.assertGreater(air_result['air_count'].iloc[0], 0)
@@ -391,7 +399,7 @@ class SqlJoinTestCase(SQLBaseTestCase):
 
     # Test a simpler region-based query without complex joins
     result = ctx.sql(
-      """
+        """
   SELECT 
     region_name,
     min_lat,
@@ -413,7 +421,7 @@ class SqlJoinTestCase(SQLBaseTestCase):
 
     # Get statistics by elevation bands using station data
     result = ctx.sql(
-      """
+        """
   SELECT 
     CASE 
       WHEN s.elevation < 200 THEN 'Low'
@@ -446,7 +454,7 @@ class SqlOptimizationTestCase(SQLBaseTestCase):
 
     # Select only specific columns
     result = ctx.sql(
-      'SELECT lat, lon, temperature FROM weather LIMIT 100'
+        'SELECT lat, lon, temperature FROM weather LIMIT 100'
     ).to_pandas()
 
     # Should only have the requested columns
@@ -465,7 +473,7 @@ class SqlOptimizationTestCase(SQLBaseTestCase):
 
     # Test numeric filtering
     result = ctx.sql(
-      'SELECT * FROM air WHERE air > 280 AND air < 290'
+        'SELECT * FROM air WHERE air > 280 AND air < 290'
     ).to_pandas()
 
     if len(result) > 0:
@@ -474,7 +482,7 @@ class SqlOptimizationTestCase(SQLBaseTestCase):
 
     # Test coordinate filtering
     result = ctx.sql(
-      'SELECT * FROM air WHERE lat > 50 AND lon < -100'
+        'SELECT * FROM air WHERE lat > 50 AND lon < -100'
     ).to_pandas()
 
     if len(result) > 0:
@@ -506,7 +514,7 @@ class SqlOptimizationTestCase(SQLBaseTestCase):
 
     # Test ordering by different columns
     result = ctx.sql(
-      'SELECT lat, lon, air FROM air ORDER BY air DESC LIMIT 20'
+        'SELECT lat, lon, air FROM air ORDER BY air DESC LIMIT 20'
     ).to_pandas()
 
     if len(result) > 1:
@@ -516,7 +524,7 @@ class SqlOptimizationTestCase(SQLBaseTestCase):
 
     # Test ordering by coordinates
     result = ctx.sql(
-      'SELECT lat, lon, air FROM air ORDER BY lat ASC, lon DESC LIMIT 20'
+        'SELECT lat, lon, air FROM air ORDER BY lat ASC, lon DESC LIMIT 20'
     ).to_pandas()
 
     if len(result) > 1:
@@ -533,7 +541,7 @@ class SqlOptimizationTestCase(SQLBaseTestCase):
 
     # Test GROUP BY optimization
     result = ctx.sql(
-      """
+        """
   SELECT 
     lat,
     COUNT(*) as point_count,
@@ -561,7 +569,7 @@ class SqlOptimizationTestCase(SQLBaseTestCase):
 
     # Complex WHERE clause with AND/OR
     result = ctx.sql(
-      """
+        """
   SELECT lat, lon, temperature, precipitation
   FROM weather
   WHERE (temperature > 15 AND precipitation < 50) 
@@ -588,7 +596,7 @@ class SqlComplexQueryTestCase(SQLBaseTestCase):
 
     # Subquery to find above-average temperatures
     result = ctx.sql(
-      """
+        """
   SELECT lat, lon, air
   FROM air
   WHERE air > (
@@ -614,7 +622,7 @@ class SqlComplexQueryTestCase(SQLBaseTestCase):
     try:
       # Test ROW_NUMBER window function
       result = ctx.sql(
-        """
+          """
     SELECT 
       lat, lon, air,
       ROW_NUMBER() OVER (PARTITION BY lat ORDER BY air DESC) as rank_in_lat
@@ -646,7 +654,7 @@ class SqlComplexQueryTestCase(SQLBaseTestCase):
     ctx = self.make_context('weather', self.weather_medium, as_zarr=as_zarr)
 
     result = ctx.sql(
-      """
+        """
   SELECT 
     lat, lon,
     temperature,
@@ -694,9 +702,8 @@ class SqlComplexQueryTestCase(SQLBaseTestCase):
     """Test mathematical functions in SQL."""
     ctx = self.make_context('weather', self.weather_small, as_zarr=as_zarr)
 
-
     result = ctx.sql(
-      """
+        """
   SELECT 
     lat, lon,
     temperature,
@@ -716,7 +723,7 @@ class SqlComplexQueryTestCase(SQLBaseTestCase):
       for _, row in result.iterrows():
         temp = row['temperature']
         self.assertAlmostEqual(
-          row['temp_diff_from_20'], abs(temp - 20), places=5
+            row['temp_diff_from_20'], abs(temp - 20), places=5
         )
         if temp >= 0:
           self.assertAlmostEqual(row['temp_sqrt'], np.sqrt(temp), places=5)
@@ -728,7 +735,7 @@ class SqlComplexQueryTestCase(SQLBaseTestCase):
 
     # Test string operations on numeric data converted to string
     result = ctx.sql(
-      """
+        """
   SELECT 
     lat, lon,
     CAST(lat AS VARCHAR) as lat_str,
@@ -783,7 +790,7 @@ class SqlErrorHandlingTestCase(SQLBaseTestCase):
     """Test handling of empty datasets."""
     # Create empty dataset
     empty_ds = xr.Dataset({'temp': (['x'], [])}, coords={'x': []}).chunk(
-      {'x': 1}
+        {'x': 1}
     )
 
     ctx = self.make_context('empty', empty_ds, as_zarr=as_zarr)
