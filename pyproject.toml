@@ -69,4 +69,5 @@ dev = [
     "xarray_sql[test]",
     "py-spy>=0.4.0",
     "pyink>=24.10.1",
+    "maturin>=1.9.1",
 ]
