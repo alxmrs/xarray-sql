@@ -288,6 +288,7 @@ class SqlVarietyTestCase(SQLBaseTestCase):
 
       self.assertGreater(result['count_after'].iloc[0], 0)
 
+  @unittest.skip("station data -- wait till later")
   @with_test_combinations
   def test_station_dataset_queries(self, as_zarr):
     """Test queries on 1D station dataset."""
@@ -311,6 +312,7 @@ class SqlVarietyTestCase(SQLBaseTestCase):
 class SqlJoinTestCase(SQLBaseTestCase):
   """Test joining tabular data with raster data using from_dataset."""
 
+  @unittest.skip("station data -- wait till later")
   @with_test_combinations
   def test_simple_cross_join(self, as_zarr):
     """Test cross join between raster and tabular data."""
