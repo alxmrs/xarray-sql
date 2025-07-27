@@ -110,8 +110,8 @@ def with_test_combinations(test_func):
   ]
   if sys.version_info >= (3, 11):
     test_combinations.append(
-      ('from_zarr', dict(as_zarr=True)),
-)
+        ('from_zarr', dict(as_zarr=True)),
+    )
 
   @functools.wraps(test_func)
   def wrapper(self, *args, **kwargs):

@@ -25,7 +25,9 @@ class XarrayContext(SessionContext):
       chunks: Chunks = None,
   ):
     if sys.version_info < (3, 11):
-      raise ValueError(f'method not supported below Python 3.11. {sys.version} found.')
+      raise ValueError(
+          f'method not supported below Python 3.11. {sys.version} found.'
+      )
     assert chunks is None, 'chunks not supported (at the moment).'
     zarr_provider = ZarrTableProvider(zarr_path)
     return self.register_table_provider(table_name, zarr_provider)
