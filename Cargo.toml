@@ -26,3 +26,6 @@ pyo3-build-config = "0.23"
 [lib]
 name = "zarrquet"
 crate-type = ["cdylib", "rlib"]
+
+[target.armv7-unknown-linux-gnueabi]
+linker = "arm-linux-gnueabi-gcc"
