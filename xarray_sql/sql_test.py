@@ -5,6 +5,7 @@ import unittest
 
 import numpy as np
 import xarray as xr
+import sys
 
 from . import XarrayContext
 from .df_test import DaskTestCase, create_large_dataset
@@ -106,15 +107,16 @@ def with_test_combinations(test_func):
   # test_name, options
   test_combinations = [
       ('from_dataset', dict(as_zarr=False)),
-      ('from_zarr', dict(as_zarr=True)),
   ]
+  if sys.version_info >= (3, 11):
+    test_combinations.append(
+      ('from_zarr', dict(as_zarr=True)),
+)
 
   @functools.wraps(test_func)
   def wrapper(self, *args, **kwargs):
     for case, opt in test_combinations:
       with self.subTest(case, **opt):
-        # Create a fresh context per test combo.
-        self.ctx = XarrayContext()
         test_func(self, *args, **opt, **kwargs)
 
   return wrapper

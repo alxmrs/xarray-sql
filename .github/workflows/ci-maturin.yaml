@@ -31,7 +31,7 @@ jobs:
             target: aarch64
           - runner: ubuntu-22.04
             target: armv7
-#          - runner: ubuntu-22.04  # TODO(alxmrs): Failing, but don't know why.
+#          - runner: ubuntu-22.04  # TODO(alxmrs): Failing, not sure why.
 #            target: s390x
           - runner: ubuntu-22.04
             target: ppc64le
