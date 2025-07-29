@@ -93,9 +93,7 @@ async fn test_basic_queries(ctx: &SessionContext) -> Result<(), Box<dyn std::err
 
     // Test 3: Simple column selection
     println!("  Test 3: SELECT time, lat FROM weather LIMIT 3");
-    let df = ctx
-        .sql("SELECT time, lat FROM weather LIMIT 3")
-        .await?;
+    let df = ctx.sql("SELECT time, lat FROM weather LIMIT 3").await?;
     let results = df.collect().await?;
     print_results("Column Selection", &results);
 
@@ -123,7 +121,9 @@ async fn test_filtering_queries(ctx: &SessionContext) -> Result<(), Box<dyn std:
 
     // Test 3: Range queries
     println!("  Test 3: WHERE time BETWEEN 0 AND 1");
-    let df = ctx.sql("SELECT time, COUNT(*) as count FROM weather WHERE time BETWEEN 0 AND 1 GROUP BY time").await?;
+    let df = ctx
+        .sql("SELECT time, COUNT(*) as count FROM weather WHERE time BETWEEN 0 AND 1 GROUP BY time")
+        .await?;
     let results = df.collect().await?;
     print_results("Range Query", &results);
 
