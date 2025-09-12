@@ -4048,6 +4048,8 @@ dependencies = [
  "pyo3",
  "pyo3-build-config",
  "tokio",
+ "zarrs",
+ "zarrs_metadata",
  "zarrs_object_store",
  "zarrs_storage",
 ]
