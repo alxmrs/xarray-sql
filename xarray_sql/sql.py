@@ -21,12 +21,13 @@ class XarrayContext(SessionContext):
       self,
       table_name: str,
       zarr_path: str,
-      chunks: Chunks = None,
   ):
     if sys.version_info < (3, 11):
       raise ValueError(
           f'method not supported below Python 3.11. {sys.version} found.'
       )
-    
+
+    if not zarr_path.endswith('/'):
+      zarr_path += '/'
     zarr_provider = ZarrTableProvider(zarr_path)
     return self.register_table_provider(table_name, zarr_provider)
