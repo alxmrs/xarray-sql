@@ -97,7 +97,7 @@ class SQLBaseTestCase(DaskTestCase):
     if as_zarr:
       path = os.path.join(self.temp_dir.name, name + '.zarr')
       ds.to_zarr(path)
-      ctx.from_zarr(name, path, chunks=chunks)
+      ctx.from_zarr(name, path)
     else:
       ctx.from_dataset(name, ds, chunks=chunks)
     return ctx
