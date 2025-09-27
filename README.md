@@ -152,8 +152,9 @@ I want to give a special thanks to the following folks and institutions:
 - Jake Wall and AI2/Ecoscope for compute resources and key use cases.
 - Charles Stern, Stephan Hoyer, Alexander Kmoch, Wei Ji, and Qiusheng Wu
   for the early review and discussion of this project.
-- Kyle Barron, Tom Nichols, Tom White, and Maxime Dion for the Array Working
-  Group and DataFusion-specific discussions.
+- Tom Nichols, Kyle Barron, Tom White, and Maxime Dion for the [Array Working
+  Group](https://discourse.pangeo.io/t/new-working-group-for-distributed-array-computing/2734)
+  and DataFusion-specific collaboration.
 
 ## License
 
