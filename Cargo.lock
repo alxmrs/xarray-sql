@@ -368,7 +368,7 @@ dependencies = [
 [[package]]
 name = "arrow-zarr"
 version = "0.1.0"
-source = "git+https://github.com/datafusion-contrib/arrow-zarr.git?branch=u%2Falxmrs%2Fxarray-sql#1eb371bdbe684acdb69f57f4baea245c2ff08df6"
+source = "git+https://github.com/datafusion-contrib/arrow-zarr.git?branch=u%2Falxmrs%2Fxarray-sql#152e06d55714f83f517c6009a2d0708aa6a96764"
 dependencies = [
  "arrow",
  "arrow-array",
