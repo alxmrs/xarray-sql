@@ -127,7 +127,7 @@ class SqlTestCase(SQLBaseTestCase):
   @with_test_combinations
   def test_sanity(self, as_zarr):
     ctx = self.make_context('air', self.air_small, as_zarr=as_zarr)
-    query = ctx.sql(f'SELECT "lat", "lon", "time", "air" FROM air LIMIT 100')
+    query = ctx.sql(f'SELECT * FROM air LIMIT 100')
 
     result = query.to_pandas()
     self.assertIsNotNone(result)

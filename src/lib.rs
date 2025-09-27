@@ -1,74 +1,65 @@
-use arrow_schema::SchemaRef;
+use arrow::array::RecordBatch;
+use arrow::pyarrow::PyArrowType;
+use arrow_schema::Schema;
 use arrow_zarr::table::ZarrTable;
-use async_trait::async_trait;
-use datafusion::catalog::Session;
-use datafusion::datasource::{TableProvider, TableType};
+use arrow_zarr::zarr_store_opener::ZarrRecordBatchStream;
+use datafusion::datasource::TableProvider;
 use datafusion::error::DataFusionError;
-use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
-use datafusion::physical_plan::ExecutionPlan;
-use datafusion_ffi::table_provider::FFI_TableProvider;
+use futures::stream::TryStreamExt;
+use object_store::local::LocalFileSystem;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::PyCapsule;
-use std::ffi::CString;
+use pyo3_async_runtimes::tokio::future_into_py;
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::runtime::Runtime;
+use zarrs_object_store::AsyncObjectStore;
 
-/// A simple adapter that wraps arrow-zarr's ZarrTable for Python bindings
+/// A simple reader that converts Zarr data to Arrow RecordBatches for Python bindings
 #[pyclass(name = "ZarrTableProvider")]
 #[derive(Clone, Debug)]
 pub struct ZarrTableProvider {
-    inner: Arc<ZarrTable>,
+    store_path: String,
 }
 
 impl ZarrTableProvider {
-    /// Create a new ZarrTableProvider from a store path using arrow-zarr's ZarrTable
-    pub fn from_path(store_path: String) -> Result<Self, DataFusionError> {
-        // Create a tokio runtime to handle the async table creation
-        let rt = Runtime::new().map_err(|e| DataFusionError::External(Box::new(e)))?;
-
-        rt.block_on(async {
-            println!("Creating ZarrTable from path: {}", store_path);
-            let zarr_table = ZarrTable::from_path(store_path.clone()).await;
-            println!("Schema: {:?}", zarr_table.schema());
-            Ok(Self {
-                inner: Arc::new(zarr_table),
-            })
-        })
-    }
-}
-
-// Implement TableProvider by delegating to the inner ZarrTable
-#[async_trait]
-impl TableProvider for ZarrTableProvider {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
+    fn from_path(store_path: String) -> Result<Self, DataFusionError> {
+        Ok(Self { store_path })
     }
 
-    fn schema(&self) -> SchemaRef {
-        self.inner.schema()
-    }
+    /// Read all data from the Zarr store and return as PyArrow RecordBatches
+    async fn read_to_arrow_async(&self) -> Result<Vec<RecordBatch>, DataFusionError> {
+        // Use ZarrTable to get the schema
+        let zarr_table = ZarrTable::from_path(self.store_path.clone()).await;
+        let schema = zarr_table.schema();
 
-    fn table_type(&self) -> TableType {
-        self.inner.table_type()
-    }
+        println!("Inferred schema: {:?}", schema);
 
-    async fn scan(
-        &self,
-        state: &dyn Session,
-        projection: Option<&Vec<usize>>,
-        filters: &[Expr],
-        limit: Option<usize>,
-    ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        // Delegate to the inner ZarrTable
-        self.inner.scan(state, projection, filters, limit).await
-    }
+        // Create the object store from the path
+        let path = PathBuf::from(&self.store_path);
+        let store = Arc::new(AsyncObjectStore::new(
+            LocalFileSystem::new_with_prefix(path)
+                .map_err(|e| DataFusionError::External(Box::new(e)))?,
+        ));
 
-    fn supports_filters_pushdown(
-        &self,
-        filters: &[&Expr],
-    ) -> Result<Vec<TableProviderFilterPushDown>, DataFusionError> {
-        self.inner.supports_filters_pushdown(filters)
+        // Create the ZarrRecordBatchStream
+        let stream = ZarrRecordBatchStream::try_new(
+            store,
+            schema,
+            None,    // group
+            None,    // projection
+            1,       // n_partitions
+            0,       // partition
+        )
+        .await
+        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+        // Collect all RecordBatches
+        let batches: Vec<RecordBatch> = stream
+            .try_collect()
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+        Ok(batches)
     }
 }
 
@@ -79,13 +70,36 @@ impl ZarrTableProvider {
         Self::from_path(store_path).map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
-    pub fn __datafusion_table_provider__<'a>(
-        &self,
-        py: Python<'a>,
-    ) -> PyResult<Bound<'a, PyCapsule>> {
-        let name = CString::new("datafusion_table_provider").unwrap();
-        let provider = FFI_TableProvider::new(Arc::new(self.clone()), false, None);
-        PyCapsule::new(py, provider, Some(name))
+    /// Read all data and return as a list of PyArrow RecordBatches
+    pub fn read_to_arrow<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
+        let store_path = self.store_path.clone();
+        future_into_py(py, async move {
+            let provider = ZarrTableProvider { store_path };
+            let batches = provider
+                .read_to_arrow_async()
+                .await
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+            // Convert to PyArrow objects
+            let py_batches: Result<Vec<PyArrowType<RecordBatch>>, PyErr> = batches
+                .into_iter()
+                .map(|batch| Ok(PyArrowType(batch)))
+                .collect();
+
+            py_batches
+        })
+    }
+
+    /// Get the schema as a PyArrow Schema
+    pub fn get_schema<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
+        let store_path = self.store_path.clone();
+        future_into_py(py, async move {
+            // Use ZarrTable to get the schema
+            let zarr_table = ZarrTable::from_path(store_path).await;
+            let schema = zarr_table.schema();
+
+            Ok(PyArrowType(Schema::from(schema.as_ref().clone())))
+        })
     }
 }
 

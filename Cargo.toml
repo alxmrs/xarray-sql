@@ -17,6 +17,7 @@ datafusion-ffi = {version = "49.0.0" }
 futures = "0.3.31"
 object_store = "0.12.0"
 pyo3 = { version = "0.24.1", features = ["extension-module"] }
+pyo3-async-runtimes = { version = "0.24.0", features = ["tokio-runtime"] }
 tokio = { version = "1.46.1", features = ["rt", "rt-multi-thread", "macros"] }
 zarrs = {version = "0.19.2", features = ["async"] }
 zarrs_metadata = { version = "0.3.4" }
