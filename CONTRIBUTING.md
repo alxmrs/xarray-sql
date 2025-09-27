@@ -12,8 +12,7 @@ reading [Xarray's contributing guide](https://docs.xarray.dev/en/stable/contribu
 
 ## Developer setup
 
-0. Create a project-specific python
-   environment with `uv`: https://docs.astral.sh/uv/getting-started/installation/
+0. We use `uv` to manage the project: https://docs.astral.sh/uv/getting-started/installation/
 1. Clone the repository (bonus: [via SSH](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account))
    and `cd xarray_sql` (the project root).
 2. Install dev dependencies via: `uv sync --dev` 
