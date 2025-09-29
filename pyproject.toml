@@ -33,8 +33,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = [
-  "pytest>=7.0.0",
-  "pytest-cov>=4.0.0",
+  "pytest",
   "xarray[io]",
   "gcsfs",
 ]
@@ -57,29 +56,6 @@ pyink-indentation = 2
 pyink-use-majority-quotes = true
 
 [tool.setuptools_scm]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
-addopts = [
-    "-v",
-    "--tb=short",
-    "--strict-markers",
-    "--disable-warnings",
-]
-markers = [
-    "unit: Unit tests",
-    "integration: Integration tests", 
-    "slow: Slow tests",
-    "memory: Memory-intensive tests",
-    "gcs: Tests requiring GCS access",
-]
-filterwarnings = [
-    "ignore::DeprecationWarning",
-    "ignore::PendingDeprecationWarning",
-]
 
 [dependency-groups]
 dev = [
