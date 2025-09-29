@@ -21,7 +21,7 @@ ds = xr.tutorial.open_dataset('air_temperature')
 
 # The same as a dask-sql Context; i.e. an Apache DataFusion Context.
 ctx = xql.XarrayContext()
-ctx.from_dataset('air', ds, chunks=dict(time=24))  # the Dataset needs to be chunked!
+ctx.from_dataset('air', ds, chunks=dict(time=24))  # the dataset needs to be chunked!
 # DataFrame()
 # +------+---------------------+-------+--------------------+
 # | lat  | time                | lon   | air                |
@@ -94,9 +94,9 @@ A few reasons:
 
 This is a light-weight way to prove the value of the interface.
 
-The larger goal is to explore the hypothesis that [Pangeo](https://pangeo.io/)
-is a scientific database. Here, xarray-sql can be thought of as a missing DB 
-front end.
+The larger goal is to explore the hypothesis that the [Pangeo](https://pangeo.io/)
+ecosystem is a scientific database. Here, xarray-sql can be thought of as a missing
+DB front end.
 
 ## How does it work?
 
@@ -104,8 +104,8 @@ All chunks in a Xarray Dataset are transformed into a Dask DataFrame via
 `from_map()` and `to_dataframe()`. For SQL support, we just use `dask-sql`.
 That's it!
 
-_2025 update_: This library now implements a dask-like `from_map` interface in 
-pure `datafusion` and `pyarrow`, but works with the same principle!
+_2025 update_: This library now implements a Dask-like `from_map` interface in 
+pure DataFusion and PyArrow, but works with the same principle!
 
 ## Why does this work?
 
@@ -113,13 +113,13 @@ Underneath Xarray, Dask, and Pandas, there are NumPy arrays. These are paged in
 chunks and represented contiguously in memory. It is only a matter of metadata
 that breaks them up into ndarrays. `to_dataframe()`
 just changes this metadata (via a `ravel()`/`reshape()`), back into a column
-amenable to a DataFrame. This project basically just makes a metadata change to 
-make this chunked information scannable by a DB engine (DataFusion).
+amenable to a DataFrame. We take advantage of this light weight metadata change to 
+make chunked information scannable by a DB engine (DataFusion).
 
 ## What are the current limitations?
 
-_2025 update_: TBD, `datafusion` provides a whole new world! Currently, this project is looking
-for early users – "tire kickers", if you will. We'd love your input to shape the direction of this 
+_2025 update_: TBD, DataFusion provides a whole new world! Currently, we're looking for
+early users – "tire kickers", if you will. We'd love your input to shape the direction of this 
 project! Please, give this a try and [file issues](https://github.com/alxmrs/xarray-sql/issues) as
 you see fit. Check out our [contributing guide](CONTRIBUTING.md), too 😉.
 
