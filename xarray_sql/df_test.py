@@ -98,7 +98,7 @@ def test_explode_dim_sizes_one(air):
         assert v == ds.sizes[k]
 
 
-@pytest.mark.skip(reason="TODO(alxmrs): Why is this test slow?") # this was the original comment
+@pytest.mark.skip(reason="TODO(alxmrs): Why is this test slow?")
 def test_explode_dim_sizes_all(air):
     dss = explode(air)
     assert [tuple(ds.dims.values()) for ds in dss] == list(itertools.product(*air.chunksizes.values()))
