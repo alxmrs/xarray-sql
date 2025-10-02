@@ -2559,8 +2559,6 @@ io = [
 name = "xarray-sql"
 source = { editable = "." }
 dependencies = [
-    { name = "dask", version = "2024.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
-    { name = "dask", version = "2025.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
     { name = "datafusion" },
     { name = "xarray", version = "2024.7.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "xarray", version = "2025.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.10.*'" },
@@ -2569,6 +2567,8 @@ dependencies = [
 
 [package.optional-dependencies]
 test = [
+    { name = "dask", version = "2024.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+    { name = "dask", version = "2025.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
     { name = "gcsfs" },
     { name = "pytest" },
     { name = "xarray", version = "2024.7.0", source = { registry = "https://pypi.org/simple" }, extra = ["io"], marker = "python_full_version < '3.10'" },
@@ -2585,7 +2585,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dask", specifier = ">=2024.8.0" },
+    { name = "dask", marker = "extra == 'test'", specifier = ">=2024.8.0" },
     { name = "datafusion", specifier = ">=47.0.0" },
     { name = "gcsfs", marker = "extra == 'test'" },
     { name = "pytest", marker = "extra == 'test'" },
