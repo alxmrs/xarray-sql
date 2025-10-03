@@ -30,7 +30,7 @@ ds = xr.open_zarr(
 # Create a DataFusion context and register the datasets as tables.
 ctx = xql.XarrayContext()
 ctx.from_dataset(
-    'era5', ds.isel(time=8736 * 2), chunks=dict(latitude=12, longitude=12)
+    'era5', ds, chunks=dict(latitude=12, longitude=12)
 )
 ctx.from_pandas(
     pd.read_feather(
