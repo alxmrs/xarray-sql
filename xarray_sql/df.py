@@ -181,17 +181,14 @@ def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.RecordBatchReader:
   Returns:
     A PyArrow Table, which is a table representation of the input Dataset.
   """
+  def pivot_block(b: Block):
+    return pivot(ds.isel(b))
+
   fst = next(iter(ds.values())).dims
   assert all(
       da.dims == fst for da in ds.values()
   ), "All dimensions must be equal. Please filter data_vars in the Dataset."
 
-  blocks = block_slices(ds, chunks)
-
-  def pivot_block(b: Block):
-    return pivot(ds.isel(b))
-
-  head, *tail = blocks
   schema = _parse_schema(ds)
-  joined = itertools.chain([head], tail)
-  return from_map_batched(pivot_block, joined, schema=schema)
+  blocks = block_slices(ds, chunks)
+  return from_map_batched(pivot_block, blocks, schema=schema)
