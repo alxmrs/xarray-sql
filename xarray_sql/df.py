@@ -86,10 +86,7 @@ def from_map_batched(
     args = ()
 
   def map_batches():
-    print('entering map_batched')
-    for i, items in enumerate(zip(*iterables)):
-      if i % 100 == 0:
-        print(f'item {i} in map_batches')
+    for items in zip(*iterables):
       df = func(*items, *args, **kwargs)
       yield pa.RecordBatch.from_pandas(df, schema=schema)
 
