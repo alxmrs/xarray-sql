@@ -149,6 +149,7 @@ def pivot(ds: xr.Dataset) -> pd.DataFrame:
   """Converts an xarray Dataset to a pandas DataFrame."""
   return ds.to_dataframe().reset_index()
 
+
 def _parse_schema(ds) -> pa.Schema:
   """Extracts a `pa.Schema` from the Dataset, treating dims and data_vars as columns."""
   columns = []
@@ -158,7 +159,7 @@ def _parse_schema(ds) -> pa.Schema:
     if coord_name in ds.dims:
       pa_type = pa.from_numpy_dtype(coord_var.dtype)
       columns.append(pa.field(coord_name, pa_type))
-  
+
   for var_name, var in ds.data_vars.items():
     pa_type = pa.from_numpy_dtype(var.dtype)
     columns.append(pa.field(var_name, pa_type))
@@ -178,6 +179,7 @@ def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.RecordBatchReader:
   Returns:
     A PyArrow Table, which is a table representation of the input Dataset.
   """
+
   def pivot_block(b: Block):
     return pivot(ds.isel(b))
 
