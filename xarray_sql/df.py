@@ -86,7 +86,10 @@ def from_map_batched(
     args = ()
 
   def map_batches():
-    for items in zip(*iterables):
+    print('entering map_batched')
+    for i, items in enumerate(zip(*iterables)):
+      if i % 100 == 0:
+        print(f'item {i} in map_batches')
       df = func(*items, *args, **kwargs)
       yield pa.RecordBatch.from_pandas(df, schema=schema)
 
@@ -149,6 +152,22 @@ def pivot(ds: xr.Dataset) -> pd.DataFrame:
   """Converts an xarray Dataset to a pandas DataFrame."""
   return ds.to_dataframe().reset_index()
 
+def _parse_schema(ds) -> pa.Schema:
+  """Extracts a `pa.Schema` from the Dataset, treating dims and data_vars as columns."""
+  columns = []
+
+  for coord_name, coord_var in ds.coords.items():
+    # Only include dimension coordinates
+    if coord_name in ds.dims:
+      pa_type = pa.from_numpy_dtype(coord_var.dtype)
+      columns.append(pa.field(coord_name, pa_type))
+  
+  for var_name, var in ds.data_vars.items():
+    pa_type = pa.from_numpy_dtype(var.dtype)
+    columns.append(pa.field(var_name, pa_type))
+
+  return pa.schema(columns)
+
 
 def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.RecordBatchReader:
   """Pivots an Xarray Dataset into a PyArrow Table, partitioned by chunks.
@@ -173,6 +192,6 @@ def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.RecordBatchReader:
     return pivot(ds.isel(b))
 
   head, *tail = blocks
-  schema = pa.Schema.from_pandas(pivot_block(head))
+  schema = _parse_schema(ds)
   joined = itertools.chain([head], tail)
   return from_map_batched(pivot_block, joined, schema=schema)
