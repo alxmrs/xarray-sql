@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import xarray as xr
-from datafusion.context import ArrowStreamExportable
 
 Block = t.Dict[t.Hashable, slice]
 Chunks = t.Optional[t.Dict[str, int]]

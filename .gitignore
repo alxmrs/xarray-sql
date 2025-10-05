@@ -5,4 +5,6 @@ dist
 __pycache__
 .pytest_cache
 .venv
-.idea
+.idea/
+target/
+test_data/
