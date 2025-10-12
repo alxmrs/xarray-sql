@@ -61,7 +61,6 @@ def adding_function(x, y):
     return result
 
 
-
 @pytest.fixture
 def air():
     ds = xr.tutorial.open_dataset("air_temperature")
@@ -71,7 +70,9 @@ def air():
 
 @pytest.fixture
 def air_small(air):
-    return air.isel(time=slice(0, 12), lat=slice(0, 11), lon=slice(0, 10)).chunk({"time": 240})
+    return air.isel(time=slice(0, 12), lat=slice(0, 11), lon=slice(0, 10)).chunk(
+        {"time": 240}
+    )
 
 
 @pytest.fixture
@@ -82,7 +83,6 @@ def randwx():
 @pytest.fixture
 def large_ds():
     return create_large_dataset().chunk({"time": 25})
-
 
 
 def test_explode_cardinality(air):
@@ -101,7 +101,9 @@ def test_explode_dim_sizes_one(air):
 @pytest.mark.skip(reason="TODO(alxmrs): Why is this test slow?")
 def test_explode_dim_sizes_all(air):
     dss = explode(air)
-    assert [tuple(ds.dims.values()) for ds in dss] == list(itertools.product(*air.chunksizes.values()))
+    assert [tuple(ds.dims.values()) for ds in dss] == list(
+        itertools.product(*air.chunksizes.values())
+    )
 
 
 def test_explode_data_equal_one_first(air):
@@ -161,14 +163,15 @@ def test_from_map_with_pyarrow_tables():
     assert len(result) == 3
 
 
-
 def test_from_map_batched_basic_functionality(air_small):
     blocks = list(block_slices(air_small, chunks={"time": 4, "lat": 3, "lon": 4}))
 
     first_block_df = pivot(air_small.isel(blocks[0]))
     expected_schema = pa.Schema.from_pandas(first_block_df)
 
-    reader = from_map_batched(pivot, [air_small.isel(block) for block in blocks], schema=expected_schema)
+    reader = from_map_batched(
+        pivot, [air_small.isel(block) for block in blocks], schema=expected_schema
+    )
 
     assert isinstance(reader, pa.RecordBatchReader)
     assert reader.schema == expected_schema
@@ -184,13 +187,23 @@ def test_from_map_batched_multiple_iterables():
     x_values = [1, 2, 3, 4, 5]
     y_values = [10, 20, 30, 40, 50]
 
-    expected_schema = pa.schema([("x", pa.int64()), ("y", pa.int64()), ("sum", pa.int64())])
+    expected_schema = pa.schema(
+        [("x", pa.int64()), ("y", pa.int64()), ("sum", pa.int64())]
+    )
 
-    reader = from_map_batched(adding_function, x_values, y_values, schema=expected_schema)
+    reader = from_map_batched(
+        adding_function, x_values, y_values, schema=expected_schema
+    )
     table = reader.read_all()
     df = table.to_pandas()
 
-    expected_df = pd.DataFrame({"x": x_values, "y": y_values, "sum": [x + y for x, y in zip(x_values, y_values)]})
+    expected_df = pd.DataFrame(
+        {
+            "x": x_values,
+            "y": y_values,
+            "sum": [x + y for x, y in zip(x_values, y_values)],
+        }
+    )
     pd.testing.assert_frame_equal(df, expected_df)
 
 
@@ -201,7 +214,9 @@ def test_from_map_batched_with_args_and_kwargs():
     values = [1, 2, 3]
     expected_schema = pa.schema([("x", pa.int64()), ("result", pa.int64())])
 
-    reader = from_map_batched(multiply_and_add, values, args=(2,), offset=5, schema=expected_schema)
+    reader = from_map_batched(
+        multiply_and_add, values, args=(2,), offset=5, schema=expected_schema
+    )
     table = reader.read_all()
     df = table.to_pandas()
 
@@ -212,7 +227,9 @@ def test_from_map_batched_with_args_and_kwargs():
 def test_from_map_batched_empty_iterables():
     empty_schema = pa.schema([("value", pa.int64())])
 
-    reader = from_map_batched(lambda x: pd.DataFrame({"value": [x]}), [], schema=empty_schema)
+    reader = from_map_batched(
+        lambda x: pd.DataFrame({"value": [x]}), [], schema=empty_schema
+    )
     batches = list(reader)
     assert len(batches) == 0
 
@@ -233,8 +250,16 @@ def test_from_map_batched_consistency_with_regular_map(air_small):
     assert batched_table.schema == regular_table.schema
     assert len(batched_table) == len(regular_table)
 
-    batched_df = batched_table.to_pandas().sort_values(["time", "lat", "lon"]).reset_index(drop=True)
-    regular_df = regular_table.to_pandas().sort_values(["time", "lat", "lon"]).reset_index(drop=True)
+    batched_df = (
+        batched_table.to_pandas()
+        .sort_values(["time", "lat", "lon"])
+        .reset_index(drop=True)
+    )
+    regular_df = (
+        regular_table.to_pandas()
+        .sort_values(["time", "lat", "lon"])
+        .reset_index(drop=True)
+    )
 
     pd.testing.assert_frame_equal(batched_df, regular_df)
 
@@ -255,7 +280,6 @@ def test_from_map_batched_integration_with_datafusion_via_read_xarray():
     expected_columns = {"time", "lat", "lon", "air"}
     actual_columns = set(table.column_names)
     assert expected_columns.issubset(actual_columns)
-
 
 
 def test_read_xarray_loads_one_chunk_at_a_time(large_ds):
@@ -298,6 +322,7 @@ def test_read_xarray_loads_one_chunk_at_a_time(large_ds):
 
     tracemalloc.stop()
 
+
 @pytest.mark.integration
 @pytest.mark.gcs
 def test_open_era5():
@@ -306,9 +331,7 @@ def test_open_era5():
         "gs://gcp-public-data-arco-era5/ar/1959-2022-full_37-1h-0p25deg-chunk-1.zarr-v2",
         chunks={"time": 240, "level": 1},
     )
-    era5_wind_df = read_xarray(
-        era5_ds[["u_component_of_wind", "v_component_of_wind"]]
-    )
+    era5_wind_df = read_xarray(era5_ds[["u_component_of_wind", "v_component_of_wind"]])
 
     expected_columns = [
         "time",
