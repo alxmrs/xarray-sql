@@ -115,7 +115,20 @@ def test_explode_data_equal_one_first(air):
 def test_explode_data_equal_one_last(air):
   dss = list(explode(air))
   ds = dss[-1]
-  iselection = {dim: slice(0, s) for dim, s in ds.sizes.items()}
+  
+  # For the last chunk, we need to calculate where it actually starts
+  # The original logic slice(0, s) only works for the first chunk
+  iselection = {}
+  for dim in ds.dims:
+    # Get chunk boundaries
+    chunk_bounds = np.cumsum((0,) + air.chunks[dim])
+    # Last chunk index
+    last_chunk_idx = len(air.chunks[dim]) - 1
+    # Calculate actual start and end positions
+    start = chunk_bounds[last_chunk_idx]
+    end = chunk_bounds[last_chunk_idx + 1]
+    iselection[dim] = slice(start, end)
+  
   assert air.isel(iselection).equals(ds)
 
 
