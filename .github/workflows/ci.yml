@@ -48,4 +48,4 @@ jobs:
       - name: Install xarray_sql
         run: uv sync --dev
       - name: Run unit tests
-        run: uv run pytest
+        run: uv run pytest -m "not integration"
