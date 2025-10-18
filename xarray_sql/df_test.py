@@ -115,7 +115,7 @@ def test_explode_data_equal_one_first(air):
 def test_explode_data_equal_one_last(air):
   dss = list(explode(air))
   ds = dss[-1]
-  
+
   # For the last chunk, we need to calculate where it actually starts
   # The original logic slice(0, s) only works for the first chunk
   iselection = {}
@@ -128,7 +128,7 @@ def test_explode_data_equal_one_last(air):
     start = chunk_bounds[last_chunk_idx]
     end = chunk_bounds[last_chunk_idx + 1]
     iselection[dim] = slice(start, end)
-  
+
   assert air.isel(iselection).equals(ds)
 
 
