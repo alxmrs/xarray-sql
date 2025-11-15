@@ -95,7 +95,7 @@ A few reasons:
 This is a light-weight way to prove the value of the interface.
 
 The larger goal is to explore the hypothesis that the [Pangeo
-ecosystem is a scientific database](https://www.hytradboi.com/2025/c18b8cdc-fd17-4099-9c03-eb107217f627-pangeo-is-a-database).Here, xarray-sql can be thought of as a missing
+ecosystem is a scientific database](https://www.hytradboi.com/2025/c18b8cdc-fd17-4099-9c03-eb107217f627-pangeo-is-a-database). Here, xarray-sql can be thought of as a missing
 DB front end.
 
 ## How does it work?
