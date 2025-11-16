@@ -323,7 +323,9 @@ class Column(ABC):
     ...
 
   @abstractmethod
-  def get_chunks(self, n_chunks: t.Optional[int] = None) -> t.Iterable["Column"]:
+  def get_chunks(
+      self, n_chunks: t.Optional[int] = None
+  ) -> t.Iterable["Column"]:
     """
     Return an iterator yielding the chunks.
 
@@ -357,163 +359,172 @@ class Column(ABC):
 
 
 class XarrayColumn(Column):
-    """
-    Minimal concrete Column implementation backed by an xarray.DataArray.
+  """
+  Minimal concrete Column implementation backed by an xarray.DataArray.
 
-    Assumes a 1-D DataArray representing a single logical column. If the
-    underlying array is chunked (e.g., a dask-backed DataArray), this class
-    can expose protocol chunks via num_chunks()/get_chunks().
+  Assumes a 1-D DataArray representing a single logical column. If the
+  underlying array is chunked (e.g., a dask-backed DataArray), this class
+  can expose protocol chunks via num_chunks()/get_chunks().
 
-    Notes:
-      - For lazy (dask) arrays, materializing buffers requires compute. This can
-        be controlled via the allow_compute flag.
-      - Advanced features (categoricals, string offsets, explicit masks) are not
-        implemented here.
-    """
+  Notes:
+    - For lazy (dask) arrays, materializing buffers requires compute. This can
+      be controlled via the allow_compute flag.
+    - Advanced features (categoricals, string offsets, explicit masks) are not
+      implemented here.
+  """
 
-    def __init__(
-        self,
-        dataarray: xr.DataArray,
-        *,
-        allow_compute: bool = True,
-        base_offset: int = 0,
-    ) -> None:
-        if dataarray.ndim != 1:
-            raise ValueError("XarrayColumn expects a 1-D DataArray")
-        self._da = dataarray
-        self._allow_compute = bool(allow_compute)
-        self._offset = int(base_offset)
+  def __init__(
+      self,
+      dataarray: xr.DataArray,
+      *,
+      allow_compute: bool = True,
+      base_offset: int = 0,
+  ) -> None:
+    if dataarray.ndim != 1:
+      raise ValueError("XarrayColumn expects a 1-D DataArray")
+    self._da = dataarray
+    self._allow_compute = bool(allow_compute)
+    self._offset = int(base_offset)
 
-    def size(self) -> int:
-        return int(self._da.shape[0])
+  def size(self) -> int:
+    return int(self._da.shape[0])
 
-    @property
-    def offset(self) -> int:
-        return self._offset
+  @property
+  def offset(self) -> int:
+    return self._offset
 
-    @property
-    def dtype(self) -> Dtype:
-        np_dtype = self._da.dtype
-        endianness = "="
+  @property
+  def dtype(self) -> Dtype:
+    np_dtype = self._da.dtype
+    endianness = "="
 
-        if np_dtype.kind == "b":
-            kind = DtypeKind.BOOL
-            bits = 8
-            fmt = ""
-        elif np_dtype.kind == "i":
-            kind = DtypeKind.INT
-            bits = int(np_dtype.itemsize * 8)
-            fmt = ""
-        elif np_dtype.kind == "u":
-            kind = DtypeKind.UINT
-            bits = int(np_dtype.itemsize * 8)
-            fmt = ""
-        elif np_dtype.kind == "f":
-            kind = DtypeKind.FLOAT
-            bits = int(np_dtype.itemsize * 8)
-            fmt = ""
-        elif np_dtype.kind == "M":
-            kind = DtypeKind.DATETIME
-            bits = int(np_dtype.itemsize * 8)
-            fmt = "tsn"
-        elif np_dtype.kind in {"U", "S", "O"}:
-            kind = DtypeKind.STRING
-            bits = 0
-            fmt = "u"
-        else:
-            kind = DtypeKind.UINT
-            bits = int(np_dtype.itemsize * 8)
-            fmt = ""
+    if np_dtype.kind == "b":
+      kind = DtypeKind.BOOL
+      bits = 8
+      fmt = ""
+    elif np_dtype.kind == "i":
+      kind = DtypeKind.INT
+      bits = int(np_dtype.itemsize * 8)
+      fmt = ""
+    elif np_dtype.kind == "u":
+      kind = DtypeKind.UINT
+      bits = int(np_dtype.itemsize * 8)
+      fmt = ""
+    elif np_dtype.kind == "f":
+      kind = DtypeKind.FLOAT
+      bits = int(np_dtype.itemsize * 8)
+      fmt = ""
+    elif np_dtype.kind == "M":
+      kind = DtypeKind.DATETIME
+      bits = int(np_dtype.itemsize * 8)
+      fmt = "tsn"
+    elif np_dtype.kind in {"U", "S", "O"}:
+      kind = DtypeKind.STRING
+      bits = 0
+      fmt = "u"
+    else:
+      kind = DtypeKind.UINT
+      bits = int(np_dtype.itemsize * 8)
+      fmt = ""
 
-        return (kind, bits, fmt, endianness)
+    return (kind, bits, fmt, endianness)
 
-    @property
-    def describe_categorical(self) -> CategoricalDescription:
-        raise TypeError("Not a categorical column")
+  @property
+  def describe_categorical(self) -> CategoricalDescription:
+    raise TypeError("Not a categorical column")
 
-    @property
-    def describe_null(self) -> t.Tuple[ColumnNullType, t.Any]:
-        if self._da.dtype.kind == "f":
-            return (ColumnNullType.USE_NAN, np.nan)
-        return (ColumnNullType.NON_NULLABLE, None)
+  @property
+  def describe_null(self) -> t.Tuple[ColumnNullType, t.Any]:
+    if self._da.dtype.kind == "f":
+      return (ColumnNullType.USE_NAN, np.nan)
+    return (ColumnNullType.NON_NULLABLE, None)
 
-    @property
-    def null_count(self) -> t.Optional[int]:
-        return None
+  @property
+  def null_count(self) -> t.Optional[int]:
+    return None
 
-    @property
-    def metadata(self) -> t.Dict[str, t.Any]:
-        return dict(self._da.attrs)
+  @property
+  def metadata(self) -> t.Dict[str, t.Any]:
+    return dict(self._da.attrs)
 
-    def num_chunks(self) -> int:
-        data = self._da.data
-        if hasattr(data, "chunks"):
-            chunks = getattr(data, "chunks")
-            if isinstance(chunks, tuple) and len(chunks) == 1:
-                return len(chunks[0])
-        return 1
+  def num_chunks(self) -> int:
+    data = self._da.data
+    if hasattr(data, "chunks"):
+      chunks = getattr(data, "chunks")
+      if isinstance(chunks, tuple) and len(chunks) == 1:
+        return len(chunks[0])
+    return 1
 
-    def get_chunks(self, n_chunks: t.Optional[int] = None) -> t.Iterable["Column"]:
-        # Get current chunk sizes
-        data = self._da.data
-        if hasattr(data, "chunks") and isinstance(data.chunks, tuple):
-            sizes = [int(s) for s in data.chunks[0]]
-        else:
-            sizes = [self._da.shape[0]]
+  def get_chunks(
+      self, n_chunks: t.Optional[int] = None
+  ) -> t.Iterable["Column"]:
+    # Get current chunk sizes
+    data = self._da.data
+    if hasattr(data, "chunks") and isinstance(data.chunks, tuple):
+      sizes = [int(s) for s in data.chunks[0]]
+    else:
+      sizes = [self._da.shape[0]]
 
-        total_chunks = len(sizes)
+    total_chunks = len(sizes)
 
-        # If no subdivision requested, yield each original chunk
-        if n_chunks is None:
-            start = 0
-            for sz in sizes:
-                end = start + sz
-                yield XarrayColumn(
-                    self._da.isel({self._da.dims[0]: slice(start, end)}),
-                    allow_compute=self._allow_compute,
-                    base_offset=self._offset + start,
-                )
-                start = end
-            return
-
-        # Ensure n_chunks is a multiple of original number of chunks
-        if n_chunks % total_chunks != 0:
-            raise ValueError(f"n_chunks={n_chunks} must be a multiple of num_chunks={total_chunks}")
-
-        factor = n_chunks // total_chunks
-
-        start_chunk = 0
-        for sz in sizes:
-            base_size = sz // factor
-            remainder = sz % factor
-            current = 0
-            for i in range(factor):
-                extra = remainder if i == factor - 1 else 0
-                sub_size = base_size + extra
-                yield XarrayColumn(
-                    self._da.isel({self._da.dims[0]: slice(start_chunk + current,
-                                                           start_chunk + current + sub_size)}),
-                    allow_compute=self._allow_compute,
-                    base_offset=self._offset + start_chunk + current,
-                )
-                current += sub_size
-            start_chunk += sz
-
-    def get_buffers(self) -> ColumnBuffers:
-        array_like = self._da.data
-        if hasattr(array_like, "compute"):
-            if not self._allow_compute:
-                raise RuntimeError(
-                    "Buffer materialization requires compute but allow_compute=False"
-                )
-            array_like = array_like.compute()
-        np_array = np.asarray(array_like)
-        data_buf: Buffer = XarrayBuffer(np_array)
-        return t.cast(
-            ColumnBuffers,
-            {
-                "data": (data_buf, self.dtype),
-                "validity": None,
-                "offsets": None,
-            },
+    # If no subdivision requested, yield each original chunk
+    if n_chunks is None:
+      start = 0
+      for sz in sizes:
+        end = start + sz
+        yield XarrayColumn(
+            self._da.isel({self._da.dims[0]: slice(start, end)}),
+            allow_compute=self._allow_compute,
+            base_offset=self._offset + start,
         )
+        start = end
+      return
+
+    # Ensure n_chunks is a multiple of original number of chunks
+    if n_chunks % total_chunks != 0:
+      raise ValueError(
+          f"n_chunks={n_chunks} must be a multiple of num_chunks={total_chunks}"
+      )
+
+    factor = n_chunks // total_chunks
+
+    start_chunk = 0
+    for sz in sizes:
+      base_size = sz // factor
+      remainder = sz % factor
+      current = 0
+      for i in range(factor):
+        extra = remainder if i == factor - 1 else 0
+        sub_size = base_size + extra
+        yield XarrayColumn(
+            self._da.isel(
+                {
+                    self._da.dims[0]: slice(
+                        start_chunk + current, start_chunk + current + sub_size
+                    )
+                }
+            ),
+            allow_compute=self._allow_compute,
+            base_offset=self._offset + start_chunk + current,
+        )
+        current += sub_size
+      start_chunk += sz
+
+  def get_buffers(self) -> ColumnBuffers:
+    array_like = self._da.data
+    if hasattr(array_like, "compute"):
+      if not self._allow_compute:
+        raise RuntimeError(
+            "Buffer materialization requires compute but allow_compute=False"
+        )
+      array_like = array_like.compute()
+    np_array = np.asarray(array_like)
+    data_buf: Buffer = XarrayBuffer(np_array)
+    return t.cast(
+        ColumnBuffers,
+        {
+            "data": (data_buf, self.dtype),
+            "validity": None,
+            "offsets": None,
+        },
+    )

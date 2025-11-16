@@ -22,6 +22,3 @@ class DataFrameProtocolAccessor:
   def __dataframe__(self, allow_copy: bool = False):
     """Expose the dataset via the DataFrame interchange protocol."""
     return core.dataset_to_protocol(self._dataset, allow_copy=allow_copy)
-
-
-
