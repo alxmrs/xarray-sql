@@ -362,11 +362,15 @@ class XarrayColumn(Column):
   """
   Minimal concrete Column implementation backed by an xarray.DataArray.
 
-  Assumes a 1-D DataArray representing a single logical column. If the
-  underlying array is chunked (e.g., a dask-backed DataArray), this class
+  Accepts a 1-D or multi-dimensional DataArray representing a single logical column.
+  Multi-dimensional arrays are automatically raveled to 1D in the constructor.
+  If the underlying array is chunked (e.g., a dask-backed DataArray), this class
   can expose protocol chunks via num_chunks()/get_chunks().
 
   Notes:
+    - Multi-dimensional arrays are raveled to 1D, preserving chunking structure.
+      For dask arrays, raveling automatically computes the correct 1D chunks
+      (product of chunks across all dimensions).
     - For lazy (dask) arrays, materializing buffers requires compute. This can
       be controlled via the allow_compute flag.
     - Advanced features (categoricals, string offsets, explicit masks) are not
@@ -380,8 +384,13 @@ class XarrayColumn(Column):
       allow_compute: bool = True,
       base_offset: int = 0,
   ) -> None:
-    if dataarray.ndim != 1:
-      raise ValueError("XarrayColumn expects a 1-D DataArray")
+    # Ravel multi-dimensional arrays to 1D for the column protocol
+    if dataarray.ndim > 1:
+      # Ravel the data while preserving chunking structure
+      # For dask arrays, raveling automatically computes correct 1D chunks
+      dataarray = dataarray.ravel()
+    
+    
     self._da = dataarray
     self._allow_compute = bool(allow_compute)
     self._offset = int(base_offset)
@@ -448,10 +457,13 @@ class XarrayColumn(Column):
     return dict(self._da.attrs)
 
   def num_chunks(self) -> int:
+    # After raveling in __init__, self._da is guaranteed to be 1D
+    # So if chunks exist, they must be 1D (tuple of length 1)
     data = self._da.data
     if hasattr(data, "chunks"):
       chunks = getattr(data, "chunks")
-      if isinstance(chunks, tuple) and len(chunks) == 1:
+      if isinstance(chunks, tuple):
+        # After raveling, chunks should be 1D, so chunks[0] contains chunk sizes
         return len(chunks[0])
     return 1
 
@@ -459,13 +471,20 @@ class XarrayColumn(Column):
       self, n_chunks: t.Optional[int] = None
   ) -> t.Iterable["Column"]:
     # Get current chunk sizes
+    # After raveling in __init__, self._da is guaranteed to be 1D
+    # So if chunks exist, they must be 1D (tuple of length 1)
     data = self._da.data
     if hasattr(data, "chunks") and isinstance(data.chunks, tuple):
+      # After raveling, chunks should be 1D, so chunks[0] contains chunk sizes
       sizes = [int(s) for s in data.chunks[0]]
     else:
       sizes = [self._da.shape[0]]
 
     total_chunks = len(sizes)
+
+    # After ravel, self._da is 1D, so dims[0] is the single dimension
+    # Safe to access since ravel() always produces a 1D array with at least one dim
+    dim_name = self._da.dims[0]
 
     # If no subdivision requested, yield each original chunk
     if n_chunks is None:
@@ -473,7 +492,7 @@ class XarrayColumn(Column):
       for sz in sizes:
         end = start + sz
         yield XarrayColumn(
-            self._da.isel({self._da.dims[0]: slice(start, end)}),
+            self._da.isel({dim_name: slice(start, end)}),
             allow_compute=self._allow_compute,
             base_offset=self._offset + start,
         )
@@ -499,7 +518,7 @@ class XarrayColumn(Column):
         yield XarrayColumn(
             self._da.isel(
                 {
-                    self._da.dims[0]: slice(
+                    dim_name: slice(
                         start_chunk + current, start_chunk + current + sub_size
                     )
                 }
@@ -528,3 +547,5 @@ class XarrayColumn(Column):
             "offsets": None,
         },
     )
+
+
