@@ -389,8 +389,7 @@ class XarrayColumn(Column):
       # Ravel the data while preserving chunking structure
       # For dask arrays, raveling automatically computes correct 1D chunks
       dataarray = dataarray.ravel()
-    
-    
+
     self._da = dataarray
     self._allow_compute = bool(allow_compute)
     self._offset = int(base_offset)
@@ -547,5 +546,3 @@ class XarrayColumn(Column):
             "offsets": None,
         },
     )
-
-
