@@ -143,6 +143,15 @@ _2025 update_: Something like this is being built across a few projects! The one
 As of writing, this project is [amid integrating](https://github.com/alxmrs/xarray-sql/pull/69) a
 rust-based DataFusion backend provided by arrow-zarr.
 
+## Roadmap
+
+- [ ] [@RohanDisa](https://github.com/RohanDisa) DataFusion Interoperability via the Python Dataframe Protocol [#86](https://github.com/alxmrs/xarray-sql/issues/86).
+- [ ] Translate a single Zarr to a collection of tables via DataFusion's catalog interface [#85](https://github.com/alxmrs/xarray-sql/issues/85).
+- [ ] Distributed beyond a single node through the DataFusion integration with Ray Datasets [#68](https://github.com/alxmrs/xarray-sql/issues/68).
+- [ ] Demo: calculate Sea Surface Temperature from 1940 - Present in SQL [#36](https://github.com/alxmrs/xarray-sql/issues/36).
+- [ ] Provide an option to integrate DataFusion directly to Zarr via Rust [#4](https://github.com/alxmrs/xarray-sql/issues/4).
+- [ ] (To be formally announced eventually): The 100 Trillion Row Challenge [#34](https://github.com/alxmrs/xarray-sql/issues/34).
+
 ## Sponsors & Contributors
 
 I want to give a special thanks to the following folks and institutions:
