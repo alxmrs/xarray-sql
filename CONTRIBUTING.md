@@ -28,7 +28,7 @@ appreciate your help. A few things to keep in mind:
 - Every contribution, big or small, matters and deserves credit. 
 
 Here are a few requests for your development process:
-- We require all code to be formatted with `pyink`. 
+- We require all code to be formatted with `pyink` (i.e., please run `uvx pyink .`). 
 - Please include unit tests, if possible, and performance tests when you touch the core functionality (see `perf_tests/`).
 - It's polite to do a self review before asking for one from a maintainer. Don't stress if you forget; we all do sometimes.
 - Please add (or update) documentation when adding new code. We use Google Style docstrings.
