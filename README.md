@@ -146,7 +146,7 @@ rust-based DataFusion backend provided by arrow-zarr.
 ## Roadmap
 
 - [ ] [@RohanDisa](https://github.com/RohanDisa) DataFusion Interoperability via the Python Dataframe Protocol [#86](https://github.com/alxmrs/xarray-sql/issues/86).
-- [ ] Translate a single Zarr to a collection of table via DataFusion's catalog interface [#85](https://github.com/alxmrs/xarray-sql/issues/85).
+- [ ] Translate a single Zarr to a collection of tables via DataFusion's catalog interface [#85](https://github.com/alxmrs/xarray-sql/issues/85).
 - [ ] Distributed beyond a single node through the DataFusion integration with Ray Datasets [#68](https://github.com/alxmrs/xarray-sql/issues/68).
 - [ ] Demo: calculate Sea Surface Temperature from 1940 - Present in SQL [#36](https://github.com/alxmrs/xarray-sql/issues/36).
 - [ ] Provide an option to integrate DataFusion directly to Zarr via Rust [#4](https://github.com/alxmrs/xarray-sql/issues/4).
