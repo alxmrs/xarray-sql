@@ -31,5 +31,5 @@ Here are a few requests for your development process:
 - We require all code to be formatted with `pyink` (i.e., please run `uvx pyink .`). 
 - Please include unit tests, if possible, and performance tests when you touch the core functionality (see `perf_tests/`).
 - It's polite to do a self review before asking for one from a maintainer. Don't stress if you forget; we all do sometimes.
-- Please add (or update) documentation when adding new code. We use Google Style docstrings.
+- Please add (or update) documentation when adding new code. We use [Google Style docstrings](https://sphinxcontrib-napoleon.readthedocs.io/en/latest/example_google.html).
 - We are thrilled to get documentation-only PRs -- especially spelling and typo fixes (I am a bad speller). If writing tutorials excites you, it would be to everyone's benefit.
