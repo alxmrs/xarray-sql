@@ -55,6 +55,27 @@ preview = true
 pyink-indentation = 2
 pyink-use-majority-quotes = true
 
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+follow_imports = "skip"
+exclude = [
+    "perf_tests/",
+    "xarray_sql.egg-info/",
+    "^\\.venv/",
+]
+
+# Per-module ignores for libraries without type stubs
+[[tool.mypy.overrides]]
+module = [
+    "pyarrow.*",
+    "datafusion.*",
+    "xarray.*",
+]
+ignore_missing_imports = true
+
 [tool.setuptools_scm]
 
 [dependency-groups]
@@ -62,4 +83,7 @@ dev = [
     "xarray_sql[test]",
     "py-spy>=0.4.0",
     "pyink>=24.10.1",
+    "mypy>=1.11.0",
+    "pre-commit>=3.0.0",
+    "pandas-stubs>=2.2.2.240807",
 ]

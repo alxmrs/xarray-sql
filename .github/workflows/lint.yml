@@ -39,5 +39,9 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Install xarray_sql
+        run: uv sync --dev
       - name: Lint with pyink
-        run: uvx pyink --check .
+        run: uv run pyink --check .
+      - name: Type check with mypy
+        run: uv run mypy xarray_sql/
