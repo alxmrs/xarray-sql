@@ -41,7 +41,5 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install xarray_sql
         run: uv sync --dev
-      - name: Lint with pyink
-        run: uv run pyink --check .
-      - name: Type check with mypy
-        run: uv run mypy xarray_sql/
+      - name: Run pre-commit
+        run: uv run pre-commit run --all-files
