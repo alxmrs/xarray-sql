@@ -1,6 +1,6 @@
 # Performance testing & profiling
 
-So far, this includes statistical profiles via py-spy. 
+So far, this includes statistical profiles via py-spy.
 
 ## Dev Process
 
@@ -16,4 +16,3 @@ So far, this includes statistical profiles via py-spy.
 2. After tuning code in xarray-sql, run another profile to generate a SVG.
 
 3. Please commit the "after" profile SVG along with the performance improvements.
-

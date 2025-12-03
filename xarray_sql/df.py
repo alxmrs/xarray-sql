@@ -35,8 +35,12 @@ def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> t.Iterator[Block]:
 
   assert chunks, "Dataset `ds` must be chunked or `chunks` must be provided."
 
-  chunk_bounds = {dim: np.cumsum((0,) + c) for dim, c in chunks.items()}
-  ichunk = {dim: range(len(c)) for dim, c in chunks.items()}
+  # chunks is Dict[str, Tuple[int, ...]] from xarray
+  chunk_bounds = {
+      dim: np.cumsum((0,) + tuple(c))  # type: ignore[arg-type]
+      for dim, c in chunks.items()
+  }
+  ichunk = {dim: range(len(tuple(c))) for dim, c in chunks.items()}  # type: ignore[arg-type]
   ick, icv = zip(*ichunk.items())  # Makes same order of keys and val.
   chunk_idxs = (dict(zip(ick, i)) for i in itertools.product(*icv))
   blocks = (
@@ -59,7 +63,7 @@ def _block_len(block: Block) -> int:
 
 
 def from_map_batched(
-    func: t.Callable[[...], pd.DataFrame],
+    func: t.Callable[..., pd.DataFrame],
     *iterables,
     args: t.Optional[t.Tuple] = None,
     schema: pa.Schema = None,
@@ -147,7 +151,7 @@ def from_map(
 
 def pivot(ds: xr.Dataset) -> pd.DataFrame:
   """Converts an xarray Dataset to a pandas DataFrame."""
-  return ds.to_dataframe().reset_index()
+  return ds.to_dataframe().reset_index()  # type: ignore[no-any-return]
 
 
 def _parse_schema(ds) -> pa.Schema:

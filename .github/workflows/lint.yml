@@ -39,5 +39,5 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Lint with pyink
-        run: uvx pyink --check .
+      - name: Run pre-commit (with uvx)
+        run: uvx pre-commit run --all-files

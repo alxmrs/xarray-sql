@@ -22,8 +22,8 @@ if __name__ == "__main__":
       """
       SELECT
         "lat", "lon", SUM("air") as air_total
-      FROM 
-        "air" 
+      FROM
+        "air"
       GROUP BY
        "lat", "lon"
       """
