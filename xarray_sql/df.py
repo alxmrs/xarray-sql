@@ -171,23 +171,6 @@ def _parse_schema(ds) -> pa.Schema:
   return pa.schema(columns)
 
 
-def _parse_schema(ds) -> pa.Schema:
-  """Extracts a `pa.Schema` from the Dataset, treating dims and data_vars as columns."""
-  columns = []
-
-  for coord_name, coord_var in ds.coords.items():
-    # Only include dimension coordinates
-    if coord_name in ds.dims:
-      pa_type = pa.from_numpy_dtype(coord_var.dtype)
-      columns.append(pa.field(coord_name, pa_type))
-
-  for var_name, var in ds.data_vars.items():
-    pa_type = pa.from_numpy_dtype(var.dtype)
-    columns.append(pa.field(var_name, pa_type))
-
-  return pa.schema(columns)
-
-
 def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.RecordBatchReader:
   """Pivots an Xarray Dataset into a PyArrow Table, partitioned by chunks.
 
