@@ -4,6 +4,7 @@ import typing as t
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.dataset
 import xarray as xr
 from datafusion.context import ArrowStreamExportable
 
@@ -171,19 +172,32 @@ def _parse_schema(ds) -> pa.Schema:
   return pa.schema(columns)
 
 
-def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.RecordBatchReader:
-  """Pivots an Xarray Dataset into a PyArrow Table, partitioned by chunks.
+# def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.RecordBatchReader:
+#   """Pivots an Xarray Dataset into a PyArrow Table, partitioned by chunks.
 
-  Args:
-    ds: An Xarray Dataset. All `data_vars` mush share the same dimensions.
-    chunks: Xarray-like chunks. If not provided, will default to the Dataset's
-     chunks. The product of the chunk sizes becomes the standard length of each
-     dataframe partition.
+#   Args:
+#     ds: An Xarray Dataset. All `data_vars` mush share the same dimensions.
+#     chunks: Xarray-like chunks. If not provided, will default to the Dataset's
+#      chunks. The product of the chunk sizes becomes the standard length of each
+#      dataframe partition.
 
-  Returns:
-    A PyArrow Table, which is a table representation of the input Dataset.
-  """
+#   Returns:
+#     A PyArrow Table, which is a table representation of the input Dataset.
+#   """
 
+#   def pivot_block(b: Block):
+#     return pivot(ds.isel(b))
+
+#   fst = next(iter(ds.values())).dims
+#   assert all(
+#       da.dims == fst for da in ds.values()
+#   ), "All dimensions must be equal. Please filter data_vars in the Dataset."
+
+#   schema = _parse_schema(ds)
+#   blocks = block_slices(ds, chunks)
+#   return from_map_batched(pivot_block, blocks, schema=schema)
+
+def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.dataset.Dataset:
   def pivot_block(b: Block):
     return pivot(ds.isel(b))
 
@@ -194,4 +208,16 @@ def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.RecordBatchReader:
 
   schema = _parse_schema(ds)
   blocks = block_slices(ds, chunks)
-  return from_map_batched(pivot_block, blocks, schema=schema)
+
+  
+
+  children = []
+  for block in blocks:
+    def map_batches():
+        df = pivot_block(block)
+        yield pa.RecordBatch.from_pandas(df, schema=schema)
+
+    children.append(pa.dataset.InMemoryDataset(pa.RecordBatchReader.from_batches(schema, map_batches()),schema))
+
+  out = pa.dataset.UnionDataset(schema,children)
+  return out
