@@ -13,6 +13,5 @@ class XarrayContext(SessionContext):
       input_table: xr.Dataset,
       chunks: Chunks = None,
   ):
-    arrow_table = read_xarray(input_table, chunks)
-    table = Table.from_dataset(arrow_table)
-    return self.register_table(table_name, table )
+    ds = read_xarray(input_table, chunks)
+    return self.register_table(table_name, Table(ds))
