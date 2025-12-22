@@ -14,4 +14,4 @@ class XarrayContext(SessionContext):
       chunks: Chunks = None,
   ):
     ds = read_xarray(input_table, chunks)
-    return self.register_table(table_name, Table(ds))
+    return self.register_dataset(table_name, ds)
