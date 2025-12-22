@@ -1,6 +1,6 @@
 import xarray as xr
 from datafusion import SessionContext
-from datafusion.catalog import Table
+
 from .df import read_xarray, Chunks
 
 
