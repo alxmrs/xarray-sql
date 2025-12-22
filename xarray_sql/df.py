@@ -19,7 +19,7 @@ def _get_chunk_slicer(
   if dim in chunk_index:
     which_chunk = chunk_index[dim]
     return slice(
-      chunk_bounds[dim][which_chunk], chunk_bounds[dim][which_chunk + 1]
+        chunk_bounds[dim][which_chunk], chunk_bounds[dim][which_chunk + 1]
     )
   return slice(None)
 
@@ -38,19 +38,20 @@ def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> t.Iterator[Block]:
 
   # chunks is Dict[str, Tuple[int, ...]] from xarray
   chunk_bounds = {
-    dim: np.cumsum((0,) + tuple(c))  # type: ignore[arg-type]
-    for dim, c in chunks.items()
+      dim: np.cumsum((0,) + tuple(c))  # type: ignore[arg-type]
+      for dim, c in chunks.items()
   }
-  ichunk = {dim: range(len(tuple(c))) for dim, c in
-            chunks.items()}  # type: ignore[arg-type]
+  ichunk = {
+      dim: range(len(tuple(c))) for dim, c in chunks.items()  # type: ignore
+  }  # type: ignore[arg-type]
   ick, icv = zip(*ichunk.items())  # Makes same order of keys and val.
   chunk_idxs = (dict(zip(ick, i)) for i in itertools.product(*icv))
   blocks = (
-    {
-      dim: _get_chunk_slicer(dim, chunk_index, chunk_bounds)
-      for dim in ds.dims
-    }
-    for chunk_index in chunk_idxs
+      {
+          dim: _get_chunk_slicer(dim, chunk_index, chunk_bounds)
+          for dim in ds.dims
+      }
+      for chunk_index in chunk_idxs
   )
   yield from blocks
 
@@ -139,7 +140,7 @@ def from_map(
         pa_table = pa.Table.from_pandas(df)
       except Exception as e:
         raise ValueError(
-          f"Cannot convert function result to PyArrow Table: {e}"
+            f"Cannot convert function result to PyArrow Table: {e}"
         )
 
     results.append(pa_table)
@@ -199,13 +200,15 @@ def _parse_schema(ds) -> pa.Schema:
 #   return from_map_batched(pivot_block, blocks, schema=schema)
 
 
-
 def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.dataset.Dataset:
   fst = next(iter(ds.values())).dims
   assert all(
-    da.dims == fst for da in ds.values()
+      da.dims == fst for da in ds.values()
   ), "All dimensions must be equal. Please filter data_vars in the Dataset."
-  def _in_memory_ds_from(batches: t.Iterable, schema_: pa.Schema) -> pa.dataset.InMemoryDataset:
+
+  def _in_memory_ds_from(
+      batches: t.Iterable, schema_: pa.Schema
+  ) -> pa.dataset.InMemoryDataset:
     reader = pa.RecordBatchReader.from_batches(schema_, batches)
     return pa.dataset.InMemoryDataset(source=reader, schema=schema_)
 
@@ -218,7 +221,7 @@ def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.dataset.Dataset:
   blocks = block_slices(ds, chunks)
 
   children = [
-    _in_memory_ds_from(pivot_block(block), schema) for block in blocks
+      _in_memory_ds_from(pivot_block(block), schema) for block in blocks
   ]
 
   return pa.dataset.UnionDataset(schema, children)
