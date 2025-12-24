@@ -4,6 +4,7 @@ import typing as t
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.dataset
 import xarray as xr
 from datafusion.context import ArrowStreamExportable
 
@@ -40,7 +41,9 @@ def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> t.Iterator[Block]:
       dim: np.cumsum((0,) + tuple(c))  # type: ignore[arg-type]
       for dim, c in chunks.items()
   }
-  ichunk = {dim: range(len(tuple(c))) for dim, c in chunks.items()}  # type: ignore[arg-type]
+  ichunk = {
+      dim: range(len(tuple(c))) for dim, c in chunks.items()  # type: ignore
+  }  # type: ignore[arg-type]
   ick, icv = zip(*ichunk.items())  # Makes same order of keys and val.
   chunk_idxs = (dict(zip(ick, i)) for i in itertools.product(*icv))
   blocks = (
@@ -171,27 +174,54 @@ def _parse_schema(ds) -> pa.Schema:
   return pa.schema(columns)
 
 
-def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.RecordBatchReader:
-  """Pivots an Xarray Dataset into a PyArrow Table, partitioned by chunks.
+# def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.RecordBatchReader:
+#   """Pivots an Xarray Dataset into a PyArrow Table, partitioned by chunks.
 
-  Args:
-    ds: An Xarray Dataset. All `data_vars` mush share the same dimensions.
-    chunks: Xarray-like chunks. If not provided, will default to the Dataset's
-     chunks. The product of the chunk sizes becomes the standard length of each
-     dataframe partition.
+#   Args:
+#     ds: An Xarray Dataset. All `data_vars` mush share the same dimensions.
+#     chunks: Xarray-like chunks. If not provided, will default to the Dataset's
+#      chunks. The product of the chunk sizes becomes the standard length of each
+#      dataframe partition.
 
-  Returns:
-    A PyArrow Table, which is a table representation of the input Dataset.
-  """
+#   Returns:
+#     A PyArrow Table, which is a table representation of the input Dataset.
+#   """
 
-  def pivot_block(b: Block):
-    return pivot(ds.isel(b))
+#   def pivot_block(b: Block):
+#     return pivot(ds.isel(b))
 
+#   fst = next(iter(ds.values())).dims
+#   assert all(
+#       da.dims == fst for da in ds.values()
+#   ), "All dimensions must be equal. Please filter data_vars in the Dataset."
+
+#   schema = _parse_schema(ds)
+#   blocks = block_slices(ds, chunks)
+#   return from_map_batched(pivot_block, blocks, schema=schema)
+
+
+def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.dataset.Dataset:
   fst = next(iter(ds.values())).dims
   assert all(
       da.dims == fst for da in ds.values()
   ), "All dimensions must be equal. Please filter data_vars in the Dataset."
 
+  def _in_memory_ds_from(
+      batches: t.Iterable, schema_: pa.Schema
+  ) -> pa.dataset.InMemoryDataset:
+    reader = pa.RecordBatchReader.from_batches(schema_, batches)
+    return pa.dataset.InMemoryDataset(source=reader, schema=schema_)
+
   schema = _parse_schema(ds)
+
+  def pivot_block(b: Block) -> pa.RecordBatch:
+    df = pivot(ds.isel(b))
+    yield pa.RecordBatch.from_pandas(df, schema=schema)
+
   blocks = block_slices(ds, chunks)
-  return from_map_batched(pivot_block, blocks, schema=schema)
+
+  children = [
+      _in_memory_ds_from(pivot_block(block), schema) for block in blocks
+  ]
+
+  return pa.dataset.UnionDataset(schema, children)

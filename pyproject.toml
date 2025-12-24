@@ -3,7 +3,7 @@ name = "xarray_sql"
 dynamic = ["version"]
 description = "Querry Xarray with SQL."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 authors = [
   {name = "Alexander Merose", email = "al@merose.com"},
@@ -27,6 +27,7 @@ classifiers = [
 ]
 dependencies = [
     "datafusion>=47.0.0",
+    "pyarrow>=22.0.0",
     "xarray>=2024.7.0",
 ]
 
