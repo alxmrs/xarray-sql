@@ -26,6 +26,7 @@ classifiers = [
   "Topic :: Database :: Front-Ends",
 ]
 dependencies = [
+    "cython>=3.2.3",
     "datafusion>=47.0.0",
     "xarray>=2024.7.0",
 ]
@@ -43,7 +44,7 @@ Homepage = "https://github.com/alxmrs/xarray-sql"
 Issues = "https://github.com/alxmrs/xarray-sql/issues"
 
 [build-system]
-requires = ["setuptools>=64", "setuptools_scm>=8"]
+requires = ["setuptools>=64", "setuptools_scm>=8", "wheel", "cython>=3.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
@@ -87,3 +88,7 @@ dev = [
     "pre-commit>=3.0.0",
     "pandas-stubs>=2.2.2.240807",
 ]
+
+#[tool.cython]
+## Optional: Cython compiler directives
+#compile-time-env = {}
