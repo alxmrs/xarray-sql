@@ -90,6 +90,7 @@ import cython
 from cython.cimports import pyarrow as pa
 from cython.cimports.libc.stdlib import malloc, free
 
+
 @cython.cclass
 class XarrayDatasetTable:
 
@@ -113,4 +114,3 @@ class XarrayDatasetTable:
     # schema.format = ...
     # ...
     # return capsule
-

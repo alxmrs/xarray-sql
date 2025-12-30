@@ -94,4 +94,3 @@ dev = [
 
 [tool.uv.extra-build-dependencies]
  xarray-sql = ["numpy", "pyarrow"]
-
