@@ -14,4 +14,4 @@ class XarrayContext(SessionContext):
       chunks: Chunks = None,
   ):
     arrow_table = read_xarray(input_table, chunks)
-    return self.from_arrow(arrow_table, table_name)
+    return self.register_table(table_name, arrow_table)

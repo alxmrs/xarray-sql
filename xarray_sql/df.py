@@ -195,3 +195,7 @@ def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.RecordBatchReader:
   schema = _parse_schema(ds)
   blocks = block_slices(ds, chunks)
   return from_map_batched(pivot_block, blocks, schema=schema)
+
+
+def read_xarray_as_table(ds: xr.Dataset, chunks: Chunks = None) -> pa.Table:
+  pass

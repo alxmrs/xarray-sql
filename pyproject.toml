@@ -92,3 +92,7 @@ dev = [
 #[tool.cython]
 ## Optional: Cython compiler directives
 #compile-time-env = {}
+
+[tool.uv.extra-build-dependencies]
+ xarray-sql = ["numpy", "pyarrow"]
+
