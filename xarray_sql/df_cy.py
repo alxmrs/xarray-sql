@@ -1,3 +1,4 @@
+# distutils: language = c++
 import cython
 # #ifndef ARROW_C_DATA_INTERFACE
 # #define ARROW_C_DATA_INTERFACE
