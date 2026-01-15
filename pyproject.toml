@@ -1,3 +1,7 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
 [project]
 name = "xarray_sql"
 dynamic = ["version"]
@@ -22,11 +26,15 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
   "Topic :: Scientific/Engineering :: Atmospheric Science",
   "Topic :: Database :: Front-Ends",
 ]
 dependencies = [
-    "datafusion>=47.0.0",
+    "dask>=2024.8.0",
+    "datafusion==49.0.0",  # This needs to match the cargo datafusion version!!
     "xarray>=2024.7.0",
 ]
 
@@ -35,16 +43,15 @@ test = [
   "pytest",
   "xarray[io]",
   "gcsfs",
-  "dask>=2024.8.0",
 ]
 
 [project.urls]
 Homepage = "https://github.com/alxmrs/xarray-sql"
 Issues = "https://github.com/alxmrs/xarray-sql/issues"
 
-[build-system]
-requires = ["setuptools>=64", "setuptools_scm>=8"]
-build-backend = "setuptools.build_meta"
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "xarray_sql._native"
 
 [tool.setuptools.packages.find]
 exclude = ["demo", "perf_tests"]
@@ -83,7 +90,5 @@ dev = [
     "xarray_sql[test]",
     "py-spy>=0.4.0",
     "pyink>=24.10.1",
-    "mypy>=1.11.0",
-    "pre-commit>=3.0.0",
-    "pandas-stubs>=2.2.2.240807",
+    "maturin>=1.9.1",
 ]
