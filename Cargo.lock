@@ -3432,12 +3432,8 @@ name = "xarray_sql"
 version = "0.1.0"
 dependencies = [
  "arrow",
- "arrow-array",
- "arrow-schema",
- "async-trait",
  "datafusion",
  "datafusion-ffi",
- "futures",
  "pyo3",
  "pyo3-build-config",
  "tokio",

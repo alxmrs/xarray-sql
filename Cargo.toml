@@ -7,14 +7,10 @@ exclude = ["perf_tests/*"]
 
 [dependencies]
 arrow = { version = "55.2.0", features = ["pyarrow"] }
-arrow-array = { version = "55.2.0" }
-arrow-schema = { version = "55.2.0" }
-async-trait = "0.1.89"
 datafusion = { version = "49.0.0" }
-datafusion-ffi = {version = "49.0.0" }
-futures = "0.3.31"
+datafusion-ffi = { version = "49.0.0" }
 pyo3 = { version = "0.24.1", features = ["extension-module"] }
-tokio = { version = "1.46.1", features = ["rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1.46.1", features = ["rt"] }
 
 
 [build-dependencies]

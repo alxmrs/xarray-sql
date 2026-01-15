@@ -73,10 +73,25 @@ impl PartitionStream for PyArrowStreamPartition {
                 Python::with_gil(|py| {
                     let bound = obj.bind(py);
 
-                    // Create a stream reader and collect all batches
                     match ArrowArrayStreamReader::from_pyarrow_bound(bound) {
-                        Ok(reader) => reader.filter_map(|result| result.ok()).collect(),
-                        Err(_) => vec![],
+                        Ok(reader) => {
+                            // Collect batches, propagating errors as warnings
+                            // In streaming context, we can't easily return errors,
+                            // so we log and skip failed batches
+                            reader
+                                .filter_map(|result| match result {
+                                    Ok(batch) => Some(batch),
+                                    Err(e) => {
+                                        eprintln!("Warning: Failed to read batch: {e}");
+                                        None
+                                    }
+                                })
+                                .collect()
+                        }
+                        Err(e) => {
+                            eprintln!("Warning: Failed to create stream reader: {e}");
+                            vec![]
+                        }
                     }
                 })
             }
@@ -86,7 +101,6 @@ impl PartitionStream for PyArrowStreamPartition {
             }
         };
 
-        // Wrap the batches in a MemoryStream
         Box::pin(
             MemoryStream::try_new(batches, Arc::clone(&self.schema), None)
                 .expect("MemoryStream creation should not fail with valid schema"),
@@ -190,28 +204,10 @@ impl LazyArrowStreamTable {
         )
     }
 
-    /// Get the schema of the table.
+    /// Get the schema of the table as a PyArrow Schema.
     fn schema(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let schema = self.table.schema();
-        // Convert to PyArrow schema
-        let pyarrow = py.import("pyarrow")?;
-        let schema_cls = pyarrow.getattr("schema")?;
-
-        // Build field list
-        let fields: Vec<_> = schema
-            .fields()
-            .iter()
-            .map(|f: &arrow::datatypes::FieldRef| {
-                let field_fn = pyarrow.getattr("field").unwrap();
-                let dtype = arrow_type_to_pyarrow(py, f.data_type()).unwrap();
-                field_fn
-                    .call1((f.name(), dtype, f.is_nullable()))
-                    .unwrap()
-            })
-            .collect();
-
-        let result = schema_cls.call1((fields,))?;
-        Ok(result.into())
+        use arrow::pyarrow::ToPyArrow;
+        self.table.schema().to_pyarrow(py)
     }
 
     fn __repr__(&self) -> String {
@@ -222,79 +218,25 @@ impl LazyArrowStreamTable {
     }
 }
 
-/// Get schema from a Python object that has a schema attribute or method.
+/// Get schema from a Python object that has a schema attribute.
 ///
-/// This function extracts the schema WITHOUT consuming the stream, which is
+/// This extracts the schema WITHOUT consuming the stream, which is
 /// important for lazy evaluation.
 fn get_schema_from_stream(stream: &Bound<'_, PyAny>) -> PyResult<SchemaRef> {
     use arrow::datatypes::Schema;
     use arrow::pyarrow::FromPyArrow;
 
-    // Try to get the schema attribute (PyArrow RecordBatchReader has .schema property)
     let py_schema = stream.getattr("schema").map_err(|e| {
         pyo3::exceptions::PyTypeError::new_err(format!(
-            "Object does not have a 'schema' attribute: {e}. \
-             Expected a RecordBatchReader or similar object with a schema property."
+            "Object must have a 'schema' attribute (e.g., RecordBatchReader): {e}"
         ))
     })?;
 
-    // Convert the PyArrow Schema to Rust Schema
     let schema = Schema::from_pyarrow_bound(&py_schema).map_err(|e| {
-        pyo3::exceptions::PyTypeError::new_err(format!(
-            "Failed to convert schema: {e}"
-        ))
+        pyo3::exceptions::PyTypeError::new_err(format!("Failed to convert schema: {e}"))
     })?;
 
     Ok(Arc::new(schema))
-}
-
-/// Convert Arrow DataType to PyArrow type
-fn arrow_type_to_pyarrow(py: Python<'_>, dtype: &arrow::datatypes::DataType) -> PyResult<PyObject> {
-    let pyarrow = py.import("pyarrow")?;
-
-    use arrow::datatypes::DataType;
-    let result = match dtype {
-        DataType::Null => pyarrow.call_method0("null")?,
-        DataType::Boolean => pyarrow.call_method0("bool_")?,
-        DataType::Int8 => pyarrow.call_method0("int8")?,
-        DataType::Int16 => pyarrow.call_method0("int16")?,
-        DataType::Int32 => pyarrow.call_method0("int32")?,
-        DataType::Int64 => pyarrow.call_method0("int64")?,
-        DataType::UInt8 => pyarrow.call_method0("uint8")?,
-        DataType::UInt16 => pyarrow.call_method0("uint16")?,
-        DataType::UInt32 => pyarrow.call_method0("uint32")?,
-        DataType::UInt64 => pyarrow.call_method0("uint64")?,
-        DataType::Float16 => pyarrow.call_method0("float16")?,
-        DataType::Float32 => pyarrow.call_method0("float32")?,
-        DataType::Float64 => pyarrow.call_method0("float64")?,
-        DataType::Utf8 => pyarrow.call_method0("utf8")?,
-        DataType::LargeUtf8 => pyarrow.call_method0("large_utf8")?,
-        DataType::Binary => pyarrow.call_method0("binary")?,
-        DataType::LargeBinary => pyarrow.call_method0("large_binary")?,
-        DataType::Date32 => pyarrow.call_method0("date32")?,
-        DataType::Date64 => pyarrow.call_method0("date64")?,
-        DataType::Timestamp(unit, tz) => {
-            let unit_str = match unit {
-                arrow::datatypes::TimeUnit::Second => "s",
-                arrow::datatypes::TimeUnit::Millisecond => "ms",
-                arrow::datatypes::TimeUnit::Microsecond => "us",
-                arrow::datatypes::TimeUnit::Nanosecond => "ns",
-            };
-            match tz {
-                Some(tz) => pyarrow.call_method1("timestamp", (unit_str, tz.to_string()))?,
-                None => pyarrow.call_method1("timestamp", (unit_str,))?,
-            }
-        }
-        _ => {
-            // Fallback: convert to string and let PyArrow parse it
-            let type_str = format!("{dtype}");
-            pyarrow
-                .getattr("type_for_alias")?
-                .call1((type_str.as_str(),))?
-        }
-    };
-
-    Ok(result.into())
 }
 
 /// Python module initialization
