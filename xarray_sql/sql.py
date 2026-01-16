@@ -1,8 +1,7 @@
 import xarray as xr
 from datafusion import SessionContext
 
-from .df import Chunks
-from .reader import read_xarray_table
+from .df import read_xarray, Chunks
 
 
 class XarrayContext(SessionContext):
@@ -14,5 +13,5 @@ class XarrayContext(SessionContext):
       input_table: xr.Dataset,
       chunks: Chunks = None,
   ):
-    table = read_xarray_table(input_table, chunks)
-    self.register_table_provider(table_name, table)
+    arrow_table = read_xarray(input_table, chunks)
+    return self.from_arrow(arrow_table, table_name)
