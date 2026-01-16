@@ -17,7 +17,7 @@ import xarray as xr
 from datafusion import SessionContext
 
 from ._native import LazyArrowStreamTable
-from .reader import XarrayRecordBatchReader, read_xarray_lazy
+from .reader import XarrayRecordBatchReader, read_xarray_lazy, read_xarray_table
 
 
 @pytest.fixture
@@ -103,7 +103,7 @@ class TestXarrayRecordBatchReaderCreation:
 class TestDataFusionRegistration:
   """Tests that DataFusion table registration does NOT trigger iteration.
 
-  These tests use LazyArrowStreamTable with register_table_provider()
+  These tests use read_xarray_table with register_table_provider()
   to achieve true lazy evaluation.
   """
 
@@ -111,19 +111,17 @@ class TestDataFusionRegistration:
     """Registering a LazyArrowStreamTable should NOT iterate data.
 
     This is the KEY test for lazy evaluation. LazyArrowStreamTable wraps
-    the reader and implements __datafusion_table_provider__ with StreamingTable,
+    a factory and implements __datafusion_table_provider__ with StreamingTable,
     ensuring data is only read during query execution.
     """
     tracker = IterationTracker()
 
-    reader = XarrayRecordBatchReader(
+    # Use read_xarray_table which creates a factory-based table
+    table = read_xarray_table(
         small_ds,
         chunks={"time": 25},
         _iteration_callback=tracker,
     )
-
-    # Wrap in LazyArrowStreamTable for lazy registration
-    table = LazyArrowStreamTable(reader)
 
     ctx = SessionContext()
     ctx.register_table_provider("test_table", table)
@@ -137,14 +135,12 @@ class TestDataFusionRegistration:
     """Creating a LazyArrowStreamTable should NOT iterate data."""
     tracker = IterationTracker()
 
-    reader = XarrayRecordBatchReader(
+    # Use read_xarray_table which creates a factory-based table
+    table = read_xarray_table(
         small_ds,
         chunks={"time": 25},
         _iteration_callback=tracker,
     )
-
-    # Just creating the LazyArrowStreamTable should not iterate
-    table = LazyArrowStreamTable(reader)
 
     assert tracker.iteration_count == 0, (
         f"LAZY EVALUATION FAILED: Expected 0 iterations during "
@@ -155,13 +151,11 @@ class TestDataFusionRegistration:
     """Creating a SQL query plan should NOT iterate data."""
     tracker = IterationTracker()
 
-    reader = XarrayRecordBatchReader(
+    table = read_xarray_table(
         small_ds,
         chunks={"time": 25},
         _iteration_callback=tracker,
     )
-
-    table = LazyArrowStreamTable(reader)
 
     ctx = SessionContext()
     ctx.register_table_provider("test_table", table)
@@ -180,20 +174,18 @@ class TestDataFusionRegistration:
 class TestDataFusionCollect:
   """Tests that data iteration ONLY occurs during collect().
 
-  These tests use LazyArrowStreamTable to verify lazy evaluation.
+  These tests use read_xarray_table to verify lazy evaluation.
   """
 
   def test_collect_triggers_iteration(self, small_ds):
     """collect() should trigger data iteration."""
     tracker = IterationTracker()
 
-    reader = XarrayRecordBatchReader(
+    table = read_xarray_table(
         small_ds,
         chunks={"time": 25},
         _iteration_callback=tracker,
     )
-
-    table = LazyArrowStreamTable(reader)
 
     ctx = SessionContext()
     ctx.register_table_provider("test_table", table)
@@ -220,13 +212,11 @@ class TestDataFusionCollect:
     tracker = IterationTracker()
 
     chunks = {"time": 25}
-    reader = XarrayRecordBatchReader(
+    table = read_xarray_table(
         small_ds,
         chunks=chunks,
         _iteration_callback=tracker,
     )
-
-    table = LazyArrowStreamTable(reader)
 
     ctx = SessionContext()
     ctx.register_table_provider("test_table", table)
@@ -245,13 +235,11 @@ class TestDataFusionCollect:
     """Aggregation queries should iterate all necessary blocks."""
     tracker = IterationTracker()
 
-    reader = XarrayRecordBatchReader(
+    table = read_xarray_table(
         small_ds,
         chunks={"time": 25},
         _iteration_callback=tracker,
     )
-
-    table = LazyArrowStreamTable(reader)
 
     ctx = SessionContext()
     ctx.register_table_provider("test_table", table)
@@ -270,63 +258,55 @@ class TestDataFusionCollect:
 class TestLazyEvaluationEndToEnd:
   """End-to-end tests verifying lazy evaluation through the full pipeline.
 
-  These tests use LazyArrowStreamTable to achieve true lazy evaluation.
+  These tests use read_xarray_table to achieve true lazy evaluation.
   """
 
   def test_lazy_evaluation_sequence(self, small_ds):
     """Verify the exact sequence of lazy evaluation stages.
 
     This is the comprehensive test that proves true lazy evaluation:
-    1. Reader creation: 0 iterations
-    2. LazyArrowStreamTable creation: 0 iterations
-    3. Table registration: 0 iterations
-    4. Query planning: 0 iterations
-    5. collect(): N iterations (where N = number of blocks)
+    1. Table creation: 0 iterations
+    2. Table registration: 0 iterations
+    3. Query planning: 0 iterations
+    4. collect(): N iterations (where N = number of blocks)
     """
     tracker = IterationTracker()
 
-    # Stage 1: Reader creation
-    reader = XarrayRecordBatchReader(
+    # Stage 1: Table creation (with factory)
+    table = read_xarray_table(
         small_ds,
         chunks={"time": 25},
         _iteration_callback=tracker,
     )
-    iterations_after_creation = tracker.iteration_count
-    assert (
-        iterations_after_creation == 0
-    ), f"Stage 1 FAILED: Reader creation triggered {iterations_after_creation} iterations"
-
-    # Stage 2: LazyArrowStreamTable creation
-    table = LazyArrowStreamTable(reader)
     iterations_after_table = tracker.iteration_count
     assert iterations_after_table == 0, (
-        f"Stage 2 FAILED: LazyArrowStreamTable creation triggered "
+        f"Stage 1 FAILED: Table creation triggered "
         f"{iterations_after_table} iterations"
     )
 
-    # Stage 3: Table registration
+    # Stage 2: Table registration
     ctx = SessionContext()
     ctx.register_table_provider("test_table", table)
     iterations_after_registration = tracker.iteration_count
     assert iterations_after_registration == 0, (
-        f"Stage 3 FAILED: Table registration triggered "
+        f"Stage 2 FAILED: Table registration triggered "
         f"{iterations_after_registration} iterations"
     )
 
-    # Stage 4: Query planning
+    # Stage 3: Query planning
     query = ctx.sql("SELECT * FROM test_table")
     iterations_after_planning = tracker.iteration_count
     assert iterations_after_planning == 0, (
-        f"Stage 4 FAILED: Query planning triggered "
+        f"Stage 3 FAILED: Query planning triggered "
         f"{iterations_after_planning} iterations"
     )
 
-    # Stage 5: collect() - NOW iteration should happen
+    # Stage 4: collect() - NOW iteration should happen
     result = query.collect()
     iterations_after_collect = tracker.iteration_count
     assert (
         iterations_after_collect > 0
-    ), f"Stage 5 FAILED: collect() triggered 0 iterations - no data was read!"
+    ), f"Stage 4 FAILED: collect() triggered 0 iterations - no data was read!"
 
     # Verify we got the expected number of blocks (100 time steps / 25 = 4)
     expected_blocks = 4
@@ -334,67 +314,54 @@ class TestLazyEvaluationEndToEnd:
         iterations_after_collect == expected_blocks
     ), f"Expected {expected_blocks} iterations, got {iterations_after_collect}"
 
-  def test_multiple_queries_on_same_data(self, small_ds):
-    """Each new reader should allow fresh iteration."""
-    tracker1 = IterationTracker()
-    tracker2 = IterationTracker()
+  def test_multiple_queries_on_same_table(self, small_ds):
+    """Same table can be queried multiple times with fresh iteration each time."""
+    tracker = IterationTracker()
 
-    reader1 = XarrayRecordBatchReader(
+    table = read_xarray_table(
         small_ds,
         chunks={"time": 50},
-        _iteration_callback=tracker1,
+        _iteration_callback=tracker,
     )
-
-    reader2 = XarrayRecordBatchReader(
-        small_ds,
-        chunks={"time": 50},
-        _iteration_callback=tracker2,
-    )
-
-    table1 = LazyArrowStreamTable(reader1)
-    table2 = LazyArrowStreamTable(reader2)
-
-    ctx = SessionContext()
-    ctx.register_table_provider("table1", table1)
-    ctx.register_table_provider("table2", table2)
-
-    # Query first table
-    ctx.sql("SELECT COUNT(*) FROM table1").collect()
-    assert tracker1.iteration_count > 0
-    assert tracker2.iteration_count == 0
-
-    # Query second table
-    ctx.sql("SELECT COUNT(*) FROM table2").collect()
-    assert tracker2.iteration_count > 0
-
-  def test_stream_consumed_error(self, small_ds):
-    """Once consumed, the stream should not be reusable."""
-    reader = XarrayRecordBatchReader(small_ds, chunks={"time": 25})
-
-    table = LazyArrowStreamTable(reader)
 
     ctx = SessionContext()
     ctx.register_table_provider("test_table", table)
 
-    # First collect works
+    # First query
     ctx.sql("SELECT COUNT(*) FROM test_table").collect()
+    first_query_iterations = tracker.iteration_count
+    assert first_query_iterations > 0, "First query should iterate"
 
-    # Reader is now consumed, creating another table should fail
+    # Second query on same table - should iterate again
+    ctx.sql("SELECT AVG(temperature) FROM test_table").collect()
+    second_query_iterations = tracker.iteration_count
+    assert second_query_iterations > first_query_iterations, (
+        "Second query should trigger additional iterations"
+    )
+
+  def test_stream_consumed_error(self, small_ds):
+    """Once consumed, a single XarrayRecordBatchReader should not be reusable."""
+    reader = XarrayRecordBatchReader(small_ds, chunks={"time": 25})
+
+    # Consume the reader by converting to a PyArrow reader and reading
+    import pyarrow as pa
+    pa_reader = pa.RecordBatchReader.from_stream(reader)
+    _ = pa_reader.read_all()
+
+    # Reader is now consumed, calling __arrow_c_stream__ again should fail
     with pytest.raises(RuntimeError, match="already consumed"):
-      # This will call __arrow_c_stream__ again
       reader.__arrow_c_stream__()
 
 
 class TestDataIntegrity:
   """Tests that verify data correctness alongside lazy evaluation.
 
-  These tests use LazyArrowStreamTable for lazy streaming.
+  These tests use read_xarray_table for lazy streaming.
   """
 
   def test_query_results_are_correct(self, small_ds):
     """Verify that lazy evaluation produces correct results."""
-    reader = read_xarray_lazy(small_ds, chunks={"time": 25})
-    table = LazyArrowStreamTable(reader)
+    table = read_xarray_table(small_ds, chunks={"time": 25})
 
     ctx = SessionContext()
     ctx.register_table_provider("test_table", table)
@@ -411,8 +378,7 @@ class TestDataIntegrity:
 
   def test_aggregation_results_are_correct(self, small_ds):
     """Verify aggregation produces correct results."""
-    reader = read_xarray_lazy(small_ds, chunks={"time": 25})
-    table = LazyArrowStreamTable(reader)
+    table = read_xarray_table(small_ds, chunks={"time": 25})
 
     ctx = SessionContext()
     ctx.register_table_provider("test_table", table)
