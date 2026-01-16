@@ -186,18 +186,23 @@ def read_xarray_lazy(
 
 
 def read_xarray_table(
-    ds: xr.Dataset, chunks: Chunks = None
+    ds: xr.Dataset,
+    chunks: Chunks = None,
+    *,
+    _iteration_callback: t.Optional[t.Callable[[Block], None]] = None,
 ) -> "LazyArrowStreamTable":
   """Create a lazy DataFusion table from an xarray Dataset.
 
   This is the simplest way to register xarray data with DataFusion.
   Data is only read when queries are executed (during collect()),
-  not during registration.
+  not during registration. The table can be queried multiple times.
 
   Args:
       ds: An xarray Dataset. All data_vars must share the same dimensions.
       chunks: Xarray-like chunks specification. If not provided, uses
           the Dataset's existing chunks.
+      _iteration_callback: Internal callback for testing. Called with
+          each block dict just before it's converted to Arrow.
 
   Returns:
       A LazyArrowStreamTable ready for registration with DataFusion.
@@ -215,8 +220,19 @@ def read_xarray_table(
       >>>
       >>> # Data is only read here, during collect()
       >>> result = ctx.sql('SELECT AVG(air) FROM air').collect()
+      >>> # Can query again - each query creates a fresh stream
+      >>> result2 = ctx.sql('SELECT * FROM air LIMIT 10').collect()
   """
   from ._native import LazyArrowStreamTable
 
-  reader = XarrayRecordBatchReader(ds, chunks)
-  return LazyArrowStreamTable(reader)
+  # Get schema from dataset without creating a stream
+  schema = _parse_schema(ds)
+
+  # Create a factory function that produces fresh streams on each call
+  def make_stream() -> pa.RecordBatchReader:
+    reader = XarrayRecordBatchReader(
+        ds, chunks, _iteration_callback=_iteration_callback
+    )
+    return pa.RecordBatchReader.from_stream(reader)
+
+  return LazyArrowStreamTable(make_stream, schema)

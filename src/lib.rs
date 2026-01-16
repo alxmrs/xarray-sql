@@ -29,31 +29,30 @@ use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
 use tokio::runtime::Handle;
 
-/// A partition stream that wraps a Python object implementing `__arrow_c_stream__`.
+/// A partition stream that wraps a Python factory function that creates streams.
 ///
-/// The stream is consumed lazily - only when `execute()` is called during query execution.
+/// The factory is called lazily on each `execute()` invocation, allowing
+/// the same table to be queried multiple times.
 struct PyArrowStreamPartition {
     schema: SchemaRef,
-    /// The Python object, wrapped in Option so it can be taken (consumed) exactly once.
-    /// We use std::sync::Mutex for Send + Sync.
-    py_stream: std::sync::Mutex<Option<Py<PyAny>>>,
+    /// A Python callable (factory) that returns a fresh stream implementing `__arrow_c_stream__`.
+    /// Called on each execute() to create a new stream.
+    stream_factory: Py<PyAny>,
 }
 
 impl PyArrowStreamPartition {
-    fn new(py_obj: Py<PyAny>, schema: SchemaRef) -> Self {
+    fn new(stream_factory: Py<PyAny>, schema: SchemaRef) -> Self {
         Self {
             schema,
-            py_stream: std::sync::Mutex::new(Some(py_obj)),
+            stream_factory,
         }
     }
 }
 
 impl Debug for PyArrowStreamPartition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let consumed = self.py_stream.lock().unwrap().is_none();
         f.debug_struct("PyArrowStreamPartition")
             .field("schema", &self.schema)
-            .field("consumed", &consumed)
             .finish()
     }
 }
@@ -64,14 +63,14 @@ impl PartitionStream for PyArrowStreamPartition {
     }
 
     fn execute(&self, _ctx: Arc<TaskContext>) -> SendableRecordBatchStream {
-        // Take the Python object (can only be done once)
-        let py_obj = self.py_stream.lock().unwrap().take();
+        // Call the factory to get a fresh stream for this execution
+        let batches: Vec<RecordBatch> = Python::with_gil(|py| {
+            // Call the factory to get a fresh stream
+            let stream_result = self.stream_factory.call0(py);
 
-        let batches: Vec<RecordBatch> = match py_obj {
-            Some(obj) => {
-                // Acquire the GIL and consume the stream
-                Python::with_gil(|py| {
-                    let bound = obj.bind(py);
+            match stream_result {
+                Ok(stream_obj) => {
+                    let bound = stream_obj.bind(py);
 
                     match ArrowArrayStreamReader::from_pyarrow_bound(bound) {
                         Ok(reader) => {
@@ -93,13 +92,13 @@ impl PartitionStream for PyArrowStreamPartition {
                             vec![]
                         }
                     }
-                })
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to call stream factory: {e}");
+                    vec![]
+                }
             }
-            None => {
-                // Stream already consumed, return empty
-                vec![]
-            }
-        };
+        });
 
         Box::pin(
             MemoryStream::try_new(batches, Arc::clone(&self.schema), None)
@@ -108,12 +107,14 @@ impl PartitionStream for PyArrowStreamPartition {
     }
 }
 
-/// A lazy table provider that wraps a Python Arrow stream.
+/// A lazy table provider that wraps a Python stream factory.
 ///
 /// This class implements the `__datafusion_table_provider__` protocol, allowing
 /// it to be registered with DataFusion's `SessionContext.register_table()`.
 ///
 /// Data is NOT read until query execution time - this enables true lazy evaluation.
+/// The factory function is called on each query execution to create a fresh stream,
+/// allowing the same table to be queried multiple times.
 ///
 /// # Example
 ///
@@ -121,18 +122,25 @@ impl PartitionStream for PyArrowStreamPartition {
 /// from datafusion import SessionContext
 /// from xarray_sql import LazyArrowStreamTable, XarrayRecordBatchReader
 ///
-/// # Create a lazy reader (implements __arrow_c_stream__)
-/// reader = XarrayRecordBatchReader(ds, chunks={'time': 240})
+/// # Create a factory that produces lazy readers
+/// def make_reader():
+///     return XarrayRecordBatchReader(ds, chunks={'time': 240})
 ///
-/// # Wrap in lazy table - NO DATA LOADED
-/// table = LazyArrowStreamTable(reader)
+/// # Get schema from a sample reader
+/// sample = make_reader()
+/// schema = sample.schema
+///
+/// # Wrap factory in lazy table - NO DATA LOADED
+/// table = LazyArrowStreamTable(make_reader, schema)
 ///
 /// # Register with DataFusion - STILL NO DATA LOADED
 /// ctx = SessionContext()
 /// ctx.register_table("air", table)
 ///
 /// # Data only loaded HERE during collect()
+/// # Each query creates a fresh stream via the factory
 /// result = ctx.sql("SELECT AVG(air) FROM air").collect()
+/// result2 = ctx.sql("SELECT * FROM air LIMIT 10").collect()  # Works!
 /// ```
 #[pyclass(name = "LazyArrowStreamTable")]
 struct LazyArrowStreamTable {
@@ -142,29 +150,39 @@ struct LazyArrowStreamTable {
 
 #[pymethods]
 impl LazyArrowStreamTable {
-    /// Create a new LazyArrowStreamTable from a Python object implementing `__arrow_c_stream__`.
+    /// Create a new LazyArrowStreamTable from a stream factory function.
     ///
     /// Args:
-    ///     stream: A Python object implementing the Arrow PyCapsule interface (`__arrow_c_stream__`).
-    ///             This includes `pyarrow.RecordBatchReader`, `XarrayRecordBatchReader`, etc.
+    ///     stream_factory: A callable that returns a Python object implementing
+    ///             the Arrow PyCapsule interface (`__arrow_c_stream__`).
+    ///             Called on each query execution to create a fresh stream.
+    ///     schema: A PyArrow Schema for the table. Required since the factory
+    ///             hasn't been called yet.
     ///
     /// Raises:
-    ///     TypeError: If the object does not implement `__arrow_c_stream__`.
+    ///     TypeError: If the schema is not a valid PyArrow Schema.
     #[new]
-    fn new(stream: &Bound<'_, PyAny>) -> PyResult<Self> {
-        // Get the schema via the .schema attribute WITHOUT consuming the stream
-        // This is important because calling __arrow_c_stream__ would consume the stream
-        let schema = get_schema_from_stream(stream)?;
+    fn new(stream_factory: &Bound<'_, PyAny>, schema: &Bound<'_, PyAny>) -> PyResult<Self> {
+        // Convert the PyArrow schema to Arrow schema
+        use arrow::datatypes::Schema;
+        use arrow::pyarrow::FromPyArrow;
 
-        // Create the partition stream with the Python object
-        let partition = PyArrowStreamPartition::new(stream.clone().unbind(), schema.clone());
+        let arrow_schema = Schema::from_pyarrow_bound(schema).map_err(|e| {
+            pyo3::exceptions::PyTypeError::new_err(format!("Failed to convert schema: {e}"))
+        })?;
+        let schema_ref = Arc::new(arrow_schema);
+
+        // Create the partition stream with the factory
+        let partition =
+            PyArrowStreamPartition::new(stream_factory.clone().unbind(), schema_ref.clone());
 
         // Create the StreamingTable
-        let table = StreamingTable::try_new(schema, vec![Arc::new(partition)]).map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Failed to create StreamingTable: {e}"
-            ))
-        })?;
+        let table =
+            StreamingTable::try_new(schema_ref, vec![Arc::new(partition)]).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to create StreamingTable: {e}"
+                ))
+            })?;
 
         Ok(Self {
             table: Arc::new(table),
@@ -216,27 +234,6 @@ impl LazyArrowStreamTable {
             self.table.schema()
         )
     }
-}
-
-/// Get schema from a Python object that has a schema attribute.
-///
-/// This extracts the schema WITHOUT consuming the stream, which is
-/// important for lazy evaluation.
-fn get_schema_from_stream(stream: &Bound<'_, PyAny>) -> PyResult<SchemaRef> {
-    use arrow::datatypes::Schema;
-    use arrow::pyarrow::FromPyArrow;
-
-    let py_schema = stream.getattr("schema").map_err(|e| {
-        pyo3::exceptions::PyTypeError::new_err(format!(
-            "Object must have a 'schema' attribute (e.g., RecordBatchReader): {e}"
-        ))
-    })?;
-
-    let schema = Schema::from_pyarrow_bound(&py_schema).map_err(|e| {
-        pyo3::exceptions::PyTypeError::new_err(format!("Failed to convert schema: {e}"))
-    })?;
-
-    Ok(Arc::new(schema))
 }
 
 /// Python module initialization
