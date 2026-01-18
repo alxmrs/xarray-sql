@@ -46,6 +46,6 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
       - name: Install xarray_sql
-        run: uv sync --dev
+        run: uv sync --dev -v
       - name: Run unit tests
         run: uv run pytest -m "not integration"
