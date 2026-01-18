@@ -1,92 +1,116 @@
 // Licensed under the Apache License, Version 2.0
 //!
-//! Lazy Arrow stream table provider for xarray-sql.
+//! Lazy Arrow stream table provider for xarray-sql with projection pushdown.
 //!
-//! This module provides `LazyArrowStreamTable`, which wraps a Python object
-//! implementing `__arrow_c_stream__` and exposes it as a DataFusion TableProvider
-//! via the `__datafusion_table_provider__` protocol.
+//! This module provides `LazyArrowStreamTable`, which wraps a Python factory
+//! function and exposes it as a DataFusion TableProvider with support for
+//! column projection pushdown.
 //!
-//! The key feature is **lazy evaluation**: data is not read from the Python stream
-//! until query execution time (during `collect()`), not at registration time.
+//! Key features:
+//! - **Lazy evaluation**: Data is not read until query execution time
+//! - **Projection pushdown**: Only columns needed by the query are read
+//! - **Multiple queries**: Same table can be queried multiple times
 
+use std::any::Any;
 use std::ffi::c_void;
 use std::ffi::CString;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+use async_trait::async_trait;
+
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use arrow::ffi_stream::ArrowArrayStreamReader;
 use arrow::pyarrow::FromPyArrow;
-use datafusion::catalog::streaming::StreamingTable;
+use datafusion::catalog::Session;
+use datafusion::common::Result as DFResult;
 use datafusion::datasource::TableProvider;
 use datafusion::execution::TaskContext;
+use datafusion::logical_expr::{Expr, TableType};
 use datafusion::physical_plan::memory::MemoryStream;
 use datafusion::physical_plan::streaming::PartitionStream;
-use datafusion::physical_plan::SendableRecordBatchStream;
+use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream};
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion_ffi::table_provider::FFI_TableProvider;
 use pyo3::prelude::*;
-use pyo3::types::PyCapsule;
+use pyo3::types::{PyCapsule, PyList};
 use tokio::runtime::Handle;
 
-/// A partition stream that wraps a Python factory function that creates streams.
+/// A partition stream that wraps a Python factory function with projection support.
 ///
-/// The factory is called lazily on each `execute()` invocation, allowing
-/// the same table to be queried multiple times.
-struct PyArrowStreamPartition {
-    schema: SchemaRef,
-    /// A Python callable (factory) that returns a fresh stream implementing `__arrow_c_stream__`.
-    /// Called on each execute() to create a new stream.
+/// The factory is called lazily with a projection (list of column indices)
+/// on each `execute()` invocation.
+struct ProjectedPyArrowStreamPartition {
+    /// The projected schema (only columns that were requested)
+    projected_schema: SchemaRef,
+    /// Python callable that accepts (projection: Optional[List[int]]) and returns a stream
     stream_factory: Py<PyAny>,
+    /// The projection to apply (column indices), or None for all columns
+    projection: Option<Vec<usize>>,
 }
 
-impl PyArrowStreamPartition {
-    fn new(stream_factory: Py<PyAny>, schema: SchemaRef) -> Self {
+impl ProjectedPyArrowStreamPartition {
+    fn new(
+        stream_factory: Py<PyAny>,
+        projected_schema: SchemaRef,
+        projection: Option<Vec<usize>>,
+    ) -> Self {
         Self {
-            schema,
+            projected_schema,
             stream_factory,
+            projection,
         }
     }
 }
 
-impl Debug for PyArrowStreamPartition {
+impl Debug for ProjectedPyArrowStreamPartition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PyArrowStreamPartition")
-            .field("schema", &self.schema)
+        f.debug_struct("ProjectedPyArrowStreamPartition")
+            .field("schema", &self.projected_schema)
+            .field("projection", &self.projection)
             .finish()
     }
 }
 
-impl PartitionStream for PyArrowStreamPartition {
+impl PartitionStream for ProjectedPyArrowStreamPartition {
     fn schema(&self) -> &SchemaRef {
-        &self.schema
+        &self.projected_schema
     }
 
     fn execute(&self, _ctx: Arc<TaskContext>) -> SendableRecordBatchStream {
-        // Call the factory to get a fresh stream for this execution
+        let projection = self.projection.clone();
+        let projected_schema = Arc::clone(&self.projected_schema);
+
+        // Call the factory with the projection to get a fresh stream
         let batches: Vec<RecordBatch> = Python::with_gil(|py| {
-            // Call the factory to get a fresh stream
-            let stream_result = self.stream_factory.call0(py);
+            // Convert projection to Python list or None
+            let py_projection = match &projection {
+                Some(indices) => {
+                    let list = PyList::new(py, indices.iter().map(|&i| i as i64)).unwrap();
+                    list.into_any().unbind()
+                }
+                None => py.None(),
+            };
+
+            // Call factory with projection argument
+            let stream_result = self.stream_factory.call1(py, (py_projection,));
 
             match stream_result {
                 Ok(stream_obj) => {
                     let bound = stream_obj.bind(py);
 
                     match ArrowArrayStreamReader::from_pyarrow_bound(bound) {
-                        Ok(reader) => {
-                            // Collect batches, propagating errors as warnings
-                            // In streaming context, we can't easily return errors,
-                            // so we log and skip failed batches
-                            reader
-                                .filter_map(|result| match result {
-                                    Ok(batch) => Some(batch),
-                                    Err(e) => {
-                                        eprintln!("Warning: Failed to read batch: {e}");
-                                        None
-                                    }
-                                })
-                                .collect()
-                        }
+                        Ok(reader) => reader
+                            .filter_map(|result| match result {
+                                Ok(batch) => Some(batch),
+                                Err(e) => {
+                                    eprintln!("Warning: Failed to read batch: {e}");
+                                    None
+                                }
+                            })
+                            .collect(),
                         Err(e) => {
                             eprintln!("Warning: Failed to create stream reader: {e}");
                             vec![]
@@ -101,51 +125,202 @@ impl PartitionStream for PyArrowStreamPartition {
         });
 
         Box::pin(
-            MemoryStream::try_new(batches, Arc::clone(&self.schema), None)
+            MemoryStream::try_new(batches, projected_schema, None)
                 .expect("MemoryStream creation should not fail with valid schema"),
         )
     }
 }
 
-/// A lazy table provider that wraps a Python stream factory.
+/// A streaming execution plan that supports projection pushdown.
+#[derive(Debug)]
+struct ProjectedStreamingExec {
+    projected_schema: SchemaRef,
+    partitions: Vec<Arc<dyn PartitionStream>>,
+    properties: PlanProperties,
+}
+
+impl ProjectedStreamingExec {
+    fn new(projected_schema: SchemaRef, partitions: Vec<Arc<dyn PartitionStream>>) -> Self {
+        // Create properties for this execution plan
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(Arc::clone(&projected_schema)),
+            Partitioning::UnknownPartitioning(partitions.len()),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        );
+
+        Self {
+            projected_schema,
+            partitions,
+            properties,
+        }
+    }
+}
+
+impl DisplayAs for ProjectedStreamingExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose | DisplayFormatType::TreeRender => {
+                write!(f, "ProjectedStreamingExec: partitions={}", self.partitions.len())
+            }
+        }
+    }
+}
+
+impl ExecutionPlan for ProjectedStreamingExec {
+    fn name(&self) -> &str {
+        "ProjectedStreamingExec"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.projected_schema)
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+
+    fn properties(&self) -> &PlanProperties {
+        &self.properties
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> DFResult<SendableRecordBatchStream> {
+        if partition >= self.partitions.len() {
+            return Err(datafusion::error::DataFusionError::Internal(format!(
+                "Partition {partition} out of bounds (have {})",
+                self.partitions.len()
+            )));
+        }
+        Ok(self.partitions[partition].execute(context))
+    }
+}
+
+/// Internal table provider with projection pushdown support.
+///
+/// This wraps a Python factory and implements DataFusion's TableProvider trait.
+struct ProjectedTableProvider {
+    /// Full schema of the table (all columns)
+    full_schema: SchemaRef,
+    /// Python callable: (projection: Optional[List[int]]) -> ArrowStream
+    stream_factory: Py<PyAny>,
+}
+
+impl Debug for ProjectedTableProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProjectedTableProvider")
+            .field("schema", &self.full_schema)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl TableProvider for ProjectedTableProvider {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.full_schema)
+    }
+
+    fn table_type(&self) -> TableType {
+        TableType::Base
+    }
+
+    async fn scan(
+        &self,
+        _state: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        _filters: &[Expr],
+        _limit: Option<usize>,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        let projection = projection.cloned();
+        let full_schema = Arc::clone(&self.full_schema);
+        // Clone the Python object reference (requires GIL)
+        let stream_factory = Python::with_gil(|py| self.stream_factory.clone_ref(py));
+
+        // Compute the projected schema
+        let projected_schema = match &projection {
+            Some(indices) => {
+                let fields: Vec<_> = indices
+                    .iter()
+                    .map(|&i| full_schema.field(i).clone())
+                    .collect();
+                Arc::new(arrow::datatypes::Schema::new(fields))
+            }
+            None => full_schema,
+        };
+
+        // Create a partition stream with the projection
+        let partition = Arc::new(ProjectedPyArrowStreamPartition::new(
+            stream_factory,
+            Arc::clone(&projected_schema),
+            projection,
+        ));
+
+        Ok(Arc::new(ProjectedStreamingExec::new(
+            projected_schema,
+            vec![partition],
+        )) as Arc<dyn ExecutionPlan>)
+    }
+}
+
+/// A lazy table provider that wraps a Python stream factory with projection pushdown.
 ///
 /// This class implements the `__datafusion_table_provider__` protocol, allowing
-/// it to be registered with DataFusion's `SessionContext.register_table()`.
+/// it to be registered with DataFusion's `SessionContext.register_table_provider()`.
 ///
-/// Data is NOT read until query execution time - this enables true lazy evaluation.
-/// The factory function is called on each query execution to create a fresh stream,
-/// allowing the same table to be queried multiple times.
+/// Key features:
+/// - Data is NOT read until query execution time (lazy evaluation)
+/// - Only columns needed by the query are read (projection pushdown)
+/// - The table can be queried multiple times with different column needs
 ///
 /// # Example
 ///
 /// ```python
 /// from datafusion import SessionContext
-/// from xarray_sql import LazyArrowStreamTable, XarrayRecordBatchReader
+/// from xarray_sql import LazyArrowStreamTable
 ///
-/// # Create a factory that produces lazy readers
-/// def make_reader():
-///     return XarrayRecordBatchReader(ds, chunks={'time': 240})
+/// # Create a factory that accepts projection and returns a stream
+/// def make_reader(projection=None):
+///     # projection is a list of column indices, or None for all columns
+///     return XarrayRecordBatchReader(ds, chunks={'time': 240}, projection=projection)
 ///
-/// # Get schema from a sample reader
-/// sample = make_reader()
-/// schema = sample.schema
+/// # Get schema (all columns)
+/// schema = make_reader().schema
 ///
-/// # Wrap factory in lazy table - NO DATA LOADED
+/// # Create table - NO DATA LOADED
 /// table = LazyArrowStreamTable(make_reader, schema)
 ///
-/// # Register with DataFusion - STILL NO DATA LOADED
+/// # Register with DataFusion
 /// ctx = SessionContext()
-/// ctx.register_table("air", table)
+/// ctx.register_table_provider("weather", table)
 ///
-/// # Data only loaded HERE during collect()
-/// # Each query creates a fresh stream via the factory
-/// result = ctx.sql("SELECT AVG(air) FROM air").collect()
-/// result2 = ctx.sql("SELECT * FROM air LIMIT 10").collect()  # Works!
+/// # Query only temperature - only temperature column is read!
+/// result = ctx.sql("SELECT AVG(temperature) FROM weather").collect()
+///
+/// # Query humidity - only humidity column is read!
+/// result2 = ctx.sql("SELECT AVG(humidity) FROM weather").collect()
 /// ```
 #[pyclass(name = "LazyArrowStreamTable")]
 struct LazyArrowStreamTable {
-    /// The underlying StreamingTable
-    table: Arc<StreamingTable>,
+    /// The underlying table provider with projection support
+    provider: Arc<ProjectedTableProvider>,
 }
 
 #[pymethods]
@@ -153,17 +328,16 @@ impl LazyArrowStreamTable {
     /// Create a new LazyArrowStreamTable from a stream factory function.
     ///
     /// Args:
-    ///     stream_factory: A callable that returns a Python object implementing
-    ///             the Arrow PyCapsule interface (`__arrow_c_stream__`).
-    ///             Called on each query execution to create a fresh stream.
-    ///     schema: A PyArrow Schema for the table. Required since the factory
-    ///             hasn't been called yet.
+    ///     stream_factory: A callable that accepts an optional projection
+    ///             (list of column indices) and returns a Python object
+    ///             implementing the Arrow PyCapsule interface (`__arrow_c_stream__`).
+    ///             Signature: (projection: Optional[List[int]]) -> ArrowStream
+    ///     schema: A PyArrow Schema for the table (all columns).
     ///
-    /// Raises:
-    ///     TypeError: If the schema is not a valid PyArrow Schema.
+    /// The factory will be called at query execution time with the projection
+    /// that DataFusion determines is needed for the query.
     #[new]
     fn new(stream_factory: &Bound<'_, PyAny>, schema: &Bound<'_, PyAny>) -> PyResult<Self> {
-        // Convert the PyArrow schema to Arrow schema
         use arrow::datatypes::Schema;
         use arrow::pyarrow::FromPyArrow;
 
@@ -172,66 +346,44 @@ impl LazyArrowStreamTable {
         })?;
         let schema_ref = Arc::new(arrow_schema);
 
-        // Create the partition stream with the factory
-        let partition =
-            PyArrowStreamPartition::new(stream_factory.clone().unbind(), schema_ref.clone());
+        let provider = Arc::new(ProjectedTableProvider {
+            full_schema: schema_ref,
+            stream_factory: stream_factory.clone().unbind(),
+        });
 
-        // Create the StreamingTable
-        let table =
-            StreamingTable::try_new(schema_ref, vec![Arc::new(partition)]).map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Failed to create StreamingTable: {e}"
-                ))
-            })?;
-
-        Ok(Self {
-            table: Arc::new(table),
-        })
+        Ok(Self { provider })
     }
 
     /// Returns a PyCapsule implementing the DataFusion TableProvider FFI.
-    ///
-    /// This method is called by DataFusion's `register_table()` to get a
-    /// foreign table provider that can be used in queries.
-    fn __datafusion_table_provider__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
-        // Create the FFI table provider
-        let provider: Arc<dyn TableProvider + Send> = self.table.clone();
-
-        // Try to get the current tokio runtime handle (available when called from DataFusion context)
+    fn __datafusion_table_provider__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyCapsule>> {
+        let provider: Arc<dyn TableProvider + Send> = self.provider.clone();
         let runtime = Handle::try_current().ok();
 
-        // Create FFI wrapper (v49 API takes 3 arguments)
-        let ffi_provider = FFI_TableProvider::new(
-            provider,
-            false, // can_support_pushdown_filters
-            runtime,
-        );
+        let ffi_provider = FFI_TableProvider::new(provider, false, runtime);
 
-        // Create the capsule name
         let name = CString::new("datafusion_table_provider").unwrap();
 
-        // Create the PyCapsule with a destructor closure
-        // The PyCapsule takes ownership of the FFI_TableProvider
         PyCapsule::new_with_destructor(
             py,
             ffi_provider,
             Some(name),
-            |_provider: FFI_TableProvider, _context: *mut c_void| {
-                // The FFI_TableProvider will be dropped automatically
-            },
+            |_provider: FFI_TableProvider, _context: *mut c_void| {},
         )
     }
 
     /// Get the schema of the table as a PyArrow Schema.
     fn schema(&self, py: Python<'_>) -> PyResult<PyObject> {
         use arrow::pyarrow::ToPyArrow;
-        self.table.schema().to_pyarrow(py)
+        self.provider.full_schema.to_pyarrow(py)
     }
 
     fn __repr__(&self) -> String {
         format!(
             "LazyArrowStreamTable(schema={:?})",
-            self.table.schema()
+            self.provider.full_schema
         )
     }
 }
