@@ -53,6 +53,7 @@ class XarrayRecordBatchReader:
       ds: xr.Dataset,
       chunks: Chunks = None,
       *,
+      data_vars: t.Optional[t.Sequence[str]] = None,
       _iteration_callback: t.Optional[t.Callable[[Block], None]] = None,
   ):
     """Initialize the lazy reader.
@@ -61,10 +62,25 @@ class XarrayRecordBatchReader:
         ds: An xarray Dataset. All data_vars must share the same dimensions.
         chunks: Xarray-like chunks specification. If not provided, uses
             the Dataset's existing chunks.
+        data_vars: Optional list of data variable names to include. If provided,
+            only these variables will be read, enabling early column filtering
+            for more efficient queries. If None, all data_vars are included.
         _iteration_callback: Internal callback for testing. Called with
             each block dict just before it's converted to Arrow. This
             allows tests to track when iteration actually occurs.
     """
+    # Apply early column filtering if data_vars is specified
+    if data_vars is not None:
+      # Validate that all requested data_vars exist
+      missing = set(data_vars) - set(ds.data_vars)
+      if missing:
+        raise ValueError(
+            f"Requested data_vars not found in Dataset: {missing}. "
+            f"Available: {list(ds.data_vars)}"
+        )
+      # Filter the dataset to only include requested data_vars
+      ds = ds[list(data_vars)]
+
     self._ds = ds
     self._chunks = chunks
     self._schema = _parse_schema(ds)
@@ -151,7 +167,10 @@ class XarrayRecordBatchReader:
 
 
 def read_xarray_lazy(
-    ds: xr.Dataset, chunks: Chunks = None
+    ds: xr.Dataset,
+    chunks: Chunks = None,
+    *,
+    data_vars: t.Optional[t.Sequence[str]] = None,
 ) -> XarrayRecordBatchReader:
   """Create a lazy Arrow stream reader from an xarray Dataset.
 
@@ -163,6 +182,9 @@ def read_xarray_lazy(
       ds: An xarray Dataset. All data_vars must share the same dimensions.
       chunks: Xarray-like chunks specification. If not provided, uses
           the Dataset's existing chunks.
+      data_vars: Optional list of data variable names to include. If provided,
+          only these variables will be read, enabling early column filtering
+          for more efficient queries. If None, all data_vars are included.
 
   Returns:
       An XarrayRecordBatchReader that implements __arrow_c_stream__.
@@ -182,13 +204,14 @@ def read_xarray_lazy(
       >>> # Data is only read here, during collect()
       >>> result = ctx.sql('SELECT AVG(air) FROM air').collect()
   """
-  return XarrayRecordBatchReader(ds, chunks)
+  return XarrayRecordBatchReader(ds, chunks, data_vars=data_vars)
 
 
 def read_xarray_table(
     ds: xr.Dataset,
     chunks: Chunks = None,
     *,
+    data_vars: t.Optional[t.Sequence[str]] = None,
     _iteration_callback: t.Optional[t.Callable[[Block], None]] = None,
 ) -> "LazyArrowStreamTable":
   """Create a lazy DataFusion table from an xarray Dataset.
@@ -201,6 +224,9 @@ def read_xarray_table(
       ds: An xarray Dataset. All data_vars must share the same dimensions.
       chunks: Xarray-like chunks specification. If not provided, uses
           the Dataset's existing chunks.
+      data_vars: Optional list of data variable names to include. If provided,
+          only these variables will be read, enabling early column filtering
+          for more efficient queries. If None, all data_vars are included.
       _iteration_callback: Internal callback for testing. Called with
           each block dict just before it's converted to Arrow.
 
@@ -213,7 +239,8 @@ def read_xarray_table(
       >>> from xarray_sql import read_xarray_table
       >>>
       >>> ds = xr.tutorial.open_dataset('air_temperature')
-      >>> table = read_xarray_table(ds, chunks={'time': 240})
+      >>> # Read only specific columns for efficiency
+      >>> table = read_xarray_table(ds, chunks={'time': 240}, data_vars=['air'])
       >>>
       >>> ctx = SessionContext()
       >>> ctx.register_table_provider('air', table)
@@ -225,10 +252,23 @@ def read_xarray_table(
   """
   from ._native import LazyArrowStreamTable
 
-  # Get schema from dataset without creating a stream
+  # Apply early column filtering if data_vars is specified
+  if data_vars is not None:
+    # Validate that all requested data_vars exist
+    missing = set(data_vars) - set(ds.data_vars)
+    if missing:
+      raise ValueError(
+          f"Requested data_vars not found in Dataset: {missing}. "
+          f"Available: {list(ds.data_vars)}"
+      )
+    # Filter the dataset to only include requested data_vars
+    ds = ds[list(data_vars)]
+
+  # Get schema from (possibly filtered) dataset without creating a stream
   schema = _parse_schema(ds)
 
   # Create a factory function that produces fresh streams on each call
+  # Note: We use the filtered ds here, so each stream uses the same filter
   def make_stream() -> XarrayRecordBatchReader:
     return XarrayRecordBatchReader(
         ds, chunks, _iteration_callback=_iteration_callback

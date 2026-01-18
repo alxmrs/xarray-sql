@@ -199,15 +199,10 @@ class TestEarlyColumnDroppingAPI:
   Initially, these tests will fail, demonstrating the need for the feature.
   """
 
-  @pytest.mark.xfail(
-      reason="OPTIMIZATION NOT YET IMPLEMENTED: data_vars parameter not supported",
-      raises=TypeError,
-  )
   def test_reader_accepts_data_vars_filter(self, multi_var_ds):
     """Test that XarrayRecordBatchReader can accept a data_vars filter.
 
     This test verifies the API for filtering columns at reader creation time.
-    When the optimization is implemented, this test will start passing.
     """
     # This should work - filter to only include temperature
     reader = XarrayRecordBatchReader(
@@ -221,6 +216,24 @@ class TestEarlyColumnDroppingAPI:
     assert len(column_names) == 4
     assert "temperature" in column_names
     assert "humidity" not in column_names
+
+  def test_reader_rejects_invalid_data_vars(self, multi_var_ds):
+    """Test that XarrayRecordBatchReader raises error for invalid data_vars."""
+    with pytest.raises(ValueError, match="not found in Dataset"):
+      XarrayRecordBatchReader(
+          multi_var_ds,
+          chunks={"time": 25},
+          data_vars=["temperature", "nonexistent_var"],
+      )
+
+  def test_read_xarray_table_rejects_invalid_data_vars(self, multi_var_ds):
+    """Test that read_xarray_table raises error for invalid data_vars."""
+    with pytest.raises(ValueError, match="not found in Dataset"):
+      read_xarray_table(
+          multi_var_ds,
+          chunks={"time": 25},
+          data_vars=["nonexistent_var"],
+      )
 
   def test_reader_data_vars_filter_reduces_schema(self, multi_var_ds):
     """Verify that data_vars filter reduces the schema columns."""
@@ -255,15 +268,10 @@ class TestEarlyColumnDroppingAPI:
     assert filtered_batch.num_columns == 4  # 3 dims + 1 data_var
     assert full_batch.num_columns == 7  # 3 dims + 4 data_vars
 
-  @pytest.mark.xfail(
-      reason="OPTIMIZATION NOT YET IMPLEMENTED: data_vars parameter not supported",
-      raises=TypeError,
-  )
   def test_read_xarray_table_accepts_data_vars(self, multi_var_ds):
     """Test that read_xarray_table can accept a data_vars filter.
 
     This is the high-level API test for column filtering.
-    When the optimization is implemented, this test will start passing.
     """
     table = read_xarray_table(
         multi_var_ds,
@@ -272,10 +280,8 @@ class TestEarlyColumnDroppingAPI:
     )
 
     # Verify schema only has filtered columns (5: 3 dims + 2 data_vars)
-    # Note: table.schema() returns a PyArrow schema
-    import pyarrow as pa
-
-    schema = table.schema(None)
+    # Note: table.schema() returns a PyArrow schema (no arguments needed)
+    schema = table.schema()
     column_names = [field.name for field in schema]
     assert len(column_names) == 5
     assert "temperature" in column_names
