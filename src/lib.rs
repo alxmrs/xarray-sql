@@ -9,8 +9,7 @@
 //! The key feature is **lazy evaluation**: data is not read from the Python stream
 //! until query execution time (during `collect()`), not at registration time.
 
-use std::ffi::c_void;
-use std::ffi::CString;
+use std::ffi::{c_void, CString};
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -193,7 +192,10 @@ impl LazyArrowStreamTable {
     ///
     /// This method is called by DataFusion's `register_table()` to get a
     /// foreign table provider that can be used in queries.
-    fn __datafusion_table_provider__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
+    fn __datafusion_table_provider__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyCapsule>> {
         // Create the FFI table provider
         let provider: Arc<dyn TableProvider + Send> = self.table.clone();
 
@@ -202,8 +204,7 @@ impl LazyArrowStreamTable {
 
         // Create FFI wrapper (v49 API takes 3 arguments)
         let ffi_provider = FFI_TableProvider::new(
-            provider,
-            false, // can_support_pushdown_filters
+            provider, false, // can_support_pushdown_filters
             runtime,
         );
 
@@ -229,10 +230,7 @@ impl LazyArrowStreamTable {
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "LazyArrowStreamTable(schema={:?})",
-            self.table.schema()
-        )
+        format!("LazyArrowStreamTable(schema={:?})", self.table.schema())
     }
 }
 
