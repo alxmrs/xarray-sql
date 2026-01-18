@@ -31,5 +31,6 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: 3.11
+          enable-cache: true
       - name: The project builds
         run: uv build
