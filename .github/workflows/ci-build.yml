@@ -32,5 +32,9 @@ jobs:
         with:
           python-version: 3.11
           enable-cache: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
       - name: The project builds
         run: uv build

@@ -40,6 +40,11 @@ jobs:
         ]
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
