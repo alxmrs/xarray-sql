@@ -335,9 +335,9 @@ class TestLazyEvaluationEndToEnd:
     # Second query on same table - should iterate again
     ctx.sql("SELECT AVG(temperature) FROM test_table").collect()
     second_query_iterations = tracker.iteration_count
-    assert second_query_iterations > first_query_iterations, (
-        "Second query should trigger additional iterations"
-    )
+    assert (
+        second_query_iterations > first_query_iterations
+    ), "Second query should trigger additional iterations"
 
   def test_stream_consumed_error(self, small_ds):
     """Once consumed, a single XarrayRecordBatchReader should not be reusable."""
@@ -345,6 +345,7 @@ class TestLazyEvaluationEndToEnd:
 
     # Consume the reader by converting to a PyArrow reader and reading
     import pyarrow as pa
+
     pa_reader = pa.RecordBatchReader.from_stream(reader)
     _ = pa_reader.read_all()
 
