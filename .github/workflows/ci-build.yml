@@ -11,7 +11,7 @@ on:
 
 jobs:
   build:
-    name: "python ${{ matrix.python-version }} tests"
+    name: "python ${{ matrix.platform.runner }} tests"
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
