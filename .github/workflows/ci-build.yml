@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-name: ci
+name: ci-build
 
 on:
   # Triggers the workflow on push or pull request events but only for the main branch
@@ -28,23 +28,33 @@ on:
 jobs:
   build:
     name: "python ${{ matrix.python-version }} tests"
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
       matrix:
         python-version: [
-          "3.9",
-          "3.10",
           "3.11",
-          "3.12",
-          "3.13",
+          "3.14",
         ]
+        platform:
+          - runner: windows-11-arm
+            target: aarch64
+            python_arch: arm64
+          - runner: windows-latest
+            target: x86
+            python_arch: x86
+          - runner: macos-15-intel
+            target: x86_64
+          - runner: macos-latest
+            target: aarch64
+          - runner: ubuntu-latest
+            target: aarch64
+          - runner: ubuntu-latest
+            target: x86_64
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install xarray_sql
-        run: uv sync --dev
-      - name: Run unit tests
-        run: uv run pytest -m "not integration"
+      - name: The project builds
+        run: uv build
