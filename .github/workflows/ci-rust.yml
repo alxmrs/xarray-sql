@@ -48,4 +48,4 @@ jobs:
         with:
           components: rustfmt
       - name: Fmt
-        run: cargo fmt -- --check --unstable-features --config imports_granularity=Module,group_imports=StdExternalCrate
+        run: cargo fmt -- --check --config imports_granularity=Module,group_imports=StdExternalCrate

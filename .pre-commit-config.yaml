@@ -27,7 +27,7 @@ repos:
       - id: rustfmt
         name: rustfmt
         description: Check if all files follow the rustfmt style.
-        entry: cargo fmt -- --check --unstable-features --config imports_granularity=Module,group_imports=StdExternalCrate
+        entry: cargo fmt -- --check --config imports_granularity=Module,group_imports=StdExternalCrate
         language: system
         types: [ file, rust ]
         pass_filenames: false
