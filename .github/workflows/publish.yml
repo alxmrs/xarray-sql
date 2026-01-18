@@ -27,6 +27,8 @@ jobs:
       - name: Install uv and setup the python version
         uses: astral-sh/setup-uv@v7
 
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Build wheels and sdist
         run: uv build
 
