@@ -7,7 +7,7 @@ name = "xarray_sql"
 dynamic = ["version"]
 description = "Querry Xarray with SQL."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"  # Python 3.9 EOL is October 31, 2025.
 license = {text = "Apache-2.0"}
 authors = [
   {name = "Alexander Merose", email = "al@merose.com"},
@@ -21,7 +21,6 @@ classifiers = [
   "Operating System :: MacOS :: MacOS X",
   "Operating System :: Microsoft :: Windows",
   "Operating System :: POSIX",
-  "Programming Language :: Python :: 3.9",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
