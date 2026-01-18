@@ -32,10 +32,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: [
-          "3.11",
-          "3.14",
-        ]
         platform:
           - runner: windows-11-arm
             target: aarch64
@@ -54,7 +50,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: ${{ matrix.python-version }}
       - name: The project builds
         run: uv build
