@@ -44,9 +44,8 @@ jobs:
         with:
           submodules: "recursive"
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: nightly-2025-05-14
           components: rustfmt
       - name: Fmt
-        run: cargo +nightly-2025-05-14 fmt -- --check --unstable-features --config imports_granularity=Module,group_imports=StdExternalCrate
+        run: cargo fmt -- --check --unstable-features --config imports_granularity=Module,group_imports=StdExternalCrate
