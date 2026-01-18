@@ -1,4 +1,5 @@
 # Taken from Xee and modified: https://github.com/google/Xee/blob/main/.github/workflows/publish.yml
+# Rust/maturin release adapted from https://github.com/apache/datafusion-python/blob/main/.github/workflows/build.yml
 #
 # Copyright 2023 Google LLC
 #
@@ -13,6 +14,27 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+#
+# Copyright 2026 Apache Software Foundation
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
 name: Publish to PyPi
 
 on:
@@ -20,34 +42,116 @@ on:
     types: [published]
 
 jobs:
-  build-artifacts:
-    runs-on: ubuntu-latest
+  build-artifacts-mac-win:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ macos-latest, macos-15-intel, windows-latest ]
     steps:
       - uses: actions/checkout@v4
-      - name: Install uv and setup the python version
-        uses: astral-sh/setup-uv@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Build wheels and sdist
-        run: uv build
+      - name: Build wheels
+        run: |
+          uv sync --dev --no-install-package xarray-sql
+          uv run --no-project maturin build --release --strip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: releases
-          path: dist
+          name: dist-${{ matrix.os }}
+          path: target/wheels/*
 
-  test-built-dist:
-    needs: build-artifacts
+  build-artifacts-manylinux-x86_64:
     runs-on: ubuntu-latest
     steps:
-      - name: Install uv and setup the python version
-        uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@v4
 
+      - name: Build wheels for manylinux x86_64
+        uses: PyO3/maturin-action@v1
+        env:
+          RUST_BACKTRACE: 1
+        with:
+          rust-toolchain: stable
+          target: x86_64
+          manylinux: 2014
+          rustup-components: rust-std rustfmt
+          args: --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-manylinux-x86_64
+          path: target/wheels/*
+
+  build-artifacts-manylinux-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheels for manylinux arm64
+        uses: PyO3/maturin-action@v1
+        env:
+          RUST_BACKTRACE: 1
+        with:
+          rust-toolchain: stable
+          target: aarch64
+          # Use manylinux_2_28-cross because the manylinux2014-cross has GCC 4.8.5, which causes the build to fail
+          manylinux: 2_28
+          rustup-components: rust-std rustfmt
+          args: --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-manylinux-aarch64
+          path: target/wheels/*
+
+  build-sdist:
+    name: Source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          rust-toolchain: stable
+          manylinux: auto
+          rustup-components: rust-std rustfmt
+          args: --release --sdist --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-sdist
+          path: dist/*
+
+  merge-build-artifacts:
+    runs-on: ubuntu-latest
+    needs:
+      - build-artifacts-mac-win
+      - build-artifacts-manylinux-x86_64
+      - build-artifacts-manylinux-arm64
+      - build-sdist
+    steps:
+      - name: Merge Build Artifacts
+        uses: actions/upload-artifact/merge@v4
+        with:
+          name: dist
+          pattern: dist-*
+
+  verify-built-dist:
+    needs: merge-build-artifacts
+    runs-on: ubuntu-latest
+    steps:
       - uses: actions/download-artifact@v4
         with:
-          name: releases
+          name: dist
           path: dist
+
       - name: List contents of built dist
         run: |
           ls -ltrh
@@ -63,14 +167,17 @@ jobs:
           uv pip install --extra-index-url https://test.pypi.org/simple --upgrade de
           python -c "import xarray_sql; print(xarray_sql.__version__)"
   upload-to-pypi:
-    needs: test-built-dist
-    if: github.event_name == 'release'
+    needs: verify-built-dist
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: releases
+          name: dist
           path: dist
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
 
       - name: Publish package to PyPI
         run: uv publish --token ${{ secrets.PYPI_TOKEN }} --username __token__
