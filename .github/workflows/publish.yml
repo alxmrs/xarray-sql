@@ -51,11 +51,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Configure sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
-
-      - uses: dtolnay/rust-toolchain@stable
 
       - name: Build wheels
         run: |
@@ -81,6 +89,7 @@ jobs:
           target: x86_64
           manylinux: 2014
           rustup-components: rust-std rustfmt
+          sccache: 'true'
           args: --release
 
       - uses: actions/upload-artifact@v4
@@ -103,6 +112,7 @@ jobs:
           # Use manylinux_2_28-cross because the manylinux2014-cross has GCC 4.8.5, which causes the build to fail
           manylinux: 2_28
           rustup-components: rust-std rustfmt
+          sccache: 'true'
           args: --release
 
       - uses: actions/upload-artifact@v4
