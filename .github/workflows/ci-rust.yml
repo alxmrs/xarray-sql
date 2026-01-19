@@ -24,7 +24,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
       - name: Clippy
         run: cargo clippy --all-features --tests -- -D warnings
       - name: Check
