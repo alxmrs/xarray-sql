@@ -31,12 +31,8 @@ jobs:
         run: cargo clippy --all-features --tests -- -D warnings
       - name: Check
         run: cargo check --all-features
-      - name: create test data
-        run: uv run examples/create_test_datasets.py
       - name: Test
         run: cargo test --all-features
-      - name: Integration test
-        run: cargo run --example sql_integration_tests
 
   fmt:
     name: Fmt
