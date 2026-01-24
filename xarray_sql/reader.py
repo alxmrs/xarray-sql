@@ -150,41 +150,6 @@ class XarrayRecordBatchReader:
     return self._schema.__arrow_c_schema__()
 
 
-def read_xarray_lazy(
-    ds: xr.Dataset, chunks: Chunks = None
-) -> XarrayRecordBatchReader:
-  """Create a lazy Arrow stream reader from an xarray Dataset.
-
-  This is the recommended way to register xarray data with DataFusion
-  for lazy evaluation. Data is only read when queries are executed
-  (e.g., during collect()), not during registration.
-
-  Args:
-      ds: An xarray Dataset. All data_vars must share the same dimensions.
-      chunks: Xarray-like chunks specification. If not provided, uses
-          the Dataset's existing chunks.
-
-  Returns:
-      An XarrayRecordBatchReader that implements __arrow_c_stream__.
-
-  Example:
-      >>> from datafusion import SessionContext
-      >>> import xarray as xr
-      >>> from xarray_sql import read_xarray_lazy, LazyArrowStreamTable
-      >>>
-      >>> ds = xr.tutorial.open_dataset('air_temperature')
-      >>> reader = read_xarray_lazy(ds, chunks={'time': 240})
-      >>> table = LazyArrowStreamTable(reader)
-      >>>
-      >>> ctx = SessionContext()
-      >>> ctx.register_table_provider('air', table)
-      >>>
-      >>> # Data is only read here, during collect()
-      >>> result = ctx.sql('SELECT AVG(air) FROM air').collect()
-  """
-  return XarrayRecordBatchReader(ds, chunks)
-
-
 def read_xarray_table(
     ds: xr.Dataset,
     chunks: Chunks = None,

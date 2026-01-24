@@ -1,5 +1,6 @@
 import itertools
 import typing as t
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -183,6 +184,10 @@ def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.RecordBatchReader:
   Returns:
     A PyArrow Table, which is a table representation of the input Dataset.
   """
+  warnings.warn(
+      "This function is eagerly evaluated only. Please use `read_array_table` instead.",
+      DeprecationWarning,
+  )
 
   def pivot_block(b: Block):
     return pivot(ds.isel(b))

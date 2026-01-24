@@ -17,7 +17,7 @@ import xarray as xr
 from datafusion import SessionContext
 
 from ._native import LazyArrowStreamTable
-from .reader import XarrayRecordBatchReader, read_xarray_lazy, read_xarray_table
+from .reader import XarrayRecordBatchReader, read_xarray_table
 
 
 @pytest.fixture
@@ -69,16 +69,6 @@ class TestXarrayRecordBatchReaderCreation:
         f"Expected 0 iterations during reader creation, "
         f"but got {tracker.iteration_count}"
     )
-
-  def test_read_xarray_lazy_does_not_iterate(self, small_ds):
-    """read_xarray_lazy() should NOT iterate through any data."""
-    # We can't use the callback with the public API, but we can verify
-    # basic behavior - no exceptions and no data loaded
-    reader = read_xarray_lazy(small_ds, chunks={"time": 25})
-
-    assert reader is not None
-    assert reader.schema is not None
-    assert not reader._consumed
 
   def test_schema_access_does_not_iterate(self, small_ds):
     """Accessing the schema should NOT trigger iteration."""
