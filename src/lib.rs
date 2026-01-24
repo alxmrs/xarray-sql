@@ -219,7 +219,10 @@ impl LazyArrowStreamTable {
     /// Get the schema of the table as a PyArrow Schema.
     fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         use arrow::pyarrow::ToPyArrow;
-        self.table.schema().to_pyarrow(py).map(|bound| bound.unbind())
+        self.table
+            .schema()
+            .to_pyarrow(py)
+            .map(|bound| bound.unbind())
     }
 
     fn __repr__(&self) -> String {
