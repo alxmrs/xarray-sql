@@ -31,7 +31,7 @@ classifiers = [
 ]
 dependencies = [
     "dask>=2024.8.0",
-    "datafusion==49.0.0",  # This needs to match the cargo datafusion version!!
+    "datafusion==51.0.0", # This needs to match the cargo datafusion version!!
     "xarray>=2024.7.0",
 ]
 
