@@ -29,5 +29,6 @@ repos:
         description: Check if all files follow the rustfmt style.
         entry: cargo fmt -- --config imports_granularity=Module,group_imports=StdExternalCrate
         language: system
+        files: \\.rs$
         types: [ file, rust ]
         pass_filenames: false
