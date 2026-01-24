@@ -6,15 +6,15 @@ edition = "2021"
 exclude = ["perf_tests/*"]
 
 [dependencies]
-arrow = { version = "55.2.0", features = ["pyarrow"] }
+arrow = { version = "57.2.0", features = ["pyarrow"] }
 datafusion = { version = "51.0.0" }
 datafusion-ffi = { version = "51.0.0" }
-pyo3 = { version = "0.24.1", features = ["extension-module"] }
+pyo3 = { version = "0.26.0", features = ["extension-module"] }
 tokio = { version = "1.46.1", features = ["rt"] }
 
 
 [build-dependencies]
-pyo3-build-config = "0.24"
+pyo3-build-config = "0.26"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]

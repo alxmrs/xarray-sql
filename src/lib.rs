@@ -63,7 +63,7 @@ impl PartitionStream for PyArrowStreamPartition {
 
     fn execute(&self, _ctx: Arc<TaskContext>) -> SendableRecordBatchStream {
         // Call the factory to get a fresh stream for this execution
-        let batches: Vec<RecordBatch> = Python::with_gil(|py| {
+        let batches: Vec<RecordBatch> = Python::attach(|py| {
             // Call the factory to get a fresh stream
             let stream_result = self.stream_factory.call0(py);
 
@@ -217,9 +217,9 @@ impl LazyArrowStreamTable {
     }
 
     /// Get the schema of the table as a PyArrow Schema.
-    fn schema(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         use arrow::pyarrow::ToPyArrow;
-        self.table.schema().to_pyarrow(py)
+        self.table.schema().to_pyarrow(py).map(|bound| bound.unbind())
     }
 
     fn __repr__(&self) -> String {
