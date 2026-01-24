@@ -15,4 +15,4 @@ class XarrayContext(SessionContext):
       chunks: Chunks = None,
   ):
     table = read_xarray_table(input_table, chunks)
-    self.register_table(table_name, table)
+    self.register_table_provider(table_name, table)
