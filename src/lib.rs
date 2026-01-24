@@ -9,7 +9,7 @@
 //! The key feature is **lazy evaluation**: data is not read from the Python stream
 //! until query execution time (during `collect()`), not at registration time.
 
-use std::ffi::{c_void, CString};
+use std::ffi::CString;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -211,16 +211,9 @@ impl LazyArrowStreamTable {
         // Create the capsule name
         let name = CString::new("datafusion_table_provider").unwrap();
 
-        // Create the PyCapsule with a destructor closure
+        // Create the PyCapsule without a destructor closure
         // The PyCapsule takes ownership of the FFI_TableProvider
-        PyCapsule::new_with_destructor(
-            py,
-            ffi_provider,
-            Some(name),
-            |_provider: FFI_TableProvider, _context: *mut c_void| {
-                // The FFI_TableProvider will be dropped automatically
-            },
-        )
+        PyCapsule::new(py, ffi_provider, Some(name))
     }
 
     /// Get the schema of the table as a PyArrow Schema.
