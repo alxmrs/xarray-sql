@@ -127,9 +127,9 @@ impl PartitionStream for PyArrowStreamPartition {
                             }
                             Err(e) => {
                                 // Send error and exit
-                                let _ = tx.blocking_send(Err(DataFusionError::Execution(
-                                    format!("Failed to create Arrow stream reader: {e}"),
-                                )));
+                                let _ = tx.blocking_send(Err(DataFusionError::Execution(format!(
+                                    "Failed to create Arrow stream reader: {e}"
+                                ))));
                             }
                         }
                     }
