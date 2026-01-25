@@ -7,7 +7,8 @@ import pyarrow as pa
 import pytest
 import xarray as xr
 
-from .df import explode, read_xarray, block_slices, from_map, pivot, from_map_batched
+from .reader import read_xarray
+from .df import explode, block_slices, from_map, pivot, from_map_batched
 
 
 def rand_wx(start: str, end: str) -> xr.Dataset:

@@ -150,6 +150,23 @@ class XarrayRecordBatchReader:
     return self._schema.__arrow_c_schema__()
 
 
+def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.RecordBatchReader:
+  """Pivots an Xarray Dataset into a PyArrow Table, partitioned by chunks.
+
+  Args:
+    ds: An Xarray Dataset. All `data_vars` mush share the same dimensions.
+    chunks: Xarray-like chunks. If not provided, will default to the Dataset's
+     chunks. The product of the chunk sizes becomes the standard length of each
+     dataframe partition.
+
+  Returns:
+    A PyArrow RecordBatchReader, which is a table representation of the input
+    Dataset.
+  """
+  reader = XarrayRecordBatchReader(ds, chunks=chunks)
+  return pa.RecordBatchReader.from_stream(reader)
+
+
 def read_xarray_table(
     ds: xr.Dataset,
     chunks: Chunks = None,
@@ -181,7 +198,7 @@ def read_xarray_table(
       >>> table = read_xarray_table(ds, chunks={'time': 240})
       >>>
       >>> ctx = SessionContext()
-      >>> ctx.register_table_provider('air', table)
+      >>> ctx.register_table('air', table)
       >>>
       >>> # Data is only read here, during collect()
       >>> result = ctx.sql('SELECT AVG(air) FROM air').collect()
