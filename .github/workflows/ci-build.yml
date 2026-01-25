@@ -55,4 +55,4 @@ jobs:
       - name: The project builds
         run: |
           uv sync --dev --no-install-package xarray-sql
-          uv run --no-project maturin build --uv
+          uv run --no-project maturin build
