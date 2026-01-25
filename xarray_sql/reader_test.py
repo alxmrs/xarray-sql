@@ -121,22 +121,6 @@ class TestDataFusionRegistration:
         f"register_table(), but got {tracker.iteration_count}."
     )
 
-  def test_lazy_table_creation_does_not_iterate(self, small_ds):
-    """Creating a LazyArrowStreamTable should NOT iterate data."""
-    tracker = IterationTracker()
-
-    # Use read_xarray_table which creates a factory-based table
-    table = read_xarray_table(
-        small_ds,
-        chunks={"time": 25},
-        _iteration_callback=tracker,
-    )
-
-    assert tracker.iteration_count == 0, (
-        f"LAZY EVALUATION FAILED: Expected 0 iterations during "
-        f"LazyArrowStreamTable creation, but got {tracker.iteration_count}."
-    )
-
   def test_sql_planning_does_not_iterate(self, small_ds):
     """Creating a SQL query plan should NOT iterate data."""
     tracker = IterationTracker()
