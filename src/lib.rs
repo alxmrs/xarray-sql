@@ -11,13 +11,17 @@
 //! - **Lazy evaluation**: Data is not read from the Python stream until query
 //!   execution time (during `collect()`), not at registration time.
 //!
-//! - **True streaming**: Data is processed in a streaming fashion with bounded
-//!   memory usage. Only a small buffer of batches (default: 4) is held in memory
-//!   at once, enabling processing of datasets larger than available memory.
+//! - **Error propagation**: Errors during batch reading are properly propagated
+//!   to DataFusion and surfaced to the user.
 //!
-//! - **Back-pressure**: The bounded channel between the Python reader and DataFusion
-//!   consumer provides natural back-pressure. If DataFusion processes slowly, the
-//!   Python reader will pause until buffer space is available.
+//! - **Reusable tables**: The factory pattern allows the same table to be queried
+//!   multiple times, with fresh data streams created for each query.
+//!
+//! ## Memory Considerations
+//!
+//! Currently, all batches are loaded into memory when a query executes. This is
+//! due to Python GIL constraints that prevent true streaming with background threads.
+//! For very large datasets, consider using smaller chunks or processing in stages.
 
 use std::ffi::CString;
 use std::fmt::Debug;
@@ -35,17 +39,10 @@ use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion_ffi::table_provider::FFI_TableProvider;
+use futures::stream;
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
-
-/// Default channel buffer size for streaming batches.
-/// This controls how many batches can be buffered between the Python reader thread
-/// and the async DataFusion consumer. A small buffer (2-4) provides good throughput
-/// while keeping memory usage bounded.
-const BATCH_CHANNEL_BUFFER_SIZE: usize = 4;
 
 /// A partition stream that wraps a Python factory function that creates streams.
 ///
@@ -83,70 +80,58 @@ impl PartitionStream for PyArrowStreamPartition {
     fn execute(&self, _ctx: Arc<TaskContext>) -> SendableRecordBatchStream {
         let schema = Arc::clone(&self.schema);
 
-        // Clone the factory reference while holding the GIL.
-        // Py<PyAny> requires GIL access to clone safely.
-        let factory = Python::attach(|py| self.stream_factory.clone_ref(py));
+        // NOTE: We collect all batches synchronously here rather than using a background
+        // thread with streaming. This is a deliberate design choice to avoid a GIL deadlock:
+        //
+        // When Python calls DataFusion's collect(), the Python thread holds the GIL.
+        // If we spawned a background thread to read from Python, that thread would need
+        // to acquire the GIL, but the main thread holds it while waiting for data from
+        // the channel, causing a deadlock.
+        //
+        // The tradeoff: All batches are loaded into memory at query execution time.
+        // For very large datasets, consider using smaller chunks or processing in stages.
+        //
+        // Future improvement: If datafusion-python releases the gil during async operations,
+        // we could revisit the background thread approach for true streaming.
+        let results: Vec<Result<RecordBatch, DataFusionError>> = Python::attach(|py| {
+            // Call the factory to get a fresh stream
+            let stream_result = self.stream_factory.call0(py);
 
-        // Create a bounded channel to stream batches from Python to DataFusion.
-        // The buffer size controls memory usage: only BATCH_CHANNEL_BUFFER_SIZE batches
-        // are held in memory at once, enabling processing of larger-than-memory datasets.
-        let (tx, rx) =
-            mpsc::channel::<Result<RecordBatch, DataFusionError>>(BATCH_CHANNEL_BUFFER_SIZE);
+            match stream_result {
+                Ok(stream_obj) => {
+                    let bound = stream_obj.bind(py);
 
-        // Spawn a background thread to read from Python.
-        // We use a dedicated thread (not tokio::spawn_blocking) because:
-        // 1. We need to hold the Python GIL for the duration of reading
-        // 2. The GIL acquisition is blocking and shouldn't block the async runtime
-        // 3. This allows proper back-pressure via the bounded channel
-        std::thread::spawn(move || {
-            Python::attach(|py| {
-                // Call the factory to get a fresh stream
-                let stream_result = factory.call0(py);
-
-                match stream_result {
-                    Ok(stream_obj) => {
-                        let bound: &Bound<'_, PyAny> = stream_obj.bind(py);
-
-                        match ArrowArrayStreamReader::from_pyarrow_bound(bound) {
-                            Ok(reader) => {
-                                // Stream batches one at a time through the channel
-                                for batch_result in reader {
-                                    let result = batch_result.map_err(|e| {
+                    match ArrowArrayStreamReader::from_pyarrow_bound(bound) {
+                        Ok(reader) => {
+                            // Collect all batches, converting errors to DataFusionError
+                            reader
+                                .map(|result| {
+                                    result.map_err(|e| {
                                         DataFusionError::Execution(format!(
                                             "Failed to read batch from xarray stream: {e}"
                                         ))
-                                    });
-
-                                    // blocking_send will block if the channel is full,
-                                    // providing natural back-pressure
-                                    if tx.blocking_send(result).is_err() {
-                                        // Receiver was dropped (query cancelled), stop reading
-                                        break;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                // Send error and exit
-                                let _ = tx.blocking_send(Err(DataFusionError::Execution(format!(
-                                    "Failed to create Arrow stream reader: {e}"
-                                ))));
-                            }
+                                    })
+                                })
+                                .collect()
+                        }
+                        Err(e) => {
+                            vec![Err(DataFusionError::Execution(format!(
+                                "Failed to create Arrow stream reader: {e}"
+                            )))]
                         }
                     }
-                    Err(e) => {
-                        // Send error and exit
-                        let _ = tx.blocking_send(Err(DataFusionError::Execution(format!(
-                            "Failed to call xarray stream factory: {e}"
-                        ))));
-                    }
                 }
-                // Channel is automatically closed when tx is dropped
-            });
+                Err(e) => {
+                    vec![Err(DataFusionError::Execution(format!(
+                        "Failed to call xarray stream factory: {e}"
+                    )))]
+                }
+            }
         });
 
-        // Wrap the receiver in a stream adapter for DataFusion
-        let receiver_stream = ReceiverStream::new(rx);
-        Box::pin(RecordBatchStreamAdapter::new(schema, receiver_stream))
+        // Create a stream from the collected results
+        let result_stream = stream::iter(results);
+        Box::pin(RecordBatchStreamAdapter::new(schema, result_stream))
     }
 }
 
