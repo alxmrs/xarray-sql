@@ -50,5 +50,9 @@ jobs:
           python-version: 3.11
           enable-cache: true
 
+      # Use the --no-install-package to only install the dependencies
+      # but do not yet build the rust library
       - name: The project builds
-        run: uv build
+        run: |
+          uv sync --dev --no-install-package xarray-sql
+          uv run --no-project maturin build --uv
