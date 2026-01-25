@@ -56,7 +56,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
 
-      - name: Install xarray_sql
-        run: maturin develop --uv
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: develop
+          args: --uv
+
       - name: Run unit tests
         run: uv run pytest -m "not integration"
