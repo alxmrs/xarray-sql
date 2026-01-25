@@ -89,3 +89,7 @@ dev = [
     "pyink>=24.10.1",
     "maturin>=1.9.1",
 ]
+
+[tool.uv]
+# Rebuild package when any rust files change
+cache-keys = [{file = "pyproject.toml"}, {file = "rust/Cargo.toml"}, {file = "**/*.rs"}]
