@@ -57,6 +57,8 @@ jobs:
           enable-cache: true
 
       - name: Install xarray_sql
-        run: uv sync --dev -v
+        run: uv sync --dev --no-install-package xarray-sql
+      - name: build rust
+        run: maturin develop
       - name: Run unit tests
         run: uv run pytest -m "not integration"
