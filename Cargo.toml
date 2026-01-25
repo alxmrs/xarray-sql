@@ -11,7 +11,8 @@ datafusion = { version = "51.0.0" }
 datafusion-ffi = { version = "51.0.0" }
 futures = { version = "0.3" }
 pyo3 = { version = "0.26.0", features = ["extension-module"] }
-tokio = { version = "1.46.1", features = ["rt"] }
+tokio = { version = "1.46.1", features = ["rt", "sync"] }
+tokio-stream = { version = "0.1" }
 
 
 [build-dependencies]
