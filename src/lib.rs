@@ -18,12 +18,14 @@ use arrow::datatypes::SchemaRef;
 use arrow::ffi_stream::ArrowArrayStreamReader;
 use arrow::pyarrow::FromPyArrow;
 use datafusion::catalog::streaming::StreamingTable;
+use datafusion::common::DataFusionError;
 use datafusion::datasource::TableProvider;
 use datafusion::execution::TaskContext;
-use datafusion::physical_plan::memory::MemoryStream;
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion_ffi::table_provider::FFI_TableProvider;
+use futures::stream;
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
 use tokio::runtime::Handle;
@@ -62,8 +64,11 @@ impl PartitionStream for PyArrowStreamPartition {
     }
 
     fn execute(&self, _ctx: Arc<TaskContext>) -> SendableRecordBatchStream {
-        // Call the factory to get a fresh stream for this execution
-        let batches: Vec<RecordBatch> = Python::attach(|py| {
+        let schema = Arc::clone(&self.schema);
+
+        // Call the factory to get a fresh stream for this execution.
+        // Collect results (including errors) to propagate through the stream.
+        let results: Vec<Result<RecordBatch, DataFusionError>> = Python::attach(|py| {
             // Call the factory to get a fresh stream
             let stream_result = self.stream_factory.call0(py);
 
@@ -73,36 +78,37 @@ impl PartitionStream for PyArrowStreamPartition {
 
                     match ArrowArrayStreamReader::from_pyarrow_bound(bound) {
                         Ok(reader) => {
-                            // Collect batches, propagating errors as warnings
-                            // In streaming context, we can't easily return errors,
-                            // so we log and skip failed batches
+                            // Convert Arrow errors to DataFusion errors, preserving all results
                             reader
-                                .filter_map(|result| match result {
-                                    Ok(batch) => Some(batch),
-                                    Err(e) => {
-                                        eprintln!("Warning: Failed to read batch: {e}");
-                                        None
-                                    }
+                                .map(|result| {
+                                    result.map_err(|e| {
+                                        DataFusionError::Execution(format!(
+                                            "Failed to read batch from xarray stream: {e}"
+                                        ))
+                                    })
                                 })
                                 .collect()
                         }
                         Err(e) => {
-                            eprintln!("Warning: Failed to create stream reader: {e}");
-                            vec![]
+                            // Return a single error result for stream reader creation failure
+                            vec![Err(DataFusionError::Execution(format!(
+                                "Failed to create Arrow stream reader: {e}"
+                            )))]
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("Warning: Failed to call stream factory: {e}");
-                    vec![]
+                    // Return a single error result for factory call failure
+                    vec![Err(DataFusionError::Execution(format!(
+                        "Failed to call xarray stream factory: {e}"
+                    )))]
                 }
             }
         });
 
-        Box::pin(
-            MemoryStream::try_new(batches, Arc::clone(&self.schema), None)
-                .expect("MemoryStream creation should not fail with valid schema"),
-        )
+        // Create a stream from the results that will yield errors to DataFusion
+        let result_stream = stream::iter(results);
+        Box::pin(RecordBatchStreamAdapter::new(schema, result_stream))
     }
 }
 

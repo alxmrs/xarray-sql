@@ -3422,6 +3422,7 @@ dependencies = [
  "arrow",
  "datafusion",
  "datafusion-ffi",
+ "futures",
  "pyo3",
  "pyo3-build-config",
  "tokio",
