@@ -93,7 +93,7 @@ class TestXarrayRecordBatchReaderCreation:
 class TestDataFusionRegistration:
   """Tests that DataFusion table registration does NOT trigger iteration.
 
-  These tests use read_xarray_table with register_table_provider()
+  These tests use read_xarray_table with register_table()
   to achieve true lazy evaluation.
   """
 
@@ -114,11 +114,11 @@ class TestDataFusionRegistration:
     )
 
     ctx = SessionContext()
-    ctx.register_table_provider("test_table", table)
+    ctx.register_table("test_table", table)
 
     assert tracker.iteration_count == 0, (
         f"LAZY EVALUATION FAILED: Expected 0 iterations during "
-        f"register_table_provider(), but got {tracker.iteration_count}."
+        f"register_table(), but got {tracker.iteration_count}."
     )
 
   def test_lazy_table_creation_does_not_iterate(self, small_ds):
@@ -148,7 +148,7 @@ class TestDataFusionRegistration:
     )
 
     ctx = SessionContext()
-    ctx.register_table_provider("test_table", table)
+    ctx.register_table("test_table", table)
 
     # Create a query but don't execute it
     query = ctx.sql("SELECT AVG(temperature) FROM test_table")
@@ -178,7 +178,7 @@ class TestDataFusionCollect:
     )
 
     ctx = SessionContext()
-    ctx.register_table_provider("test_table", table)
+    ctx.register_table("test_table", table)
 
     # Verify no iteration yet (lazy registration)
     iteration_before_collect = tracker.iteration_count
@@ -209,7 +209,7 @@ class TestDataFusionCollect:
     )
 
     ctx = SessionContext()
-    ctx.register_table_provider("test_table", table)
+    ctx.register_table("test_table", table)
 
     # Run a query that needs to scan all data
     result = ctx.sql("SELECT COUNT(*) FROM test_table").collect()
@@ -232,7 +232,7 @@ class TestDataFusionCollect:
     )
 
     ctx = SessionContext()
-    ctx.register_table_provider("test_table", table)
+    ctx.register_table("test_table", table)
 
     # Run aggregation
     result = ctx.sql(
@@ -276,7 +276,7 @@ class TestLazyEvaluationEndToEnd:
 
     # Stage 2: Table registration
     ctx = SessionContext()
-    ctx.register_table_provider("test_table", table)
+    ctx.register_table("test_table", table)
     iterations_after_registration = tracker.iteration_count
     assert iterations_after_registration == 0, (
         f"Stage 2 FAILED: Table registration triggered "
@@ -315,7 +315,7 @@ class TestLazyEvaluationEndToEnd:
     )
 
     ctx = SessionContext()
-    ctx.register_table_provider("test_table", table)
+    ctx.register_table("test_table", table)
 
     # First query
     ctx.sql("SELECT COUNT(*) FROM test_table").collect()
@@ -355,7 +355,7 @@ class TestDataIntegrity:
     table = read_xarray_table(small_ds, chunks={"time": 25})
 
     ctx = SessionContext()
-    ctx.register_table_provider("test_table", table)
+    ctx.register_table("test_table", table)
 
     # Get count
     result = ctx.sql("SELECT COUNT(*) as cnt FROM test_table").collect()
@@ -372,7 +372,7 @@ class TestDataIntegrity:
     table = read_xarray_table(small_ds, chunks={"time": 25})
 
     ctx = SessionContext()
-    ctx.register_table_provider("test_table", table)
+    ctx.register_table("test_table", table)
 
     # Get average temperature
     result = ctx.sql(
