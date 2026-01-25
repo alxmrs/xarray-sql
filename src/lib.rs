@@ -105,21 +105,46 @@ impl PartitionStream for PyArrowStreamPartition {
             match state {
                 StreamState::Done => None,
                 StreamState::NotStarted(factory) => {
-                    // First poll: call factory to get iterator
+                    // First poll: call factory to get stream, convert to PyArrow reader
                     Python::attach(|py| {
                         match factory.call0(py) {
                             Ok(stream_obj) => {
-                                // Get Python iterator from the stream object
-                                let bound = stream_obj.bind(py);
-                                match bound.call_method0("__iter__") {
-                                    Ok(iter) => {
-                                        // Get first batch
-                                        let iter_py: Py<PyAny> = iter.unbind();
-                                        read_next_batch(py, iter_py)
+                                // Convert to PyArrow RecordBatchReader via from_stream()
+                                // This works with any object implementing __arrow_c_stream__
+                                let pyarrow = match py.import("pyarrow") {
+                                    Ok(pa) => pa,
+                                    Err(e) => {
+                                        return Some((
+                                            Err(DataFusionError::Execution(format!(
+                                                "Failed to import pyarrow: {e}"
+                                            ))),
+                                            StreamState::Done,
+                                        ))
+                                    }
+                                };
+
+                                let reader_class = match pyarrow.getattr("RecordBatchReader") {
+                                    Ok(cls) => cls,
+                                    Err(e) => {
+                                        return Some((
+                                            Err(DataFusionError::Execution(format!(
+                                                "Failed to get RecordBatchReader class: {e}"
+                                            ))),
+                                            StreamState::Done,
+                                        ))
+                                    }
+                                };
+
+                                // Call RecordBatchReader.from_stream(stream_obj)
+                                match reader_class.call_method1("from_stream", (stream_obj,)) {
+                                    Ok(reader) => {
+                                        // Get first batch from the reader
+                                        let reader_py: Py<PyAny> = reader.unbind();
+                                        read_next_batch(py, reader_py)
                                     }
                                     Err(e) => Some((
                                         Err(DataFusionError::Execution(format!(
-                                            "Failed to get iterator from stream: {e}"
+                                            "Failed to create RecordBatchReader from stream: {e}"
                                         ))),
                                         StreamState::Done,
                                     )),
@@ -145,18 +170,24 @@ impl PartitionStream for PyArrowStreamPartition {
     }
 }
 
-/// Read the next batch from a Python iterator, returning the stream state transition.
+/// Read the next batch from a PyArrow RecordBatchReader, returning the stream state transition.
 fn read_next_batch(
     py: Python<'_>,
-    iterator: Py<PyAny>,
+    reader: Py<PyAny>,
 ) -> Option<(Result<RecordBatch, DataFusionError>, StreamState)> {
-    let bound_iter = iterator.bind(py);
+    let bound_reader = reader.bind(py);
 
-    match bound_iter.call_method0("__next__") {
+    // Call read_next_batch() which returns None when exhausted
+    match bound_reader.call_method0("read_next_batch") {
         Ok(batch_obj) => {
+            // Check if None (stream exhausted)
+            if batch_obj.is_none() {
+                return None; // Stream exhausted normally
+            }
+
             // Convert PyArrow RecordBatch to Arrow RecordBatch
             match RecordBatch::from_pyarrow_bound(&batch_obj) {
-                Ok(batch) => Some((Ok(batch), StreamState::Active(iterator))),
+                Ok(batch) => Some((Ok(batch), StreamState::Active(reader))),
                 Err(e) => Some((
                     Err(DataFusionError::Execution(format!(
                         "Failed to convert batch from PyArrow: {e}"
@@ -166,18 +197,13 @@ fn read_next_batch(
             }
         }
         Err(e) => {
-            // Check if this is StopIteration (normal end of iterator)
-            if e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
-                None // Stream exhausted normally
-            } else {
-                // Actual error
-                Some((
-                    Err(DataFusionError::Execution(format!(
-                        "Error reading batch from stream: {e}"
-                    ))),
-                    StreamState::Done,
-                ))
-            }
+            // Actual error reading batch
+            Some((
+                Err(DataFusionError::Execution(format!(
+                    "Error reading batch from stream: {e}"
+                ))),
+                StreamState::Done,
+            ))
         }
     }
 }
