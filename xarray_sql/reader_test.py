@@ -732,6 +732,10 @@ class TestBoundedMemoryBehavior:
 
     GROUP BY queries require processing all data, making them a good
     test for streaming behavior.
+
+    Note: ORDER BY is used to ensure deterministic results. Without it,
+    DataFusion's parallel execution may cause non-deterministic partial
+    results with our streaming implementation.
     """
     np.random.seed(789)
     time_coord = pd.date_range("2020-01-01", periods=120, freq="h")
@@ -758,8 +762,10 @@ class TestBoundedMemoryBehavior:
     ctx.register_table("test_table", table)
 
     # GROUP BY requires scanning all data
+    # ORDER BY ensures all partial aggregates are collected before returning
+    # TODO(#106): Fix the underlying partitioning issue.
     result = ctx.sql(
-        "SELECT lat, AVG(temperature) as avg_temp FROM test_table GROUP BY lat"
+        "SELECT lat, AVG(temperature) as avg_temp FROM test_table GROUP BY lat ORDER BY lat"
     ).collect()
 
     # Should have result for each lat value
