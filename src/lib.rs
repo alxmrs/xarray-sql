@@ -105,50 +105,12 @@ impl PartitionStream for PyArrowStreamPartition {
             match state {
                 StreamState::Done => None,
                 StreamState::NotStarted(factory) => {
-                    // First poll: call factory to get stream, convert to PyArrow reader
+                    // First poll: call factory to get a PyArrow RecordBatchReader
                     Python::attach(|py| {
                         match factory.call0(py) {
-                            Ok(stream_obj) => {
-                                // Convert to PyArrow RecordBatchReader via from_stream()
-                                // This works with any object implementing __arrow_c_stream__
-                                let pyarrow = match py.import("pyarrow") {
-                                    Ok(pa) => pa,
-                                    Err(e) => {
-                                        return Some((
-                                            Err(DataFusionError::Execution(format!(
-                                                "Failed to import pyarrow: {e}"
-                                            ))),
-                                            StreamState::Done,
-                                        ))
-                                    }
-                                };
-
-                                let reader_class = match pyarrow.getattr("RecordBatchReader") {
-                                    Ok(cls) => cls,
-                                    Err(e) => {
-                                        return Some((
-                                            Err(DataFusionError::Execution(format!(
-                                                "Failed to get RecordBatchReader class: {e}"
-                                            ))),
-                                            StreamState::Done,
-                                        ))
-                                    }
-                                };
-
-                                // Call RecordBatchReader.from_stream(stream_obj)
-                                match reader_class.call_method1("from_stream", (stream_obj,)) {
-                                    Ok(reader) => {
-                                        // Get first batch from the reader
-                                        let reader_py: Py<PyAny> = reader.unbind();
-                                        read_next_batch(py, reader_py)
-                                    }
-                                    Err(e) => Some((
-                                        Err(DataFusionError::Execution(format!(
-                                            "Failed to create RecordBatchReader from stream: {e}"
-                                        ))),
-                                        StreamState::Done,
-                                    )),
-                                }
+                            Ok(reader) => {
+                                // Factory returns a RecordBatchReader directly
+                                read_next_batch(py, reader)
                             }
                             Err(e) => Some((
                                 Err(DataFusionError::Execution(format!(
@@ -171,6 +133,10 @@ impl PartitionStream for PyArrowStreamPartition {
 }
 
 /// Read the next batch from a PyArrow RecordBatchReader, returning the stream state transition.
+///
+/// Handles both:
+/// - `read_next_batch()` returning None (PyArrow RecordBatchReader exhausted)
+/// - `StopIteration` exception (Python iterator protocol)
 fn read_next_batch(
     py: Python<'_>,
     reader: Py<PyAny>,
@@ -197,6 +163,11 @@ fn read_next_batch(
             }
         }
         Err(e) => {
+            // Handle StopIteration as normal end of iteration (Python iterator protocol)
+            if e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
+                return None; // Stream exhausted normally
+            }
+
             // Actual error reading batch
             Some((
                 Err(DataFusionError::Execution(format!(

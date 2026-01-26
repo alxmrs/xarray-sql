@@ -210,10 +210,11 @@ def read_xarray_table(
   # Get schema from dataset without creating a stream
   schema = _parse_schema(ds)
 
-  # Create a factory function that produces fresh streams on each call
-  def make_stream() -> XarrayRecordBatchReader:
-    return XarrayRecordBatchReader(
+  # Create a factory function that produces fresh RecordBatchReaders on each call
+  def make_stream() -> pa.RecordBatchReader:
+    stream = XarrayRecordBatchReader(
         ds, chunks, _iteration_callback=_iteration_callback
     )
+    return pa.RecordBatchReader.from_stream(stream)
 
   return LazyArrowStreamTable(make_stream, schema)
