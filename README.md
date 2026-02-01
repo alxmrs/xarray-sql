@@ -5,7 +5,7 @@ _Query [Xarray](https://xarray.dev/) with SQL_
 [![ci](https://github.com/alxmrs/xarray-sql/actions/workflows/ci.yml/badge.svg)](https://github.com/alxmrs/xarray-sql/actions/workflows/ci.yml)
 [![lint](https://github.com/alxmrs/xarray-sql/actions/workflows/lint.yml/badge.svg)](https://github.com/alxmrs/xarray-sql/actions/workflows/lint.yml)
 [![ci-build](https://github.com/alxmrs/xarray-sql/actions/workflows/ci-build.yml/badge.svg)](https://github.com/alxmrs/xarray-sql/actions/workflows/ci-build.yml)
-[![ci-rust](https://github.com/alxmrs/xarray-sql/actions/workflows/ci-rust.yml/badge.svg)](https://github.com/alxmrs/xarray-sql/actions/workflows/ci-rust.yml)
+[![rust-lint](https://github.com/alxmrs/xarray-sql/actions/workflows/rust-lint.yml/badge.svg)](https://github.com/alxmrs/xarray-sql/actions/workflows/rust-lint.yml)
 
 ```shell
 pip install xarray-sql
