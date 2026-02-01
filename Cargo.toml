@@ -7,6 +7,7 @@ exclude = ["perf_tests/*"]
 
 [dependencies]
 arrow = { version = "57.2.0", features = ["pyarrow"] }
+async-stream = "0.3"
 datafusion = { version = "51.0.0" }
 datafusion-ffi = { version = "51.0.0" }
 futures = { version = "0.3" }

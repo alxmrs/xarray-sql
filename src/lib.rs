@@ -40,6 +40,7 @@ use std::sync::Arc;
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use arrow::pyarrow::FromPyArrow;
+use async_stream::try_stream;
 use datafusion::catalog::streaming::StreamingTable;
 use datafusion::common::DataFusionError;
 use datafusion::datasource::TableProvider;
@@ -48,7 +49,6 @@ use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion_ffi::table_provider::FFI_TableProvider;
-use futures::stream::unfold;
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
 use tokio::runtime::Handle;
@@ -81,19 +81,6 @@ impl Debug for PyArrowStreamPartition {
     }
 }
 
-/// State for the lazy stream.
-///
-/// The stream progresses through states: NotStarted -> Active -> Done.
-/// Since this is a single partition with sequential batch reads, no Mutex is needed.
-enum StreamState {
-    /// Factory not yet called
-    NotStarted(Py<PyAny>),
-    /// Reader is actively yielding batches
-    Active(Py<PyAny>),
-    /// Stream has ended (exhausted or error)
-    Done,
-}
-
 impl PartitionStream for PyArrowStreamPartition {
     fn schema(&self) -> &SchemaRef {
         &self.schema
@@ -105,72 +92,51 @@ impl PartitionStream for PyArrowStreamPartition {
         // Clone the factory with the GIL held
         let factory = Python::attach(|py| self.stream_factory.clone_ref(py));
 
-        // Create a lazy stream using unfold. Each poll acquires the GIL and reads one batch.
-        // This is a single-partition stream with sequential batch reads.
-        let batch_stream = unfold(StreamState::NotStarted(factory), |state| async move {
-            match state {
-                StreamState::Done => None,
+        // Create a lazy stream using try_stream! macro.
+        // This is cleaner than manual state management with unfold.
+        // Each iteration acquires the GIL and reads one batch.
+        let batch_stream = try_stream! {
+            // Call factory to get the PyArrow RecordBatchReader
+            let reader: Py<PyAny> = Python::attach(|py| {
+                factory.call0(py).map_err(|e| {
+                    DataFusionError::Execution(format!("Failed to call stream factory: {e}"))
+                })
+            })?;
 
-                StreamState::NotStarted(factory) => {
-                    // First poll: call factory to get a PyArrow RecordBatchReader
-                    Python::attach(|py| match factory.call0(py) {
-                        Ok(reader) => read_next_batch(py, reader),
-                        Err(e) => Some((
-                            Err(DataFusionError::Execution(format!(
-                                "Failed to call stream factory: {e}"
-                            ))),
-                            StreamState::Done,
-                        )),
-                    })
-                }
+            // Read batches until StopIteration
+            loop {
+                let batch_result = Python::attach(|py| {
+                    let bound_reader = reader.bind(py);
+                    match bound_reader.call_method0("read_next_batch") {
+                        Ok(batch_obj) => {
+                            match RecordBatch::from_pyarrow_bound(&batch_obj) {
+                                Ok(batch) => Ok(Some(batch)),
+                                Err(e) => Err(DataFusionError::Execution(format!(
+                                    "Failed to convert batch from PyArrow: {e}"
+                                ))),
+                            }
+                        }
+                        Err(e) => {
+                            if e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
+                                Ok(None) // Stream exhausted normally
+                            } else {
+                                Err(DataFusionError::Execution(format!(
+                                    "Error reading batch from stream: {e}"
+                                )))
+                            }
+                        }
+                    }
+                });
 
-                StreamState::Active(reader) => {
-                    // Subsequent polls: read next batch from reader
-                    Python::attach(|py| read_next_batch(py, reader))
+                match batch_result {
+                    Ok(Some(batch)) => yield batch,
+                    Ok(None) => break,
+                    Err(e) => Err(e)?,
                 }
             }
-        });
+        };
 
         Box::pin(RecordBatchStreamAdapter::new(schema, batch_stream))
-    }
-}
-
-/// Read the next batch from a PyArrow RecordBatchReader.
-///
-/// Returns the batch and next state, or None if the stream is exhausted.
-/// PyArrow's `read_next_batch()` raises `StopIteration` when exhausted.
-fn read_next_batch(
-    py: Python<'_>,
-    reader: Py<PyAny>,
-) -> Option<(Result<RecordBatch, DataFusionError>, StreamState)> {
-    let bound_reader = reader.bind(py);
-
-    match bound_reader.call_method0("read_next_batch") {
-        Ok(batch_obj) => {
-            // Convert PyArrow RecordBatch to Arrow RecordBatch
-            match RecordBatch::from_pyarrow_bound(&batch_obj) {
-                Ok(batch) => Some((Ok(batch), StreamState::Active(reader))),
-                Err(e) => Some((
-                    Err(DataFusionError::Execution(format!(
-                        "Failed to convert batch from PyArrow: {e}"
-                    ))),
-                    StreamState::Done,
-                )),
-            }
-        }
-        Err(e) => {
-            // StopIteration signals normal end of stream
-            if e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
-                None
-            } else {
-                Some((
-                    Err(DataFusionError::Execution(format!(
-                        "Error reading batch from stream: {e}"
-                    ))),
-                    StreamState::Done,
-                ))
-            }
-        }
     }
 }
 
