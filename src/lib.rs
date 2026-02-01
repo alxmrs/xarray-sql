@@ -31,7 +31,7 @@
 //! DataFusion's async runtime. To ensure complete results:
 //! - Add ORDER BY to aggregation queries, or
 //! - Use `SessionConfig().with_target_partitions(1)` for single-threaded execution
-//!   TODO(#106): Implenet proper parallelism and partition handling.
+//!   TODO(#106): Implement proper parallelism and partition handling.
 
 use std::ffi::CString;
 use std::fmt::Debug;
