@@ -24,14 +24,12 @@
 //! incrementally. This enables processing of larger-than-memory datasets when combined
 //! with DataFusion's streaming execution.
 //!
-//! ## Parallel Execution Note
+//! ## Parallel Execution
 //!
-//! When using DataFusion's parallel execution (multiple partitions), aggregation queries
-//! without ORDER BY may return partial results due to how our stream interacts with
-//! DataFusion's async runtime. To ensure complete results:
-//! - Add ORDER BY to aggregation queries, or
-//! - Use `SessionConfig().with_target_partitions(1)` for single-threaded execution
-//!   TODO(#106): Implement proper parallelism and partition handling.
+//! Each xarray chunk becomes a separate partition, enabling parallel execution across
+//! multiple cores. Due to a bug in DataFusion v51.0.0's `collect()` method, aggregation
+//! queries should use `to_arrow_table()` instead to ensure complete results.
+//! TODO(#107): Upgrading to the latest datafusion-python (52+) should fix this.
 
 use std::ffi::CString;
 use std::fmt::Debug;
@@ -140,40 +138,44 @@ impl PartitionStream for PyArrowStreamPartition {
     }
 }
 
-/// A lazy table provider that wraps a Python stream factory.
+/// A lazy table provider that wraps Python stream factory functions.
 ///
 /// This class implements the `__datafusion_table_provider__` protocol, allowing
 /// it to be registered with DataFusion's `SessionContext.register_table()`.
 ///
 /// Data is NOT read until query execution time - this enables true lazy evaluation.
-/// The factory function is called on each query execution to create a fresh stream,
-/// allowing the same table to be queried multiple times.
+/// Each partition has its own factory function that is called on query execution
+/// to create a fresh stream, enabling true parallelism in DataFusion.
+///
+/// # Note
+///
+/// Due to a bug in DataFusion v51.0.0's `collect()` method, use `to_arrow_table()`
+/// instead for aggregation queries to ensure complete results.
 ///
 /// # Example
 ///
 /// ```python
 /// from datafusion import SessionContext
-/// from xarray_sql import LazyArrowStreamTable, XarrayRecordBatchReader
+/// from xarray_sql import LazyArrowStreamTable
+/// import pyarrow as pa
 ///
-/// # Create a factory that produces lazy readers
-/// def make_reader():
-///     return XarrayRecordBatchReader(ds, chunks={'time': 240})
+/// # Create factories for each partition (chunk)
+/// factories = [
+///     lambda: pa.RecordBatchReader.from_batches(schema, batches_chunk_0),
+///     lambda: pa.RecordBatchReader.from_batches(schema, batches_chunk_1),
+/// ]
 ///
-/// # Get schema from a sample reader
-/// sample = make_reader()
-/// schema = sample.schema
-///
-/// # Wrap factory in lazy table - NO DATA LOADED
-/// table = LazyArrowStreamTable(make_reader, schema)
+/// # Wrap factories in lazy table - NO DATA LOADED
+/// table = LazyArrowStreamTable(factories, schema)
 ///
 /// # Register with DataFusion - STILL NO DATA LOADED
 /// ctx = SessionContext()
 /// ctx.register_table("air", table)
 ///
-/// # Data only loaded HERE during collect()
-/// # Each query creates a fresh stream via the factory
-/// result = ctx.sql("SELECT AVG(air) FROM air").collect()
-/// result2 = ctx.sql("SELECT * FROM air LIMIT 10").collect()  # Works!
+/// # Data only loaded HERE during query execution
+/// # Each partition runs in parallel with its own factory
+/// # Use to_arrow_table() for aggregation queries
+/// result = ctx.sql("SELECT AVG(air) FROM air").to_arrow_table()
 /// ```
 #[pyclass(name = "LazyArrowStreamTable")]
 struct LazyArrowStreamTable {
@@ -183,19 +185,21 @@ struct LazyArrowStreamTable {
 
 #[pymethods]
 impl LazyArrowStreamTable {
-    /// Create a new LazyArrowStreamTable from a stream factory function.
+    /// Create a new LazyArrowStreamTable from stream factory functions.
     ///
     /// Args:
-    ///     stream_factory: A callable that returns a Python object implementing
-    ///             the Arrow PyCapsule interface (`__arrow_c_stream__`).
-    ///             Called on each query execution to create a fresh stream.
-    ///     schema: A PyArrow Schema for the table. Required since the factory
-    ///             hasn't been called yet.
+    ///     stream_factories: A list of callables, each returning a Python object
+    ///             implementing the Arrow PyCapsule interface (`__arrow_c_stream__`).
+    ///             Each factory represents one partition, enabling parallel execution.
+    ///             Called on each query execution to create fresh streams.
+    ///     schema: A PyArrow Schema for the table. Required since the factories
+    ///             haven't been called yet.
     ///
     /// Raises:
     ///     TypeError: If the schema is not a valid PyArrow Schema.
+    ///     ValueError: If stream_factories is empty.
     #[new]
-    fn new(stream_factory: &Bound<'_, PyAny>, schema: &Bound<'_, PyAny>) -> PyResult<Self> {
+    fn new(stream_factories: &Bound<'_, PyAny>, schema: &Bound<'_, PyAny>) -> PyResult<Self> {
         // Convert the PyArrow schema to Arrow schema
         use arrow::datatypes::Schema;
         use arrow::pyarrow::FromPyArrow;
@@ -205,17 +209,34 @@ impl LazyArrowStreamTable {
         })?;
         let schema_ref = Arc::new(arrow_schema);
 
-        // Create the partition stream with the factory
-        let partition =
-            PyArrowStreamPartition::new(stream_factory.clone().unbind(), schema_ref.clone());
+        // Extract factories from the Python list
+        let factories: Vec<Py<PyAny>> = stream_factories.extract().map_err(|e| {
+            pyo3::exceptions::PyTypeError::new_err(format!(
+                "stream_factories must be a list of callables: {e}"
+            ))
+        })?;
 
-        // Create the StreamingTable
-        let table =
-            StreamingTable::try_new(schema_ref, vec![Arc::new(partition)]).map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Failed to create StreamingTable: {e}"
-                ))
-            })?;
+        if factories.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "stream_factories must not be empty",
+            ));
+        }
+
+        // Create one partition per factory
+        let partitions: Vec<Arc<dyn PartitionStream>> = factories
+            .into_iter()
+            .map(|factory| {
+                Arc::new(PyArrowStreamPartition::new(factory, schema_ref.clone()))
+                    as Arc<dyn PartitionStream>
+            })
+            .collect();
+
+        // Create the StreamingTable with multiple partitions
+        let table = StreamingTable::try_new(schema_ref, partitions).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Failed to create StreamingTable: {e}"
+            ))
+        })?;
 
         Ok(Self {
             table: Arc::new(table),
@@ -236,7 +257,7 @@ impl LazyArrowStreamTable {
         // Try to get the current tokio runtime handle (available when called from DataFusion context)
         let runtime = Handle::try_current().ok();
 
-        // Create FFI wrapper (v49 API takes 3 arguments)
+        // Create FFI wrapper
         let ffi_provider = FFI_TableProvider::new(
             provider, false, // can_support_pushdown_filters
             runtime,

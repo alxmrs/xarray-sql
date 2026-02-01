@@ -511,8 +511,8 @@ class TestStreamingBehavior:
         tracker.batch_count == 4
     ), f"Expected 4 batches, got {tracker.batch_count}"
 
-  def test_streaming_preserves_order(self, small_ds):
-    """Verify that streaming preserves the order of batches."""
+  def test_all_partitions_processed(self, small_ds):
+    """Verify that all partitions are processed (order may vary with parallelism)."""
     blocks_seen = []
 
     def track_order(block):
@@ -529,17 +529,16 @@ class TestStreamingBehavior:
     ctx.register_table("test_table", table)
     ctx.sql("SELECT * FROM test_table").collect()
 
-    # Should have 4 blocks
+    # Should have 4 blocks/partitions
     assert len(blocks_seen) == 4
 
-    # Blocks should be in order (each slice should start after previous)
-    for i in range(1, len(blocks_seen)):
-      prev_end = blocks_seen[i - 1].stop
-      curr_start = blocks_seen[i].start
-      assert curr_start == prev_end, (
-          f"Block {i} starts at {curr_start}, expected {prev_end}. "
-          f"Blocks are out of order!"
-      )
+    # All blocks should be present (though order may vary due to parallelism)
+    # Extract start positions and verify they cover all expected ranges
+    starts = sorted([b.start for b in blocks_seen])
+    expected_starts = [0, 25, 50, 75]
+    assert (
+        starts == expected_starts
+    ), f"Expected partition starts {expected_starts}, got {starts}"
 
   def test_large_dataset_streams_correctly(self):
     """Test streaming with a larger dataset to verify memory behavior.
@@ -733,9 +732,10 @@ class TestBoundedMemoryBehavior:
     GROUP BY queries require processing all data, making them a good
     test for streaming behavior.
 
-    Note: ORDER BY is used to ensure deterministic results. Without it,
-    DataFusion's parallel execution may cause non-deterministic partial
-    results with our streaming implementation.
+    Note: We use to_arrow_table() instead of collect() due to a bug in
+    DataFusion v51.0.0 where collect() returns partial results for
+    parallel aggregation queries.
+    # TODO(#107): Upgrade to latest datafusion-python, which has the fix.
     """
     np.random.seed(789)
     time_coord = pd.date_range("2020-01-01", periods=120, freq="h")
@@ -751,7 +751,7 @@ class TestBoundedMemoryBehavior:
 
     tracker = StreamingTracker()
 
-    # 12 batches
+    # 12 partitions (one per chunk)
     table = read_xarray_table(
         ds,
         chunks={"time": 10},
@@ -762,20 +762,19 @@ class TestBoundedMemoryBehavior:
     ctx.register_table("test_table", table)
 
     # GROUP BY requires scanning all data
-    # ORDER BY ensures all partial aggregates are collected before returning
-    # TODO(#106): Fix the underlying partitioning issue.
+    # Use to_arrow_table() to avoid DataFusion collect() bug
     result = ctx.sql(
-        "SELECT lat, AVG(temperature) as avg_temp FROM test_table GROUP BY lat ORDER BY lat"
-    ).collect()
+        "SELECT lat, AVG(temperature) as avg_temp FROM test_table GROUP BY lat"
+    ).to_arrow_table()
 
     # Should have result for each lat value
-    df = result[0].to_pandas()
+    df = result.to_pandas()
     assert len(df) == 5, f"Expected 5 lat groups, got {len(df)}"
 
-    # All batches processed
+    # All partitions processed
     assert (
         tracker.batch_count == 12
-    ), f"Expected 12 batches, got {tracker.batch_count}"
+    ), f"Expected 12 partitions, got {tracker.batch_count}"
 
 
 class TestErrorPropagation:
@@ -792,7 +791,8 @@ class TestErrorPropagation:
       raise ValueError("Factory intentionally failed")
 
     schema = pa.schema([("value", pa.int64())])
-    table = LazyArrowStreamTable(failing_factory, schema)
+    # API now requires a list of factories (one per partition)
+    table = LazyArrowStreamTable([failing_factory], schema)
 
     ctx = SessionContext()
     ctx.register_table("test_table", table)

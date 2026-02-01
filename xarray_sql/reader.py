@@ -154,7 +154,7 @@ def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.RecordBatchReader:
   """Pivots an Xarray Dataset into a PyArrow Table, partitioned by chunks.
 
   Args:
-    ds: An Xarray Dataset. All `data_vars` mush share the same dimensions.
+    ds: An Xarray Dataset. All `data_vars` must share the same dimensions.
     chunks: Xarray-like chunks. If not provided, will default to the Dataset's
      chunks. The product of the chunk sizes becomes the standard length of each
      dataframe partition.
@@ -176,8 +176,24 @@ def read_xarray_table(
   """Create a lazy DataFusion table from an xarray Dataset.
 
   This is the simplest way to register xarray data with DataFusion.
-  Data is only read when queries are executed (during collect()),
-  not during registration. The table can be queried multiple times.
+  Data is only read when queries are executed, not during registration.
+  The table can be queried multiple times.
+
+  Each chunk becomes a separate partition, enabling DataFusion's parallel
+  execution across multiple cores.
+
+  Note:
+      Due to a bug in DataFusion v51.0.0's collect() method, use
+      `to_arrow_table()` instead of `collect()` for aggregation queries
+      to ensure complete results::
+
+          # Correct - use to_arrow_table()
+          result = ctx.sql('SELECT lat, AVG(temp) FROM t GROUP BY lat').to_arrow_table()
+
+          # May return partial results with collect()
+          result = ctx.sql('SELECT lat, AVG(temp) FROM t GROUP BY lat').collect()
+
+      This should be fixed when we upgrade datafusion-python to 52 (#107).
 
   Args:
       ds: An xarray Dataset. All data_vars must share the same dimensions.
@@ -200,21 +216,38 @@ def read_xarray_table(
       >>> ctx = SessionContext()
       >>> ctx.register_table('air', table)
       >>>
-      >>> # Data is only read here, during collect()
-      >>> result = ctx.sql('SELECT AVG(air) FROM air').collect()
+      >>> # Data is only read here, during query execution
+      >>> result = ctx.sql('SELECT AVG(air) FROM air').to_arrow_table()
       >>> # Can query again - each query creates a fresh stream
-      >>> result2 = ctx.sql('SELECT * FROM air LIMIT 10').collect()
+      >>> result2 = ctx.sql('SELECT * FROM air LIMIT 10').to_arrow_table()
   """
   from ._native import LazyArrowStreamTable
 
   # Get schema from dataset without creating a stream
   schema = _parse_schema(ds)
 
-  # Create a factory function that produces fresh RecordBatchReaders on each call
-  def make_stream() -> pa.RecordBatchReader:
-    stream = XarrayRecordBatchReader(
-        ds, chunks, _iteration_callback=_iteration_callback
-    )
-    return pa.RecordBatchReader.from_stream(stream)
+  blocks = block_slices(ds, chunks)
 
-  return LazyArrowStreamTable(make_stream, schema)
+  # Create a factory function for each block (partition)
+  # Each factory produces a RecordBatchReader for its specific chunk
+  def make_partition_factory(
+      block: Block,
+  ) -> t.Callable[[], pa.RecordBatchReader]:
+    """Create a factory function for a specific block/chunk."""
+
+    def make_stream() -> pa.RecordBatchReader:
+      # Call the iteration callback if provided (for testing)
+      if _iteration_callback is not None:
+        _iteration_callback(block)
+
+      # Extract just this block from the dataset and convert to Arrow
+      df = pivot(ds.isel(block))
+      batch = pa.RecordBatch.from_pandas(df, schema=schema)
+      return pa.RecordBatchReader.from_batches(schema, [batch])
+
+    return make_stream
+
+  # Create one factory per block
+  factories = [make_partition_factory(block) for block in blocks]
+
+  return LazyArrowStreamTable(factories, schema)
