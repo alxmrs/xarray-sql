@@ -1,4 +1,4 @@
-name: ci-rust
+name: rust-lint
 
 on:
   push:
