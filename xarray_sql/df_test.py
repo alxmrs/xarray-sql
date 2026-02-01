@@ -7,7 +7,8 @@ import pyarrow as pa
 import pytest
 import xarray as xr
 
-from .df import explode, read_xarray, block_slices, from_map, pivot, from_map_batched
+from .reader import read_xarray
+from .df import explode, block_slices, from_map, pivot, from_map_batched
 
 
 def rand_wx(start: str, end: str) -> xr.Dataset:
@@ -338,26 +339,3 @@ def test_read_xarray_loads_one_chunk_at_a_time(large_ds):
   assert max(peaks) < large_ds.nbytes
 
   tracemalloc.stop()
-
-
-@pytest.mark.integration
-@pytest.mark.gcs
-def test_open_era5():
-  """Test opening ERA5 dataset from Google Cloud Storage."""
-  era5_ds = xr.open_zarr(
-      "gs://gcp-public-data-arco-era5/ar/1959-2022-full_37-1h-0p25deg-chunk-1.zarr-v2",
-      chunks={"time": 240, "level": 1},
-  )
-  era5_wind_df = read_xarray(
-      era5_ds[["u_component_of_wind", "v_component_of_wind"]]
-  )
-
-  expected_columns = [
-      "time",
-      "level",
-      "latitude",
-      "longitude",
-      "u_component_of_wind",
-      "v_component_of_wind",
-  ]
-  assert list(era5_wind_df.columns) == expected_columns

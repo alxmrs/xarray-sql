@@ -41,7 +41,7 @@ ctx.from_dataset('air', ds, chunks=dict(time=24))  # the dataset needs to be chu
 
 result = ctx.sql('''
   SELECT
-    "lat", "lon", AVG("air") as air_total
+    "lat", "lon", AVG("air") as air_avg
   FROM
     "air"
   GROUP BY
@@ -49,7 +49,7 @@ result = ctx.sql('''
 ''')
 # DataFrame()
 # +------+-------+--------------------+
-# | lat  | lon   | air_total          |
+# | lat  | lon   | air_avg            |
 # +------+-------+--------------------+
 # | 75.0 | 205.0 | 259.88662671232834 |
 # | 75.0 | 207.5 | 259.48268150684896 |

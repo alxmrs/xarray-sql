@@ -1,0 +1,24 @@
+[package]
+name = "xarray_sql"
+version = "0.1.0"
+authors = ["Alex Merose"]
+edition = "2021"
+exclude = ["perf_tests/*"]
+
+[dependencies]
+arrow = { version = "57.2.0", features = ["pyarrow"] }
+async-stream = "0.3"
+datafusion = { version = "51.0.0" }
+datafusion-ffi = { version = "51.0.0" }
+futures = { version = "0.3" }
+pyo3 = { version = "0.26.0", features = ["extension-module"] }
+tokio = { version = "1.46.1", features = ["rt"] }
+
+
+[build-dependencies]
+pyo3-build-config = "0.26"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "xarray_sql"
+crate-type = ["cdylib", "rlib"]
