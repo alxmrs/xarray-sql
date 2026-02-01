@@ -1,9 +1,11 @@
 # xarray-sql
 
-_Query Xarray with SQL_
+_Query [Xarray](https://xarray.dev/) with SQL_
 
 [![ci](https://github.com/alxmrs/xarray-sql/actions/workflows/ci.yml/badge.svg)](https://github.com/alxmrs/xarray-sql/actions/workflows/ci.yml)
 [![lint](https://github.com/alxmrs/xarray-sql/actions/workflows/lint.yml/badge.svg)](https://github.com/alxmrs/xarray-sql/actions/workflows/lint.yml)
+[![ci-build](https://github.com/alxmrs/xarray-sql/actions/workflows/ci-build.yml/badge.svg)](https://github.com/alxmrs/xarray-sql/actions/workflows/ci-build.yml)
+[![ci-rust](https://github.com/alxmrs/xarray-sql/actions/workflows/ci-rust.yml/badge.svg)](https://github.com/alxmrs/xarray-sql/actions/workflows/ci-rust.yml)
 
 ```shell
 pip install xarray-sql
@@ -22,22 +24,7 @@ ds = xr.tutorial.open_dataset('air_temperature')
 # The same as a dask-sql Context; i.e. an Apache DataFusion Context.
 ctx = xql.XarrayContext()
 ctx.from_dataset('air', ds, chunks=dict(time=24))  # the dataset needs to be chunked!
-# DataFrame()
-# +------+---------------------+-------+--------------------+
-# | lat  | time                | lon   | air                |
-# +------+---------------------+-------+--------------------+
-# | 75.0 | 2013-01-01T00:00:00 | 200.0 | 241.20000000000002 |
-# | 75.0 | 2013-01-01T00:00:00 | 202.5 | 242.5              |
-# | 75.0 | 2013-01-01T00:00:00 | 205.0 | 243.5              |
-# | 75.0 | 2013-01-01T00:00:00 | 207.5 | 244.0              |
-# | 75.0 | 2013-01-01T00:00:00 | 210.0 | 244.1              |
-# | 75.0 | 2013-01-01T00:00:00 | 212.5 | 243.89000000000001 |
-# | 75.0 | 2013-01-01T00:00:00 | 215.0 | 243.6              |
-# | 75.0 | 2013-01-01T00:00:00 | 217.5 | 243.1              |
-# | 75.0 | 2013-01-01T00:00:00 | 220.0 | 242.5              |
-# | 75.0 | 2013-01-01T00:00:00 | 222.5 | 241.89000000000001 |
-# +------+---------------------+-------+--------------------+
-# Data truncated.
+# data is only materialized when we make a query.
 
 result = ctx.sql('''
   SELECT
@@ -56,24 +43,24 @@ result = ctx.sql('''
 # | 75.0 | 230.0 | 258.9192123287667  |
 # | 75.0 | 275.0 | 257.07574315068456 |
 # | 75.0 | 322.5 | 250.11792123287654 |
-# | 75.0 | 325.0 | 250.81590068493125 |
+# | 75.0 | 325.0 | 250.81590068493134 |
 # | 72.5 | 205.0 | 262.74933904109537 |
 # | 72.5 | 207.5 | 262.5384315068488  |
-# | 72.5 | 230.0 | 260.8287945205475  |
-# | 72.5 | 275.0 | 257.30633219178037 |
+# | 72.5 | 230.0 | 260.82879452054743 |
+# | 72.5 | 275.0 | 257.3063321917804  |
 # +------+-------+--------------------+
 # Data truncated.
-#
 
-# A table of the average temperature for each location across time.
+# The full query is only made when we call `collect()`, or, in this case,
+# `to_pandas()`.
 df = result.to_pandas()
 df.head()
-#     lat    lon   air_total
-# 0  75.0  210.0  259.016562
-# 1  75.0  222.5  258.362212
-# 2  75.0  237.5  258.318240
-# 3  75.0  267.5  256.928497
-# 4  75.0  285.0  261.614103
+#     lat    lon     air_avg
+# 0  75.0  232.5  258.836188
+# 1  75.0  247.5  257.716171
+# 2  75.0  262.5  257.347959
+# 3  75.0  277.5  257.671308
+# 4  72.5  232.5  260.654401
 ```
 
 Succinctly, we "pivot" Xarray Datasets (with consistent dimensions) to treat them like tables so we can run
@@ -89,7 +76,7 @@ A few reasons:
   easy.
 * There are many cloud-native, Xarray-openable datasets,
   from [Google Earth Engine](https://github.com/google/Xee)
-  to [Pangeo Forge](https://pangeo-forge.org/). Wouldn’t it be great if these
+  to the [Source Cooperative](https://source.coop/products?tags=zarr). Wouldn’t it be great if these
   were also SQL-accessible? How can the bridge be built with minimal effort?
 
 This is a light-weight way to prove the value of the interface.
@@ -107,21 +94,32 @@ That's it!
 _2025 update_: This library now implements a Dask-like `from_map` interface in
 pure DataFusion and PyArrow, but works with the same principle!
 
+_2026 update_: Instead of `from_map()`, we make factory functions from blocks of
+Xarray datasets that return RecordBatchReaders. These feed into a Rust-based
+DataFusion `TableProvider`. Every chunk is uses the Arrow in memory format to
+translate between Python and Rust. Even still, the core of what makes this idea
+work is the core `pivot()` operation from where this project began!
+
 ## Why does this work?
 
 Underneath Xarray, Dask, and Pandas, there are NumPy arrays. These are paged in
 chunks and represented contiguously in memory. It is only a matter of metadata
-that breaks them up into ndarrays. `to_dataframe()`
+that breaks them up into ndarrays. `pivot()`, which uses `to_dataframe()`,
 just changes this metadata (via a `ravel()`/`reshape()`), back into a column
 amenable to a DataFrame. We take advantage of this light weight metadata change to
 make chunked information scannable by a DB engine (DataFusion).
 
 ## What are the current limitations?
 
-_2025 update_: TBD, DataFusion provides a whole new world! Currently, we're looking for
+TBD, DataFusion provides a whole new world! Currently, we're looking for
 early users – "tire kickers", if you will. We'd love your input to shape the direction of this
 project! Please, give this a try and [file issues](https://github.com/alxmrs/xarray-sql/issues) as
 you see fit. Check out our [contributing guide](CONTRIBUTING.md), too 😉.
+
+I can say that for now, the library is oriented towards making whole scans of
+Xarray Datasets. Common filter optimizations (even basic ones like an `.sel()` on
+core dimensions, let alone predicate push downs) are not fully implemented yet.
+However, these operations and more are on our roadmap.
 
 ## What would a deeper integration look like?
 
@@ -145,9 +143,11 @@ rust-based DataFusion backend provided by arrow-zarr.
 
 ## Roadmap
 
-- [ ] [@RohanDisa](https://github.com/RohanDisa) Lazy evaluation via the pyarrow Dataset interface [#93](https://github.com/alxmrs/xarray-sql/issues/93).
+- [x] ~Lazy evaluation via the pyarrow Dataset interface [#93](https://github.com/alxmrs/xarray-sql/issues/93).~ _Implemented in [#100](https://github.com/alxmrs/xarray-sql/pull/100)_
+- [ ] Support proper parallelism via proper partition handling on the rust/datafusion side. [#106](https://github.com/alxmrs/xarray-sql/issues/106)
+- [ ] Support core datafusion optimizations to scan less data, like [104](https://github.com/alxmrs/xarray-sql/issues/104), ...
 - [ ] Translate a single Zarr to a collection of tables via DataFusion's catalog interface [#85](https://github.com/alxmrs/xarray-sql/issues/85).
-- [ ] Distributed beyond a single node through the DataFusion integration with Ray Datasets [#68](https://github.com/alxmrs/xarray-sql/issues/68).
+- [ ] Distributed beyond a single node through the DataFusion integration with Ray Datasets [#68](https://github.com/alxmrs/xarray-sql/issues/68) or Apache Ballista [#98](https://github.com/alxmrs/xarray-sql/issues/98).
 - [ ] Demo: calculate Sea Surface Temperature from 1940 - Present in SQL [#36](https://github.com/alxmrs/xarray-sql/issues/36).
 - [ ] Provide an option to integrate DataFusion directly to Zarr via Rust [#4](https://github.com/alxmrs/xarray-sql/issues/4).
 - [ ] (To be formally announced eventually): The 100 Trillion Row Challenge [#34](https://github.com/alxmrs/xarray-sql/issues/34).
@@ -164,6 +164,9 @@ I want to give a special thanks to the following folks and institutions:
 - Tom Nichols, Kyle Barron, Tom White, and Maxime Dion for the [Array Working
   Group](https://discourse.pangeo.io/t/new-working-group-for-distributed-array-computing/2734)
   and DataFusion-specific collaboration.
+- The gracious volunteer data science students at [UCSD's DS3](https://www.ds3atucsd.com/) org,
+  who are working to make this library better.
+
 
 ## License
 
@@ -183,8 +186,4 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ```
 
-Some sources are re-distributed from Google LLC
-via https://github.com/google/Xee (also Apache-2.0 License) with and without
-modification (specifically, Github Actions workflows). These files are subject
-to the original copyright; they include the original license header comment as
-well as a note to indicate modifications (when appropriate).
+All vendored code has proper license attribution.
