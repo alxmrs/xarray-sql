@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 
 import xarray as xr
-import xarray_sql as qr
-from dask_sql import Context
-
+import xarray_sql as xql
+from datafusion import SessionContext
 
 if __name__ == "__main__":
   air = xr.tutorial.open_dataset("air_temperature")
   chunks = {"time": 240}
   air = air.chunk(chunks)
 
-  df = qr.read_xarray(air)
+  df = xql.read_xarray_table(air)
 
-  c = Context()
-  c.create_table("air", df)
+  ctx = SessionContext()
+  ctx.register_table("air", df)
 
-  query = c.sql(
+  query = ctx.sql(
       """
       SELECT
         "lat", "lon", SUM("air") as air_total
@@ -26,10 +25,10 @@ if __name__ == "__main__":
       """
   )
 
-  result = query.compute()
+  result = query.collect()
 
-  expected = air.dims["lat"] * air.dims["lon"]
-  assert (
-      len(result) == expected
-  ), f"Length must be {expected}, but was {len(result)}."
+  expected = air.sizes["lat"] * air.sizes["lon"]
+  actual = sum(len(batch) for batch in result)
+
+  assert actual == expected, f"Length must be {expected}, but was {actual}."
   print(expected)

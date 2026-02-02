@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import xarray as xr
-import xarray_sql as qr
+import xarray_sql as xql
 
 if __name__ == "__main__":
   air = xr.tutorial.open_dataset("air_temperature")
@@ -11,6 +11,6 @@ if __name__ == "__main__":
       time=slice(0, 12), lat=slice(0, 11), lon=slice(0, 10)
   ).chunk(chunks)
 
-  df = qr.read_xarray(air_small).compute()
+  df = xql.read_xarray(air_small).read_pandas()
 
   print(len(df))
