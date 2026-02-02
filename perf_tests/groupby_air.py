@@ -2,7 +2,7 @@
 
 from datafusion import SessionContext
 import xarray as xr
-import xarray_sql as qr
+import xarray_sql as xql
 
 
 if __name__ == "__main__":
@@ -13,7 +13,7 @@ if __name__ == "__main__":
       time=slice(0, 12), lat=slice(0, 11), lon=slice(0, 10)
   ).chunk(chunks)
 
-  df = qr.read_xarray_table(air_small)
+  df = xql.read_xarray_table(air_small)
 
   ctx = SessionContext()
   ctx.register_table("air", df)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import xarray as xr
-import xarray_sql as qr
+import xarray_sql as xql
 from datafusion import SessionContext
 
 if __name__ == "__main__":
@@ -9,12 +9,12 @@ if __name__ == "__main__":
   chunks = {"time": 240}
   air = air.chunk(chunks)
 
-  df = qr.read_xarray_table(air)
+  df = xql.read_xarray_table(air)
 
-  c = SessionContext()
-  c.register_table("air", df)
+  ctx = SessionContext()
+  ctx.register_table("air", df)
 
-  query = c.sql(
+  query = ctx.sql(
       """
       SELECT
         "lat", "lon", SUM("air") as air_total
