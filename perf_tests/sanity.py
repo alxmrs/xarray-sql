@@ -11,6 +11,6 @@ if __name__ == "__main__":
       time=slice(0, 12), lat=slice(0, 11), lon=slice(0, 10)
   ).chunk(chunks)
 
-  df = qr.read_xarray(air_small).compute()
+  df = qr.read_xarray(air_small).read_pandas()
 
   print(len(df))

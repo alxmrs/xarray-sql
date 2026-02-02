@@ -12,4 +12,4 @@ era5_wind_df = qr.read_xarray(
     era5_ds[["u_component_of_wind", "v_component_of_wind"]]
 )
 
-print(era5_wind_df.columns)
+print(era5_wind_df.schema)
