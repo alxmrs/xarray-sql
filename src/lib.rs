@@ -237,7 +237,7 @@ impl PrunableStreamingTable {
         meta: &PartitionMetadata,
     ) -> bool {
         // Try to extract column and literal from either side
-        let (col_name, scalar, flipped) = match (left.as_ref(), right.as_ref()) {
+        let (col_name, scalar, flipped) = match (left, right) {
             (Expr::Column(c), Expr::Literal(s, _)) => (c.name.clone(), s, false),
             (Expr::Literal(s, _), Expr::Column(c)) => (c.name.clone(), s, true),
             _ => return false, // Not a simple column-literal comparison
@@ -250,11 +250,7 @@ impl PrunableStreamingTable {
         };
 
         // Flip operator if literal was on left side
-        let effective_op = if flipped {
-            flip_operator(op)
-        } else {
-            op.clone()
-        };
+        let effective_op = if flipped { flip_operator(op) } else { *op };
 
         // Determine if partition can be excluded based on operator
         match effective_op {
@@ -418,7 +414,7 @@ fn flip_operator(op: &Operator) -> Operator {
         Operator::LtEq => Operator::GtEq,
         Operator::Gt => Operator::Lt,
         Operator::GtEq => Operator::LtEq,
-        other => other.clone(),
+        other => *other,
     }
 }
 
@@ -738,12 +734,12 @@ impl LazyArrowStreamTable {
 
         // Extract and convert partition metadata if provided
         let metadata_list: Vec<PartitionMetadata> = if let Some(meta_py) = partition_metadata {
-            let meta_dicts: Vec<HashMap<String, (Py<PyAny>, Py<PyAny>)>> =
-                meta_py.extract().map_err(|e| {
-                    pyo3::exceptions::PyTypeError::new_err(format!(
-                        "partition_metadata must be a list of dicts: {e}"
-                    ))
-                })?;
+            type MetaDict = HashMap<String, (Py<PyAny>, Py<PyAny>)>;
+            let meta_dicts: Vec<MetaDict> = meta_py.extract().map_err(|e| {
+                pyo3::exceptions::PyTypeError::new_err(format!(
+                    "partition_metadata must be a list of dicts: {e}"
+                ))
+            })?;
 
             if meta_dicts.len() != factories.len() {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -755,7 +751,7 @@ impl LazyArrowStreamTable {
 
             meta_dicts
                 .into_iter()
-                .map(|meta_dict| convert_python_metadata(meta_dict))
+                .map(convert_python_metadata)
                 .collect::<PyResult<Vec<_>>>()?
         } else {
             // No metadata provided - create empty metadata for each partition
@@ -765,7 +761,7 @@ impl LazyArrowStreamTable {
         // Create partitions with their metadata
         let partitions: Vec<(Arc<dyn PartitionStream>, PartitionMetadata)> = factories
             .into_iter()
-            .zip(metadata_list.into_iter())
+            .zip(metadata_list)
             .map(|(factory, meta)| {
                 let partition = Arc::new(PyArrowStreamPartition::new(factory, schema_ref.clone()))
                     as Arc<dyn PartitionStream>;
