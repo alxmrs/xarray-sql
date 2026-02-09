@@ -170,3 +170,49 @@ def _parse_schema(ds) -> pa.Schema:
     columns.append(pa.field(var_name, pa_type))
 
   return pa.schema(columns)
+
+
+# Type alias for partition metadata: maps dimension name to (min, max) values
+PartitionBounds = t.Dict[str, t.Tuple[t.Any, t.Any]]
+
+
+def partition_metadata(
+    ds: xr.Dataset, blocks: t.List[Block]
+) -> t.List[PartitionBounds]:
+  """Compute min/max coordinate values for each partition.
+
+  This metadata enables filter pushdown: SQL queries with WHERE clauses
+  on dimension columns can prune partitions that can't contain matching rows.
+
+  Args:
+      ds: The xarray Dataset containing coordinate values.
+      blocks: List of block slices from block_slices().
+
+  Returns:
+      List of dicts mapping dimension name to (min_value, max_value) tuples.
+      - For datetime64, values are nanoseconds since Unix epoch (int64)
+      - For numeric types, values are Python int or float
+  """
+  metadata = []
+  for block in blocks:
+    ranges: PartitionBounds = {}
+    for dim, slc in block.items():
+      coord_values = ds.coords[dim].values[slc]
+      if len(coord_values) > 0:
+        min_val = coord_values[0]
+        max_val = coord_values[-1]
+
+        # Convert numpy scalar types to Python native types
+        # This is required for PyO3 FFI conversion
+        if isinstance(min_val, (np.datetime64, pd.Timestamp)):
+          # Convert datetime to nanoseconds since epoch
+          min_val = int(pd.Timestamp(min_val).value)
+          max_val = int(pd.Timestamp(max_val).value)
+        elif hasattr(min_val, "item"):
+          # numpy scalar -> Python native
+          min_val = min_val.item()
+          max_val = max_val.item()
+
+        ranges[str(dim)] = (min_val, max_val)
+    metadata.append(ranges)
+  return metadata

@@ -942,3 +942,283 @@ class TestMultiplePartitions:
     assert (
         tracker2.iteration_count == 2
     ), f"Table2: expected 2 blocks, got {tracker2.iteration_count}"
+
+
+class TestFilterPushdown:
+  """Tests for partition pruning via filter pushdown.
+
+  These tests verify that SQL filters on dimension columns (time, lat, lon)
+  correctly prune partitions, reducing the number of partitions read.
+  """
+
+  @pytest.fixture
+  def time_chunked_ds(self):
+    """Dataset chunked by time for pruning tests."""
+    np.random.seed(42)
+    # 100 days of data, chunked into 4 partitions of 25 days each
+    time = pd.date_range("2020-01-01", periods=100, freq="D")
+    lat = np.linspace(-90, 90, 5)
+    data = np.random.rand(100, 5).astype(np.float32)
+
+    return xr.Dataset(
+        {"temperature": (["time", "lat"], data)},
+        coords={"time": time, "lat": lat},
+    )
+
+  def test_time_gt_filter_prunes_early_partitions(self, time_chunked_ds):
+    """Query with time > X should skip early partitions."""
+    tracker = IterationTracker()
+
+    # 4 partitions: days 0-24, 25-49, 50-74, 75-99
+    # (Jan 1-25, Jan 26-Feb 19, Feb 20-Mar 15, Mar 16-Apr 9)
+    table = read_xarray_table(
+        time_chunked_ds,
+        chunks={"time": 25},
+        _iteration_callback=tracker,
+    )
+
+    ctx = SessionContext()
+    ctx.register_table("test", table)
+
+    # Query only last 25 days (Mar 16+) - should prune first 3 partitions
+    # 2020-03-16 is day 75
+    result = ctx.sql(
+        """
+        SELECT COUNT(*) as cnt FROM test
+        WHERE time >= '2020-03-16'
+    """
+    ).to_arrow_table()
+
+    # Should read only 1 partition (the last one)
+    assert (
+        tracker.iteration_count == 1
+    ), f"Expected 1 partition after filter pushdown, got {tracker.iteration_count}"
+
+    # Verify data correctness - 25 days * 5 lat = 125 rows
+    count = result.to_pandas()["cnt"].iloc[0]
+    assert count == 125, f"Expected 125 rows, got {count}"
+
+  def test_time_lt_filter_prunes_late_partitions(self, time_chunked_ds):
+    """Query with time < X should skip late partitions."""
+    tracker = IterationTracker()
+
+    table = read_xarray_table(
+        time_chunked_ds,
+        chunks={"time": 25},
+        _iteration_callback=tracker,
+    )
+
+    ctx = SessionContext()
+    ctx.register_table("test", table)
+
+    # Query only first 25 days (< Jan 26) - should prune last 3 partitions
+    result = ctx.sql(
+        """
+        SELECT COUNT(*) as cnt FROM test
+        WHERE time < '2020-01-26'
+    """
+    ).to_arrow_table()
+
+    # Should read only 1 partition (the first one)
+    assert (
+        tracker.iteration_count == 1
+    ), f"Expected 1 partition after filter pushdown, got {tracker.iteration_count}"
+
+  def test_time_between_filter_prunes_outside_range(self, time_chunked_ds):
+    """Query with BETWEEN should prune partitions outside the range."""
+    tracker = IterationTracker()
+
+    table = read_xarray_table(
+        time_chunked_ds,
+        chunks={"time": 25},
+        _iteration_callback=tracker,
+    )
+
+    ctx = SessionContext()
+    ctx.register_table("test", table)
+
+    # Query middle 50 days (Feb 1 - Mar 21) - should hit partitions 2 and 3
+    result = ctx.sql(
+        """
+        SELECT COUNT(*) as cnt FROM test
+        WHERE time BETWEEN '2020-02-01' AND '2020-03-21'
+    """
+    ).to_arrow_table()
+
+    # Should read 2-3 partitions (middle ones)
+    assert (
+        tracker.iteration_count <= 3
+    ), f"Expected at most 3 partitions, got {tracker.iteration_count}"
+    assert tracker.iteration_count >= 1, "Expected at least 1 partition"
+
+  def test_lat_filter_prunes_partitions(self):
+    """Latitude filter should prune irrelevant partitions."""
+    np.random.seed(42)
+    time = pd.date_range("2020-01-01", periods=10, freq="D")
+    # 100 lat values from -90 to 90
+    lat = np.linspace(-90, 90, 100)
+    data = np.random.rand(10, 100).astype(np.float32)
+
+    ds = xr.Dataset(
+        {"temperature": (["time", "lat"], data)},
+        coords={"time": time, "lat": lat},
+    )
+
+    tracker = IterationTracker()
+
+    # Chunk by latitude: 4 partitions (25 lat values each)
+    # Partition 0: lat -90 to ~-45
+    # Partition 1: lat ~-45 to 0
+    # Partition 2: lat 0 to ~45
+    # Partition 3: lat ~45 to 90
+    table = read_xarray_table(
+        ds,
+        chunks={"lat": 25},
+        _iteration_callback=tracker,
+    )
+
+    ctx = SessionContext()
+    ctx.register_table("test", table)
+
+    # Query southern hemisphere only (lat < 0)
+    result = ctx.sql(
+        """
+        SELECT COUNT(*) as cnt FROM test
+        WHERE lat < 0
+    """
+    ).to_arrow_table()
+
+    # Should read only ~2 partitions (southern hemisphere)
+    assert (
+        tracker.iteration_count <= 3
+    ), f"Expected at most 3 partitions for lat < 0, got {tracker.iteration_count}"
+
+  def test_no_pruning_for_data_column_filters(self, time_chunked_ds):
+    """Filters on data columns (not dimensions) should not prune."""
+    tracker = IterationTracker()
+
+    table = read_xarray_table(
+        time_chunked_ds,
+        chunks={"time": 25},
+        _iteration_callback=tracker,
+    )
+
+    ctx = SessionContext()
+    ctx.register_table("test", table)
+
+    # Filter on temperature (data column), not a dimension
+    result = ctx.sql(
+        """
+        SELECT COUNT(*) FROM test WHERE temperature > 0.5
+    """
+    ).to_arrow_table()
+
+    # All 4 partitions should be read (can't prune on data column)
+    assert (
+        tracker.iteration_count == 4
+    ), f"Expected 4 partitions (no pruning on data column), got {tracker.iteration_count}"
+
+  def test_filter_correctness_preserved(self, time_chunked_ds):
+    """Verify filtered results are correct after pruning."""
+    table = read_xarray_table(
+        time_chunked_ds,
+        chunks={"time": 25},
+    )
+
+    ctx = SessionContext()
+    ctx.register_table("test", table)
+
+    # Get count with filter
+    filtered = ctx.sql(
+        """
+        SELECT COUNT(*) as cnt FROM test
+        WHERE time >= '2020-02-15' AND time <= '2020-03-15'
+    """
+    ).to_arrow_table()
+
+    # Manual calculation: Feb 15 (day 45) to Mar 15 (day 74) = 30 days
+    # 30 days * 5 lat values = 150 rows
+    count = filtered.to_pandas()["cnt"].iloc[0]
+    assert count == 150, f"Expected 150 rows, got {count}"
+
+  def test_and_filter_combines_pruning(self, time_chunked_ds):
+    """AND filters should combine for maximum pruning."""
+    tracker = IterationTracker()
+
+    table = read_xarray_table(
+        time_chunked_ds,
+        chunks={"time": 25},
+        _iteration_callback=tracker,
+    )
+
+    ctx = SessionContext()
+    ctx.register_table("test", table)
+
+    # Very narrow range that spans only 1 partition
+    result = ctx.sql(
+        """
+        SELECT * FROM test
+        WHERE time >= '2020-03-20' AND time <= '2020-04-05'
+    """
+    ).to_arrow_table()
+
+    # Should read only 1 partition
+    assert (
+        tracker.iteration_count == 1
+    ), f"Expected 1 partition for narrow AND range, got {tracker.iteration_count}"
+
+  def test_or_filter_is_conservative(self, time_chunked_ds):
+    """OR filters should include partitions matching either condition."""
+    tracker = IterationTracker()
+
+    table = read_xarray_table(
+        time_chunked_ds,
+        chunks={"time": 25},
+        _iteration_callback=tracker,
+    )
+
+    ctx = SessionContext()
+    ctx.register_table("test", table)
+
+    # First or last partition (OR condition)
+    result = ctx.sql(
+        """
+        SELECT * FROM test
+        WHERE time < '2020-01-10' OR time > '2020-03-30'
+    """
+    ).to_arrow_table()
+
+    # Should read at least 2 partitions (first and last)
+    assert (
+        tracker.iteration_count >= 2
+    ), f"Expected at least 2 partitions for OR filter, got {tracker.iteration_count}"
+
+  def test_empty_result_from_impossible_filter(self, time_chunked_ds):
+    """Filter that matches no data should return empty result."""
+    tracker = IterationTracker()
+
+    table = read_xarray_table(
+        time_chunked_ds,
+        chunks={"time": 25},
+        _iteration_callback=tracker,
+    )
+
+    ctx = SessionContext()
+    ctx.register_table("test", table)
+
+    # Query for dates outside the data range
+    result = ctx.sql(
+        """
+        SELECT COUNT(*) as cnt FROM test
+        WHERE time > '2025-01-01'
+    """
+    ).to_arrow_table()
+
+    # Should read 0 partitions (all pruned)
+    assert (
+        tracker.iteration_count == 0
+    ), f"Expected 0 partitions for impossible filter, got {tracker.iteration_count}"
+
+    # Result should be 0 rows
+    count = result.to_pandas()["cnt"].iloc[0]
+    assert count == 0, f"Expected 0 rows, got {count}"
