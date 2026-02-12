@@ -113,7 +113,7 @@ jobs:
           manylinux: 2_28
           rustup-components: rust-std rustfmt
           sccache: 'true'
-          args: --release
+          args: --release -i python3.10 python3.11 python3.12 python3.13
 
       - uses: actions/upload-artifact@v4
         with:
