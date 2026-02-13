@@ -49,7 +49,10 @@ jobs:
       matrix:
         os: [ macos-latest, macos-15-intel, windows-latest ]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      - name: Get tags
+        run: git fetch --tags origin
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -78,7 +81,10 @@ jobs:
   build-artifacts-manylinux-x86_64:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      - name: Get tags
+        run: git fetch --tags origin
 
       - name: Build wheels for manylinux x86_64
         uses: PyO3/maturin-action@v1
@@ -100,7 +106,10 @@ jobs:
   build-artifacts-manylinux-arm64:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      - name: Get tags
+        run: git fetch --tags origin
 
       - name: Build wheels for manylinux arm64
         uses: PyO3/maturin-action@v1
@@ -124,7 +133,10 @@ jobs:
     name: Source distribution
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      - name: Get tags
+        run: git fetch --tags origin
 
       - name: Build sdist
         uses: PyO3/maturin-action@v1
