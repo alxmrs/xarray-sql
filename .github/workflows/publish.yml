@@ -40,6 +40,7 @@ name: Publish to PyPi
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 jobs:
   build-artifacts-mac-win:
