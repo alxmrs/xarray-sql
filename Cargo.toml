@@ -3,7 +3,19 @@ name = "xarray_sql"
 version = "0.2.0"
 authors = ["Alex Merose"]
 edition = "2021"
-exclude = ["perf_tests/*"]
+exclude = [
+    "perf_tests/*",
+    "demo/*",
+    ".github/*",
+    ".idea/*",
+    ".claude/*",
+    ".pre-commit-config.yaml",
+    ".python-version",
+    "CONTRIBUTING.md",
+    "MANIFEST.in",
+    "uv.lock",
+    "xarray_sql/*_test.py",
+]
 
 [dependencies]
 arrow = { version = "57.2.0", features = ["pyarrow"] }
