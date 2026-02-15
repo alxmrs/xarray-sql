@@ -50,10 +50,7 @@ jobs:
       matrix:
         os: [ macos-latest, macos-15-intel, windows-latest ]
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Get tags
-        run: git fetch --tags origin --force  # force needed to make re-releases
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -74,7 +71,7 @@ jobs:
           uv sync --dev --no-install-package xarray-sql
           uv run --no-project maturin build --release --strip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: dist-${{ matrix.os }}
           path: target/wheels/*
@@ -82,10 +79,7 @@ jobs:
   build-artifacts-manylinux-x86_64:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Get tags
-        run: git fetch --tags origin --force  # force needed to make re-releases
+      - uses: actions/checkout@v6
 
       - name: Build wheels for manylinux x86_64
         uses: PyO3/maturin-action@v1
@@ -93,24 +87,21 @@ jobs:
           RUST_BACKTRACE: 1
         with:
           rust-toolchain: stable
-          target: x86_64
-          manylinux: 2014
+          target: x86_64-unknown-linux-gnu
+          manylinux: 2_28
           rustup-components: rust-std rustfmt
           sccache: 'true'
-          args: --release
+          args: --release --strip --out dist -i python3.10 python3.11 python3.12 python3.13
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: dist-manylinux-x86_64
-          path: target/wheels/*
+          path: dist/*
 
   build-artifacts-manylinux-arm64:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Get tags
-        run: git fetch --tags origin --force  # force needed to make re-releases
+      - uses: actions/checkout@v6
 
       - name: Build wheels for manylinux arm64
         uses: PyO3/maturin-action@v1
@@ -118,26 +109,22 @@ jobs:
           RUST_BACKTRACE: 1
         with:
           rust-toolchain: stable
-          target: aarch64
-          # Use manylinux_2_28-cross because the manylinux2014-cross has GCC 4.8.5, which causes the build to fail
+          target: aarch64-unknown-linux-gnu
           manylinux: 2_28
           rustup-components: rust-std rustfmt
           sccache: 'true'
-          args: --release -i python3.10 python3.11 python3.12 python3.13
+          args: --release --strip --out dist -i python3.10 python3.11 python3.12 python3.13
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: dist-manylinux-aarch64
-          path: target/wheels/*
+          path: dist/*
 
   build-sdist:
     name: Source distribution
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Get tags
-        run: git fetch --tags origin --force  # force needed to make re-releases
+      - uses: actions/checkout@v6
 
       - name: Build sdist
         uses: PyO3/maturin-action@v1
@@ -147,7 +134,16 @@ jobs:
           rustup-components: rust-std rustfmt
           args: --release --sdist --out dist
 
-      - uses: actions/upload-artifact@v4
+      - name: Assert sdist build does not generate wheels
+        run: |
+          if [ -d "target/wheels" ] && [ "$(ls -A target/wheels)" ]; then
+            echo "Error: Sdist build generated wheels"
+            exit 1
+          else
+            echo "Directory is clean"
+          fi
+
+      - uses: actions/upload-artifact@v6
         with:
           name: dist-sdist
           path: dist/*
@@ -161,7 +157,7 @@ jobs:
       - build-sdist
     steps:
       - name: Merge Build Artifacts
-        uses: actions/upload-artifact/merge@v4
+        uses: actions/upload-artifact/merge@v6
         with:
           name: dist
           pattern: dist-*
@@ -170,7 +166,7 @@ jobs:
     needs: merge-build-artifacts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v6
         with:
           name: dist
           path: dist
@@ -193,7 +189,7 @@ jobs:
     needs: verify-built-dist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v6
         with:
           name: dist
           path: dist
