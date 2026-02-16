@@ -1,0 +1,58 @@
+name: ci-build
+
+on:
+  # Triggers the workflow on push or pull request events but only for the main branch
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: "python ${{ matrix.platform.runner }}-${{ matrix.platform.target }} build"
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - runner: windows-latest
+            target: x86
+            python_arch: x86
+          - runner: macos-latest
+            target: aarch64
+          - runner: ubuntu-latest
+            target: aarch64
+          - runner: ubuntu-latest
+            target: x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Configure sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo
+          key: cargo-cache-${{ steps.rust-toolchain.outputs.cachekey }}-${{ matrix.platform.runner }}-${{ matrix.platform.target }}-${{ hashFiles('Cargo.lock') }}
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: 3.11
+          enable-cache: true
+
+      # Use the --no-install-package to only install the dependencies
+      # but do not yet build the rust library
+      - name: The project builds
+        run: |
+          uv sync --dev --no-install-package xarray-sql
+          uv run --no-project maturin build

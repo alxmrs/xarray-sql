@@ -33,7 +33,6 @@ jobs:
       fail-fast: false
       matrix:
         python-version: [
-          "3.9",
           "3.10",
           "3.11",
           "3.12",
@@ -41,11 +40,33 @@ jobs:
         ]
     steps:
       - uses: actions/checkout@v4
-      - name: Install uv and set the python version
-        uses: astral-sh/setup-uv@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Configure sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo
+          key: cargo-cache-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock') }}
+
+      - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+        # Use the --no-install-package to only install the dependencies
+        # but do not yet build the rust library
       - name: Install xarray_sql
-        run: uv sync --dev
+        run: uv sync --dev --no-install-package xarray-sql
+      - name: build rust
+        run: uv run --no-project maturin develop --uv
       - name: Run unit tests
-        run: uv run pytest -m "not integration"
+        run: uv run --no-project pytest -v . -m "not integration"

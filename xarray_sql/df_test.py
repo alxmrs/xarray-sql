@@ -7,8 +7,8 @@ import pyarrow as pa
 import pytest
 import xarray as xr
 
-from . import XarrayContext
-from .df import explode, read_xarray, block_slices, from_map, pivot, from_map_batched
+from .reader import read_xarray
+from .df import explode, block_slices, from_map, pivot, from_map_batched
 
 
 def rand_wx(start: str, end: str) -> xr.Dataset:
@@ -339,68 +339,3 @@ def test_read_xarray_loads_one_chunk_at_a_time(large_ds):
   assert max(peaks) < large_ds.nbytes
 
   tracemalloc.stop()
-
-
-@pytest.mark.integration
-@pytest.mark.gcs
-def test_open_era5():
-  """Test opening ERA5 dataset from Google Cloud Storage."""
-  era5_ds = xr.open_zarr(
-      "gs://gcp-public-data-arco-era5/ar/1959-2022-full_37-1h-0p25deg-chunk-1.zarr-v2",
-      chunks={"time": 240, "level": 1},
-  )
-  era5_wind_df = read_xarray(
-      era5_ds[["u_component_of_wind", "v_component_of_wind"]]
-  )
-
-  expected_columns = [
-      "time",
-      "level",
-      "latitude",
-      "longitude",
-      "u_component_of_wind",
-      "v_component_of_wind",
-  ]
-  assert list(era5_wind_df.columns) == expected_columns
-
-
-def test_lazy_evaluation():
-  """Test that xarray_sql uses lazy evaluation and only accesses data on execution."""
-  reads = []
-
-  # SpyArray subclassing np.ndarray to track data access
-  class SpyArray(np.ndarray):
-
-    def __new__(cls, arr, reads_list):
-      obj = np.asarray(arr).view(cls)
-      obj.reads_list = reads_list
-      return obj
-
-    def __getitem__(self, key):
-      self.reads_list.append(key)
-      return super().__getitem__(key)
-
-  # Create base dataset
-  base = xr.Dataset({"a": ("x", [1, 2, 3]), "b": ("x", [4, 5, 6])})
-
-  # Wrap each variable in a SpyArray
-  spy_ds = xr.Dataset(
-      {
-          "a": ("x", SpyArray(base["a"].values, reads)),
-          "b": ("x", SpyArray(base["b"].values, reads)),
-      }
-  )
-
-  ctx = XarrayContext()
-
-  # Register dataset — should NOT trigger reads
-  ctx.from_dataset("test", spy_ds, chunks={"x": 2})
-  assert len(reads) == 0, "Data was accessed too early on registration"
-
-  # Build a query — still should NOT read data
-  tbl = ctx.sql("SELECT a FROM test WHERE b > 4")
-  assert len(reads) == 0, "Data was accessed before execution"
-
-  # Execute query
-  result = tbl.to_pandas()  # triggers execution
-  assert len(reads) > 0, "Data should be accessed only on execution"

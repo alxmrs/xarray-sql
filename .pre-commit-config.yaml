@@ -21,3 +21,13 @@ repos:
       - id: mypy
         additional_dependencies: [types-setuptools]
         args: [--ignore-missing-imports]
+
+  - repo: local
+    hooks:
+      - id: rustfmt
+        name: rustfmt
+        description: Check if all files follow the rustfmt style.
+        entry: cargo fmt -- --config imports_granularity=Module,group_imports=StdExternalCrate
+        language: system
+        types: [ file, rust ]
+        pass_filenames: false

@@ -1,0 +1,30 @@
+include Cargo.toml
+include Cargo.lock
+include pyproject.toml
+include README.md
+include LICENSE
+
+recursive-include src *.rs
+recursive-include xarray_sql *.py
+recursive-exclude xarray_sql *_test.py
+
+prune demo
+prune perf_tests
+prune target
+prune .github
+prune .idea
+prune .venv
+prune .mypy_cache
+prune .pytest_cache
+prune .claude
+prune xarray_sql.egg-info
+
+recursive-exclude xarray_sql *.so
+recursive-exclude * __pycache__
+
+exclude .DS_Store
+exclude .pre-commit-config.yaml
+exclude .python-version
+exclude .gitignore
+exclude CONTRIBUTING.md
+exclude uv.lock

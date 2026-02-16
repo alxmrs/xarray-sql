@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
+from datafusion import SessionContext
 import xarray as xr
-import xarray_sql as qr
-from dask_sql import Context
+import xarray_sql as xql
 
 
 if __name__ == "__main__":
@@ -13,12 +13,12 @@ if __name__ == "__main__":
       time=slice(0, 12), lat=slice(0, 11), lon=slice(0, 10)
   ).chunk(chunks)
 
-  df = qr.read_xarray(air_small)
+  df = xql.read_xarray_table(air_small)
 
-  c = Context()
-  c.create_table("air", df)
+  ctx = SessionContext()
+  ctx.register_table("air", df)
 
-  query = c.sql(
+  query = ctx.sql(
       """
       SELECT
         "lat", "lon", SUM("air") as air_total
@@ -29,10 +29,9 @@ if __name__ == "__main__":
       """
   )
 
-  result = query.compute()
+  result = query.collect()
 
-  expected = air_small.dims["lat"] * air_small.dims["lon"]
-  assert (
-      len(result) == expected
-  ), f"Length must be {expected}, but was {len(result)}."
+  expected = air_small.sizes["lat"] * air_small.sizes["lon"]
+  actual = sum(len(batch) for batch in result)
+  assert actual == expected, f"Length must be {expected}, but was {actual}."
   print(expected)
