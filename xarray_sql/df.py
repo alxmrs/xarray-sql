@@ -193,11 +193,17 @@ def partition_metadata(
       - For datetime64, values are nanoseconds since Unix epoch (int64)
       - For numeric types, values are Python int or float
   """
+  # Hoist coordinate array reads outside the partition loop.
+  # ds.coords[dim].values materializes the full array on every call; doing it
+  # N_partitions × N_dims times is wasteful and, for remote Zarr-backed datasets
+  # (e.g. ARCO-ERA5 on GCS), may trigger repeated network I/O.
+  coord_arrays = {str(dim): ds.coords[dim].values for dim in ds.dims}
+
   metadata = []
   for block in blocks:
     ranges: PartitionBounds = {}
     for dim, slc in block.items():
-      coord_values = ds.coords[dim].values[slc]
+      coord_values = coord_arrays[str(dim)][slc]
       if len(coord_values) > 0:
         # Use actual min/max rather than first/last so that non-monotonic
         # coordinate axes (e.g. descending latitude 90→-90) are handled
