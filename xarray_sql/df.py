@@ -324,11 +324,11 @@ def _block_metadata(coord_arrays: dict, block: Block) -> PartitionBounds:
   for dim, slc in block.items():
     coord_values = coord_arrays[str(dim)][slc]
     if len(coord_values) > 0:
-      first, last = coord_values[0], coord_values[-1]
-      if first <= last:
-        min_val, max_val = first, last
-      else:
-        min_val, max_val = last, first
+      # Use actual min/max rather than first/last so that non-monotonic
+      # coordinate axes (e.g. descending latitude 90→-90) are handled
+      # correctly.  np.min/max work for both numeric and datetime64 arrays.
+      min_val = coord_values.min()
+      max_val = coord_values.max()
 
       if isinstance(min_val, (np.datetime64, pd.Timestamp)):
         min_val = int(pd.Timestamp(min_val).value)
