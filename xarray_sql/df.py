@@ -199,8 +199,11 @@ def partition_metadata(
     for dim, slc in block.items():
       coord_values = ds.coords[dim].values[slc]
       if len(coord_values) > 0:
-        min_val = coord_values[0]
-        max_val = coord_values[-1]
+        # Use actual min/max rather than first/last so that non-monotonic
+        # coordinate axes (e.g. descending latitude 90→-90) are handled
+        # correctly.  np.min/max work for both numeric and datetime64 arrays.
+        min_val = coord_values.min()
+        max_val = coord_values.max()
 
         # Convert numpy scalar types to Python native types
         # This is required for PyO3 FFI conversion

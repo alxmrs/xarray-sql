@@ -1024,6 +1024,10 @@ class TestFilterPushdown:
         tracker.iteration_count == 1
     ), f"Expected 1 partition after filter pushdown, got {tracker.iteration_count}"
 
+    # Verify correctness: Jan 1–25 (25 days) × 5 lat = 125 rows
+    count = result.to_pandas()["cnt"].iloc[0]
+    assert count == 125, f"Expected 125 rows, got {count}"
+
   def test_time_between_filter_prunes_outside_range(self, time_chunked_ds):
     """Query with BETWEEN should prune partitions outside the range."""
     tracker = IterationTracker()
@@ -1045,11 +1049,11 @@ class TestFilterPushdown:
     """
     ).to_arrow_table()
 
-    # Should read 2-3 partitions (middle ones)
+    # Partition 0 (Jan 1–25) ends before Feb 1 and is pruned.
+    # Partitions 1, 2, 3 each overlap with Feb 1–Mar 21.
     assert (
-        tracker.iteration_count <= 3
-    ), f"Expected at most 3 partitions, got {tracker.iteration_count}"
-    assert tracker.iteration_count >= 1, "Expected at least 1 partition"
+        tracker.iteration_count == 3
+    ), f"Expected exactly 3 partitions after BETWEEN pruning, got {tracker.iteration_count}"
 
   def test_lat_filter_prunes_partitions(self):
     """Latitude filter should prune irrelevant partitions."""
@@ -1088,10 +1092,14 @@ class TestFilterPushdown:
     """
     ).to_arrow_table()
 
-    # Should read only ~2 partitions (southern hemisphere)
+    # np.linspace(-90, 90, 100) chunked by 25:
+    #   Partition 0: indices 0–24,  lat -90.0 to -46.4 (all negative)
+    #   Partition 1: indices 25–49, lat -44.5 to  -0.9 (all negative)
+    #   Partition 2: indices 50–74, lat   0.9 to  44.5 (all positive) → pruned
+    #   Partition 3: indices 75–99, lat  46.4 to  90.0 (all positive) → pruned
     assert (
-        tracker.iteration_count <= 3
-    ), f"Expected at most 3 partitions for lat < 0, got {tracker.iteration_count}"
+        tracker.iteration_count == 2
+    ), f"Expected exactly 2 partitions for lat < 0, got {tracker.iteration_count}"
 
   def test_no_pruning_for_data_column_filters(self, time_chunked_ds):
     """Filters on data columns (not dimensions) should not prune."""

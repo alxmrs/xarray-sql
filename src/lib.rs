@@ -100,18 +100,20 @@ impl ScalarBound {
             (ScalarBound::Float64(a), ScalarValue::Float64(Some(b))) => a.partial_cmp(b),
             (ScalarBound::Float64(a), ScalarValue::Float32(Some(b))) => a.partial_cmp(&(*b as f64)),
 
-            // Timestamp comparisons - convert to nanoseconds
+            // Timestamp comparisons - convert to nanoseconds.
+            // Use checked_mul to avoid silent overflow in release builds;
+            // on overflow return None (conservative: include the partition).
             (ScalarBound::TimestampNanos(a), ScalarValue::TimestampNanosecond(Some(b), _)) => {
                 Some(a.cmp(b))
             }
             (ScalarBound::TimestampNanos(a), ScalarValue::TimestampMicrosecond(Some(b), _)) => {
-                Some(a.cmp(&(b * 1_000)))
+                b.checked_mul(1_000).map(|b_ns| a.cmp(&b_ns))
             }
             (ScalarBound::TimestampNanos(a), ScalarValue::TimestampMillisecond(Some(b), _)) => {
-                Some(a.cmp(&(b * 1_000_000)))
+                b.checked_mul(1_000_000).map(|b_ns| a.cmp(&b_ns))
             }
             (ScalarBound::TimestampNanos(a), ScalarValue::TimestampSecond(Some(b), _)) => {
-                Some(a.cmp(&(b * 1_000_000_000)))
+                b.checked_mul(1_000_000_000).map(|b_ns| a.cmp(&b_ns))
             }
 
             // Incompatible types
@@ -166,11 +168,13 @@ impl PrunableStreamingTable {
         schema: SchemaRef,
         partitions: Vec<(Arc<dyn PartitionStream>, PartitionMetadata)>,
     ) -> Self {
-        // Collect dimension column names from partition metadata
+        // Collect dimension column names across ALL partitions so that a
+        // zero-length first partition (empty ranges map) doesn't silently
+        // disable pruning for the entire table.
         let dimension_columns: std::collections::HashSet<String> = partitions
-            .first()
-            .map(|(_, meta)| meta.ranges.keys().cloned().collect())
-            .unwrap_or_default();
+            .iter()
+            .flat_map(|(_, meta)| meta.ranges.keys().cloned())
+            .collect();
 
         Self {
             schema,
@@ -216,10 +220,15 @@ impl PrunableStreamingTable {
                     _ => self.comparison_excludes(left, op, right, meta),
                 }
             }
-            Expr::Not(inner) => {
-                // NOT inverts the logic, but we can't easily invert exclusion
-                // Be conservative and don't exclude
-                !self.filter_excludes_partition(inner, meta)
+            Expr::Not(_) => {
+                // NOT inverts the predicate. We cannot safely derive exclusion
+                // from the inner result: if inner returns false (uncertain),
+                // !false = true would incorrectly exclude the partition.
+                // Example: partition [1,10], NOT (col > 5) ≡ col <= 5 —
+                // inner returns false (max=10 > 5), but the partition contains
+                // values 1–5 which satisfy col <= 5 and must be included.
+                // Be conservative: never exclude on NOT.
+                false
             }
             Expr::Between(between) => self.between_excludes(between, meta),
             Expr::InList(in_list) => self.in_list_excludes(in_list, meta),
