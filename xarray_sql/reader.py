@@ -248,14 +248,33 @@ def read_xarray_table(
   # Zarr-backed datasets (e.g. ARCO-ERA5 on GCS).
   coord_arrays = {str(dim): ds.coords[dim].values for dim in ds.dims}
 
+  # Determine which column names are data variables (not dimension coordinates).
+  # Used by the factory to skip loading unrequested variables.
+  data_var_names = set(ds.data_vars.keys())
+
   def make_partition_factory(
       block: Block,
-  ) -> Callable[[], pa.RecordBatchReader]:
-    def make_stream() -> pa.RecordBatchReader:
+  ) -> Callable[[list[str] | None], pa.RecordBatchReader]:
+    def make_stream(
+        projection_names: list[str] | None,
+    ) -> pa.RecordBatchReader:
       if _iteration_callback is not None:
         _iteration_callback(block)
+
+      if projection_names is not None:
+        # Restrict to the data variables mentioned in the projection.
+        # Dimension coordinates come along automatically via coords.
+        data_vars_needed = [c for c in projection_names if c in data_var_names]
+        ds_block = (
+            ds[data_vars_needed].isel(block) if data_vars_needed else ds.isel(block)
+        )
+        batch_schema = pa.schema([schema.field(name) for name in projection_names])
+      else:
+        ds_block = ds.isel(block)
+        batch_schema = schema
+
       return pa.RecordBatchReader.from_batches(
-          schema, iter_record_batches(ds.isel(block), schema, batch_size)
+          batch_schema, iter_record_batches(ds_block, batch_schema, batch_size)
       )
 
     return make_stream
