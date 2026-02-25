@@ -168,13 +168,21 @@ impl PrunableStreamingTable {
         schema: SchemaRef,
         partitions: Vec<(Arc<dyn PartitionStream>, PartitionMetadata)>,
     ) -> Self {
-        // Collect dimension column names across ALL partitions so that a
-        // zero-length first partition (empty ranges map) doesn't silently
-        // disable pruning for the entire table.
+        // Collect dimension column names from the first partition that has
+        // non-empty metadata. All partitions share the same dimension names,
+        // so we only need one representative. Using find_map keeps this O(D)
+        // rather than O(N × D) — important when N is in the hundreds of
+        // thousands (e.g. hourly chunks of a decades-long climate dataset).
         let dimension_columns: std::collections::HashSet<String> = partitions
             .iter()
-            .flat_map(|(_, meta)| meta.ranges.keys().cloned())
-            .collect();
+            .find_map(|(_, meta)| {
+                if meta.ranges.is_empty() {
+                    None
+                } else {
+                    Some(meta.ranges.keys().cloned().collect())
+                }
+            })
+            .unwrap_or_default();
 
         Self {
             schema,
