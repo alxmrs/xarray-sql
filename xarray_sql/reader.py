@@ -10,14 +10,15 @@ actual stream implementation, wrapping xarray block iteration in a generator.
 
 from __future__ import annotations
 
-import typing as t
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING
 
 import pyarrow as pa
 import xarray as xr
 
 from .df import Block, Chunks, block_slices, pivot, _parse_schema
 
-if t.TYPE_CHECKING:
+if TYPE_CHECKING:
   from ._native import LazyArrowStreamTable
 
 
@@ -53,7 +54,7 @@ class XarrayRecordBatchReader:
       ds: xr.Dataset,
       chunks: Chunks = None,
       *,
-      _iteration_callback: t.Optional[t.Callable[[Block], None]] = None,
+      _iteration_callback: Callable[[Block], None] | None = None,
   ):
     """Initialize the lazy reader.
 
@@ -83,7 +84,7 @@ class XarrayRecordBatchReader:
     """The Arrow schema for this stream."""
     return self._schema
 
-  def _generate_batches(self) -> t.Iterator[pa.RecordBatch]:
+  def _generate_batches(self) -> Iterator[pa.RecordBatch]:
     """Generate RecordBatches lazily from xarray blocks.
 
     This generator is only consumed when the Arrow stream's get_next
@@ -99,7 +100,7 @@ class XarrayRecordBatchReader:
       yield pa.RecordBatch.from_pandas(df, schema=self._schema)
 
   def __arrow_c_stream__(
-      self, requested_schema: t.Optional[object] = None
+      self, requested_schema: object | None = None
   ) -> object:
     """Export as Arrow C Stream via PyCapsule.
 
@@ -135,7 +136,7 @@ class XarrayRecordBatchReader:
     return reader.__arrow_c_stream__(requested_schema)
 
   def __arrow_c_schema__(
-      self, requested_schema: t.Optional[object] = None
+      self, requested_schema: object | None = None
   ) -> object:
     """Export the schema as Arrow C Schema via PyCapsule.
 
@@ -171,7 +172,7 @@ def read_xarray_table(
     ds: xr.Dataset,
     chunks: Chunks = None,
     *,
-    _iteration_callback: t.Optional[t.Callable[[Block], None]] = None,
+    _iteration_callback: Callable[[Block], None] | None = None,
 ) -> "LazyArrowStreamTable":
   """Create a lazy DataFusion table from an xarray Dataset.
 
@@ -232,7 +233,7 @@ def read_xarray_table(
   # Each factory produces a RecordBatchReader for its specific chunk
   def make_partition_factory(
       block: Block,
-  ) -> t.Callable[[], pa.RecordBatchReader]:
+  ) -> Callable[[], pa.RecordBatchReader]:
     """Create a factory function for a specific block/chunk."""
 
     def make_stream() -> pa.RecordBatchReader:
