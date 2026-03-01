@@ -1,19 +1,20 @@
 import itertools
-import typing as t
+from collections.abc import Iterator
+from typing import Any
 
 import numpy as np
 import xarray as xr
 
-Row = t.List[t.Any]
+Row = list[Any]
 
 
 # deprecated
-def get_columns(ds: xr.Dataset) -> t.List[str]:
+def get_columns(ds: xr.Dataset) -> list[str]:
   return list(ds.sizes.keys()) + list(ds.data_vars.keys())
 
 
 # Deprecated
-def unravel(ds: xr.Dataset) -> t.Iterator[Row]:
+def unravel(ds: xr.Dataset) -> Iterator[Row]:
   dim_keys, dim_vals = zip(*ds.sizes.items())
 
   for idx in itertools.product(*(range(d) for d in dim_vals)):

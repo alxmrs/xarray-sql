@@ -1,6 +1,6 @@
 import itertools
-import typing as t
 import warnings
+from collections.abc import Callable, Hashable, Iterator, Mapping
 
 import numpy as np
 import pandas as pd
@@ -8,13 +8,13 @@ import pyarrow as pa
 import xarray as xr
 from datafusion.context import ArrowStreamExportable
 
-Block = t.Dict[t.Hashable, slice]
-Chunks = t.Optional[t.Dict[str, int]]
+Block = dict[Hashable, slice]
+Chunks = dict[str, int] | None
 
 
 # Borrowed from Xarray
 def _get_chunk_slicer(
-    dim: t.Hashable, chunk_index: t.Mapping, chunk_bounds: t.Mapping
+    dim: Hashable, chunk_index: Mapping, chunk_bounds: Mapping
 ):
   if dim in chunk_index:
     which_chunk = chunk_index[dim]
@@ -25,7 +25,7 @@ def _get_chunk_slicer(
 
 
 # Adapted from Xarray `map_blocks` implementation.
-def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> t.Iterator[Block]:
+def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> Iterator[Block]:
   """Compute block slices for a chunked Dataset."""
   if chunks is not None:
     for_chunking = ds.copy(data=None, deep=False).chunk(chunks)
@@ -54,7 +54,7 @@ def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> t.Iterator[Block]:
   yield from blocks
 
 
-def explode(ds: xr.Dataset, chunks: Chunks = None) -> t.Iterator[xr.Dataset]:
+def explode(ds: xr.Dataset, chunks: Chunks = None) -> Iterator[xr.Dataset]:
   """Explodes a dataset into its chunks."""
   yield from (ds.isel(b) for b in block_slices(ds, chunks=chunks))
 
@@ -64,9 +64,9 @@ def _block_len(block: Block) -> int:
 
 
 def from_map_batched(
-    func: t.Callable[..., pd.DataFrame],
+    func: Callable[..., pd.DataFrame],
     *iterables,
-    args: t.Optional[t.Tuple] = None,
+    args: tuple | None = None,
     schema: pa.Schema = None,
     **kwargs,
 ) -> pa.RecordBatchReader:
@@ -99,7 +99,7 @@ def from_map_batched(
 
 
 def from_map(
-    func: t.Callable, *iterables, args: t.Optional[t.Tuple] = None, **kwargs
+    func: Callable, *iterables, args: tuple | None = None, **kwargs
 ) -> pa.Table:
   """Create a PyArrow Table by mapping a function over iterables.
 
