@@ -1041,7 +1041,7 @@ class TestFilterPushdown:
     ctx = SessionContext()
     ctx.register_table("test", table)
 
-    # Query middle 50 days (Feb 1 - Mar 21) - should hit partitions 2 and 3
+    # Query middle 50 days (Feb 1 - Mar 21) - should hit partitions 1, 2, and 3
     result = ctx.sql(
         """
         SELECT COUNT(*) as cnt FROM test

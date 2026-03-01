@@ -44,7 +44,7 @@
 //! Supported operators: `=`, `<`, `>`, `<=`, `>=`, `BETWEEN`, `IN`, `AND`, `OR`.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -160,7 +160,7 @@ struct PrunableStreamingTable {
     /// Partition streams paired with their coordinate range metadata
     partitions: Vec<(Arc<dyn PartitionStream>, PartitionMetadata)>,
     /// Set of column names that are dimension columns (eligible for pruning)
-    dimension_columns: std::collections::HashSet<String>,
+    dimension_columns: HashSet<String>,
 }
 
 impl PrunableStreamingTable {
@@ -173,7 +173,7 @@ impl PrunableStreamingTable {
         // so we only need one representative. Using find_map keeps this O(D)
         // rather than O(N × D) — important when N is in the hundreds of
         // thousands (e.g. hourly chunks of a decades-long climate dataset).
-        let dimension_columns: std::collections::HashSet<String> = partitions
+        let dimension_columns: HashSet<String> = partitions
             .iter()
             .find_map(|(_, meta)| {
                 if meta.ranges.is_empty() {
@@ -307,8 +307,19 @@ impl PrunableStreamingTable {
                 );
                 below_min || above_max
             }
-            // col != literal: can't exclude (partition may have other values)
-            Operator::NotEq => false,
+            // col != literal: can exclude only if range is a single point equal
+            // to the literal — every row has that value, so none satisfy !=.
+            Operator::NotEq => {
+                let min_eq = matches!(
+                    range.min.compare_to_scalar(scalar),
+                    Some(std::cmp::Ordering::Equal)
+                );
+                let max_eq = matches!(
+                    range.max.compare_to_scalar(scalar),
+                    Some(std::cmp::Ordering::Equal)
+                );
+                min_eq && max_eq
+            }
             // Other operators: be conservative
             _ => false,
         }
@@ -435,39 +446,36 @@ fn flip_operator(op: &Operator) -> Operator {
     }
 }
 
-/// Convert a Python object to a ScalarBound.
-fn python_to_scalar_bound(obj: &Bound<'_, PyAny>) -> PyResult<ScalarBound> {
-    // Try integer first (includes timestamps as nanoseconds)
-    if let Ok(val) = obj.extract::<i64>() {
-        // Check if this might be a timestamp (very large number)
-        // Python passes datetime64[ns] as nanoseconds since epoch
-        if val.abs() > 1_000_000_000_000_000 {
-            // Likely a nanosecond timestamp
-            return Ok(ScalarBound::TimestampNanos(val));
+/// Convert a Python object to a ScalarBound using an explicit dtype tag.
+fn python_to_scalar_bound(obj: &Bound<'_, PyAny>, dtype_tag: &str) -> PyResult<ScalarBound> {
+    match dtype_tag {
+        "timestamp_ns" => {
+            let val = obj.extract::<i64>()?;
+            Ok(ScalarBound::TimestampNanos(val))
         }
-        return Ok(ScalarBound::Int64(val));
+        "float64" => {
+            let val = obj.extract::<f64>()?;
+            Ok(ScalarBound::Float64(val))
+        }
+        "int64" => {
+            let val = obj.extract::<i64>()?;
+            Ok(ScalarBound::Int64(val))
+        }
+        _ => Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "Unsupported dtype tag for partition bound: {dtype_tag}"
+        ))),
     }
-
-    // Try float
-    if let Ok(val) = obj.extract::<f64>() {
-        return Ok(ScalarBound::Float64(val));
-    }
-
-    Err(pyo3::exceptions::PyTypeError::new_err(format!(
-        "Unsupported type for partition bound: {:?}",
-        obj.get_type().name()
-    )))
 }
 
 /// Convert Python partition metadata dict to Rust PartitionMetadata.
 fn convert_python_metadata(
-    meta_dict: HashMap<String, (Py<PyAny>, Py<PyAny>)>,
+    meta_dict: HashMap<String, (Py<PyAny>, Py<PyAny>, String)>,
 ) -> PyResult<PartitionMetadata> {
     Python::attach(|py| {
         let mut ranges = HashMap::new();
-        for (dim_name, (min_obj, max_obj)) in meta_dict {
-            let min_bound = python_to_scalar_bound(min_obj.bind(py))?;
-            let max_bound = python_to_scalar_bound(max_obj.bind(py))?;
+        for (dim_name, (min_obj, max_obj, dtype_tag)) in meta_dict {
+            let min_bound = python_to_scalar_bound(min_obj.bind(py), &dtype_tag)?;
+            let max_bound = python_to_scalar_bound(max_obj.bind(py), &dtype_tag)?;
             ranges.insert(
                 dim_name.clone(),
                 DimensionRange {
@@ -545,16 +553,15 @@ impl TableProvider for PrunableStreamingTable {
             // Create a streaming table with no partitions
             // DataFusion will return empty result
             let empty_table = StreamingTable::try_new(Arc::clone(&self.schema), vec![])?;
-            return empty_table.scan(state, projection, &[], limit).await;
+            return empty_table.scan(state, projection, filters, limit).await;
         }
 
         // Create StreamingTable with the pruned partitions
         let streaming = StreamingTable::try_new(Arc::clone(&self.schema), included_partitions)?;
 
-        // Delegate to StreamingTable for actual execution
-        // Pass empty filters since we've already done partition pruning
-        // DataFusion will still apply row-level filtering
-        streaming.scan(state, projection, &[], limit).await
+        // Delegate to StreamingTable for actual execution.
+        // We report Inexact, so DataFusion still applies row-level filtering.
+        streaming.scan(state, projection, filters, limit).await
     }
 }
 
@@ -751,7 +758,7 @@ impl LazyArrowStreamTable {
 
         // Extract and convert partition metadata if provided
         let metadata_list: Vec<PartitionMetadata> = if let Some(meta_py) = partition_metadata {
-            type MetaDict = HashMap<String, (Py<PyAny>, Py<PyAny>)>;
+            type MetaDict = HashMap<String, (Py<PyAny>, Py<PyAny>, String)>;
             let meta_dicts: Vec<MetaDict> = meta_py.extract().map_err(|e| {
                 pyo3::exceptions::PyTypeError::new_err(format!(
                     "partition_metadata must be a list of dicts: {e}"
