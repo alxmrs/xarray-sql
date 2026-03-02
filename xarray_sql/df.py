@@ -1,12 +1,11 @@
 import itertools
-import warnings
 from collections.abc import Callable, Hashable, Iterator, Mapping
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import xarray as xr
-from datafusion.context import ArrowStreamExportable
 
 Block = dict[Hashable, slice]
 Chunks = dict[str, int] | None
@@ -155,6 +154,61 @@ def pivot(ds: xr.Dataset) -> pd.DataFrame:
   return ds.to_dataframe().reset_index()  # type: ignore[no-any-return]
 
 
+def dataset_to_record_batch(
+    ds: xr.Dataset, schema: pa.Schema
+) -> pa.RecordBatch:
+  """Convert an xarray Dataset partition to an Arrow RecordBatch.
+
+  Builds the RecordBatch directly from numpy arrays, bypassing the pandas
+  round-trip (to_dataframe → reset_index → from_pandas) used by pivot().
+  For large partitions this reduces peak memory from ~5× to ~2× the
+  partition size.
+
+  Dimension coordinates are broadcast to the full partition shape and
+  ravelled. np.broadcast_to() is zero-copy; the ravel() forces one copy
+  per coordinate (unavoidable, since broadcast arrays are non-contiguous).
+  Data variable arrays are ravelled in-place — a zero-copy view when the
+  underlying array is already C-contiguous (the common case for numpy-backed
+  xarray datasets).
+
+  Args:
+      ds: A partition-sized xarray Dataset (already sliced via isel).
+      schema: The Arrow schema for the output, as produced by _parse_schema.
+          Column order in the output matches schema field order.
+
+  Returns:
+      A RecordBatch with one column per dimension coordinate and data
+      variable, in schema order.
+  """
+  # Use the data variable's dimension order as canonical so coordinate
+  # broadcasts and data variable ravels use the same layout. All data
+  # variables are validated to share the same dims tuple.
+  if ds.data_vars:
+    first_var = next(iter(ds.data_vars.values()))
+    dim_names = list(first_var.dims)
+    shape = first_var.shape
+  else:
+    dim_names = list(ds.sizes.keys())
+    shape = tuple(ds.sizes[d] for d in dim_names)
+
+  arrays = []
+  for field in schema:
+    name = field.name
+    if name in ds.coords and name in ds.dims:
+      # Broadcast 1-D coordinate to the full N-D partition shape, then ravel.
+      axis = dim_names.index(name)
+      coord = ds.coords[name].values
+      reshape = [1] * len(shape)
+      reshape[axis] = coord.shape[0]
+      arr = np.broadcast_to(coord.reshape(reshape), shape).ravel()
+      arrays.append(pa.array(arr, type=field.type))
+    else:
+      # Data variable: ravel to 1-D (zero-copy for C-contiguous arrays).
+      arrays.append(pa.array(ds[name].values.ravel(), type=field.type))
+
+  return pa.RecordBatch.from_arrays(arrays, schema=schema)
+
+
 def _parse_schema(ds) -> pa.Schema:
   """Extracts a `pa.Schema` from the Dataset, treating dims and data_vars as columns."""
   columns = []
@@ -173,12 +227,12 @@ def _parse_schema(ds) -> pa.Schema:
 
 
 # Type alias for partition metadata: maps dimension name to (min, max, dtype_str) values
-PartitionBounds = t.Dict[str, t.Tuple[t.Any, t.Any, str]]
+PartitionBounds = dict[str, tuple[Any, Any, str]]
 
 
 def partition_metadata(
-    ds: xr.Dataset, blocks: t.List[Block]
-) -> t.List[PartitionBounds]:
+    ds: xr.Dataset, blocks: list[Block]
+) -> list[PartitionBounds]:
   """Compute min/max coordinate values for each partition.
 
   This metadata enables filter pushdown: SQL queries with WHERE clauses

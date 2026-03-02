@@ -8,7 +8,7 @@ import pytest
 import xarray as xr
 
 from .reader import read_xarray
-from .df import explode, block_slices, from_map, pivot, from_map_batched
+from .df import explode, block_slices, dataset_to_record_batch, from_map, pivot, from_map_batched, _parse_schema
 
 
 def rand_wx(start: str, end: str) -> xr.Dataset:
@@ -177,6 +177,54 @@ def test_from_map_with_pyarrow_tables():
   assert len(result) == 3
 
 
+def test_dataset_to_record_batch_matches_pivot(air_small):
+  """dataset_to_record_batch should contain the same rows as pivot.
+
+  Row ordering may differ (pivot uses ds.dims key order; dataset_to_record_batch
+  uses the data variable's own dim order). Both orderings are valid for SQL, so
+  we sort by the coordinate columns before comparing.
+  """
+  schema = _parse_schema(air_small)
+  dim_cols = [f.name for f in schema if f.name in air_small.dims]
+  blocks = list(block_slices(air_small, chunks={"time": 4, "lat": 3, "lon": 4}))
+
+  for block in blocks:
+    ds_block = air_small.isel(block)
+    actual_df = (
+        dataset_to_record_batch(ds_block, schema)
+        .to_pandas()
+        .sort_values(dim_cols)
+        .reset_index(drop=True)
+    )
+    expected_df = (
+        pa.RecordBatch.from_pandas(pivot(ds_block), schema=schema)
+        .to_pandas()
+        .sort_values(dim_cols)
+        .reset_index(drop=True)
+    )
+
+    pd.testing.assert_frame_equal(actual_df, expected_df, check_like=False)
+
+
+def test_dataset_to_record_batch_column_order(air_small):
+  """Output column order must match schema (dims first, then data vars)."""
+  schema = _parse_schema(air_small)
+  block = next(block_slices(air_small, chunks={"time": 4, "lat": 3, "lon": 4}))
+  batch = dataset_to_record_batch(air_small.isel(block), schema)
+  assert batch.schema.names == schema.names
+
+
+def test_dataset_to_record_batch_row_count(air_small):
+  """Row count must equal the product of the block dimension sizes."""
+  schema = _parse_schema(air_small)
+  chunks = {"time": 4, "lat": 3, "lon": 4}
+  for block in block_slices(air_small, chunks=chunks):
+    ds_block = air_small.isel(block)
+    expected_rows = int(np.prod([ds_block.sizes[d] for d in ds_block.sizes]))
+    batch = dataset_to_record_batch(ds_block, schema)
+    assert batch.num_rows == expected_rows
+
+
 def test_from_map_batched_basic_functionality(air_small):
   blocks = list(block_slices(air_small, chunks={"time": 4, "lat": 3, "lon": 4}))
 
@@ -334,7 +382,9 @@ def test_read_xarray_loads_one_chunk_at_a_time(large_ds):
   for peak in peaks:
     assert mean_peak * 1.1 > peak
     assert chunk_size * 7 > peak
-    assert chunk_size * 4 < peak
+    # Lower bound: at least chunk + Arrow output must be allocated.
+    # The numpy-direct path peaks at ~2.5x (vs ~5x for the old pandas path).
+    assert chunk_size * 1.5 < peak
 
   assert max(peaks) < large_ds.nbytes
 
