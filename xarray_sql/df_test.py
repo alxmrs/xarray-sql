@@ -431,20 +431,18 @@ def test_read_xarray_loads_one_chunk_at_a_time(large_ds):
     peaks.append(cur_peak)
 
   for size in sizes:
-    # Upper bound: never exceed 3 chunks in memory at once.
-    assert chunk_size * 3 > size
-    # Lower bound: data-variable arrays for the current chunk are held by
-    # iter_record_batches while it yields sub-batches, so at least one
-    # chunk's worth of raw data must always be allocated.
-    assert chunk_size < size
+    # Observed range: 1.59–1.83× chunk_size.
+    # iter_record_batches holds data-variable arrays (≈1× chunk) while
+    # yielding sub-batches, plus the current Arrow batch (≈0.65× chunk).
+    assert chunk_size * 1.3 < size, f"size {size} unexpectedly low"
+    assert chunk_size * 2.2 > size, f"size {size} unexpectedly high"
 
   for peak in peaks:
-    # Upper bound: peak never exceeds 7× the raw chunk size.
-    assert chunk_size * 7 > peak
-    # Lower bound: at least the chunk data + one Arrow batch is allocated.
-    # The streaming path peaks at ~2–3× chunk_size (first batch triggers
-    # Dask compute for the full chunk, subsequent batches are lower).
-    assert chunk_size < peak
+    # Observed range: 1.84–3.28× chunk_size.
+    # Peak includes data arrays + Arrow batch + temporary coordinate index
+    # arrays; the first batch of each chunk is highest (Dask compute overhead).
+    assert chunk_size * 1.5 < peak, f"peak {peak} unexpectedly low"
+    assert chunk_size * 4.0 > peak, f"peak {peak} unexpectedly high"
 
   assert max(peaks) < large_ds.nbytes
 
