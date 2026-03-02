@@ -16,7 +16,14 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 import xarray as xr
 
-from .df import Block, Chunks, block_slices, partition_metadata, pivot, _parse_schema
+from .df import (
+    Block,
+    Chunks,
+    _parse_schema,
+    block_slices,
+    dataset_to_record_batch,
+    partition_metadata,
+)
 
 if TYPE_CHECKING:
   from ._native import LazyArrowStreamTable
@@ -95,9 +102,9 @@ class XarrayRecordBatchReader:
       if self._iteration_callback is not None:
         self._iteration_callback(block)
 
-      # Convert this block to a RecordBatch
-      df = pivot(self._ds.isel(block))
-      yield pa.RecordBatch.from_pandas(df, schema=self._schema)
+      # Convert this block to a RecordBatch directly from numpy arrays,
+      # bypassing the pandas round-trip for lower peak memory usage.
+      yield dataset_to_record_batch(self._ds.isel(block), self._schema)
 
   def __arrow_c_stream__(
       self, requested_schema: object | None = None
@@ -246,9 +253,9 @@ def read_xarray_table(
       if _iteration_callback is not None:
         _iteration_callback(block)
 
-      # Extract just this block from the dataset and convert to Arrow
-      df = pivot(ds.isel(block))
-      batch = pa.RecordBatch.from_pandas(df, schema=schema)
+      # Convert this block to Arrow directly from numpy arrays,
+      # bypassing the pandas round-trip for lower peak memory usage.
+      batch = dataset_to_record_batch(ds.isel(block), schema)
       return pa.RecordBatchReader.from_batches(schema, [batch])
 
     return make_stream
