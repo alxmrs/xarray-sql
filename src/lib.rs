@@ -608,8 +608,11 @@ impl PartitionStream for PyArrowStreamPartition {
         let factory = Python::attach(|py| self.stream_factory.clone_ref(py));
 
         // Create a lazy stream using try_stream! macro.
-        // This is cleaner than manual state management with unfold.
-        // Each iteration acquires the GIL and reads one batch.
+        // The GIL is acquired only for the duration of each Python call
+        // and released between batches.  After each yielded batch we call
+        // yield_now() to explicitly suspend this task, giving the Tokio
+        // executor a chance to poll other partition streams (which can then
+        // acquire the GIL and make progress in parallel).
         let batch_stream = try_stream! {
             // Call factory to get the PyArrow RecordBatchReader
             let reader: Py<PyAny> = Python::attach(|py| {
@@ -618,7 +621,10 @@ impl PartitionStream for PyArrowStreamPartition {
                 })
             })?;
 
-            // Read batches until StopIteration
+            // Read batches until StopIteration.
+            // The GIL is released between iterations; yield_now() ensures
+            // other async tasks (i.e., other partitions) are scheduled
+            // before this stream is polled again.
             loop {
                 let batch_result = Python::attach(|py| {
                     let bound_reader = reader.bind(py);
@@ -644,7 +650,12 @@ impl PartitionStream for PyArrowStreamPartition {
                 });
 
                 match batch_result {
-                    Ok(Some(batch)) => yield batch,
+                    Ok(Some(batch)) => {
+                        yield batch;
+                        // Yield to the executor so that other partition
+                        // streams can acquire the GIL and make progress.
+                        tokio::task::yield_now().await;
+                    }
                     Ok(None) => break,
                     Err(e) => Err(e)?,
                 }
