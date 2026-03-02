@@ -306,6 +306,45 @@ def _parse_schema(ds) -> pa.Schema:
 PartitionBounds = dict[str, tuple[Any, Any, str]]
 
 
+def _block_metadata(coord_arrays: dict, block: Block) -> PartitionBounds:
+  """Compute min/max coordinate values for a single partition block.
+
+  Args:
+      coord_arrays: Pre-materialised coordinate arrays keyed by dimension name
+          string.  Hoist this outside any loop to avoid repeated remote I/O
+          for Zarr-backed datasets.
+      block: A single block slice dict from block_slices().
+
+  Returns:
+      Dict mapping dimension name to (min_value, max_value, dtype_str).
+      Dimensions with an empty slice are omitted; the Rust pruning logic
+      treats missing dimensions conservatively (never prunes on them).
+  """
+  ranges: PartitionBounds = {}
+  for dim, slc in block.items():
+    coord_values = coord_arrays[str(dim)][slc]
+    if len(coord_values) > 0:
+      first, last = coord_values[0], coord_values[-1]
+      if first <= last:
+        min_val, max_val = first, last
+      else:
+        min_val, max_val = last, first
+
+      if isinstance(min_val, (np.datetime64, pd.Timestamp)):
+        min_val = int(pd.Timestamp(min_val).value)
+        max_val = int(pd.Timestamp(max_val).value)
+        ranges[str(dim)] = (min_val, max_val, "timestamp_ns")
+      elif hasattr(min_val, "item"):
+        min_val = min_val.item()
+        max_val = max_val.item()
+        dtype = "float64" if isinstance(min_val, float) else "int64"
+        ranges[str(dim)] = (min_val, max_val, dtype)
+      else:
+        dtype = "float64" if isinstance(min_val, float) else "int64"
+        ranges[str(dim)] = (min_val, max_val, dtype)
+  return ranges
+
+
 def partition_metadata(
     ds: xr.Dataset, blocks: list[Block]
 ) -> list[PartitionBounds]:
@@ -336,38 +375,4 @@ def partition_metadata(
   # N_partitions × N_dims times is wasteful and, for remote Zarr-backed datasets
   # (e.g. ARCO-ERA5 on GCS), may trigger repeated network I/O.
   coord_arrays = {str(dim): ds.coords[dim].values for dim in ds.dims}
-
-  metadata = []
-  for block in blocks:
-    ranges: PartitionBounds = {}
-    for dim, slc in block.items():
-      coord_values = coord_arrays[str(dim)][slc]
-      if len(coord_values) > 0:
-        # Use endpoints for the common monotonic case (O(1)).
-        # xarray/CF-convention dimension coordinates are almost always
-        # monotonic; even for descending axes (e.g. latitude 90→-90)
-        # first/last gives the correct bounds after the min/max swap below.
-        first, last = coord_values[0], coord_values[-1]
-        if first <= last:
-          min_val, max_val = first, last
-        else:
-          min_val, max_val = last, first
-
-        # Convert numpy scalar types to Python native types
-        # This is required for PyO3 FFI conversion
-        if isinstance(min_val, (np.datetime64, pd.Timestamp)):
-          # Convert datetime to nanoseconds since epoch
-          min_val = int(pd.Timestamp(min_val).value)
-          max_val = int(pd.Timestamp(max_val).value)
-          ranges[str(dim)] = (min_val, max_val, "timestamp_ns")
-        elif hasattr(min_val, "item"):
-          # numpy scalar -> Python native
-          min_val = min_val.item()
-          max_val = max_val.item()
-          dtype = "float64" if isinstance(min_val, float) else "int64"
-          ranges[str(dim)] = (min_val, max_val, dtype)
-        else:
-          dtype = "float64" if isinstance(min_val, float) else "int64"
-          ranges[str(dim)] = (min_val, max_val, dtype)
-    metadata.append(ranges)
-  return metadata
+  return [_block_metadata(coord_arrays, block) for block in blocks]
