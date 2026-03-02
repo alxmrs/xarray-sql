@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 import xarray as xr
 
-from .df import Block, Chunks, block_slices, pivot, _parse_schema
+from .df import Block, Chunks, block_slices, partition_metadata, pivot, _parse_schema
 
 if TYPE_CHECKING:
   from ._native import LazyArrowStreamTable
@@ -183,18 +183,19 @@ def read_xarray_table(
   Each chunk becomes a separate partition, enabling DataFusion's parallel
   execution across multiple cores.
 
+  Filter Pushdown:
+      SQL queries with WHERE clauses on dimension columns (time, lat, lon, etc.)
+      automatically prune partitions that can't contain matching rows. For example:
+
+          # This query will skip loading partitions with time < '2020-02-01'
+          result = ctx.sql('SELECT * FROM air WHERE time > \"2020-02-01\"').to_arrow_table()
+
+      Supported operators: =, <, >, <=, >=, BETWEEN, IN, AND, OR.
+
   Note:
       Due to a bug in DataFusion v51.0.0's collect() method, use
       `to_arrow_table()` instead of `collect()` for aggregation queries
-      to ensure complete results::
-
-          # Correct - use to_arrow_table()
-          result = ctx.sql('SELECT lat, AVG(temp) FROM t GROUP BY lat').to_arrow_table()
-
-          # May return partial results with collect()
-          result = ctx.sql('SELECT lat, AVG(temp) FROM t GROUP BY lat').collect()
-
-      This should be fixed when we upgrade datafusion-python to 52 (#107).
+      to ensure complete results. This should be fixed in datafusion-python 52+.
 
   Args:
       ds: An xarray Dataset. All data_vars must share the same dimensions.
@@ -218,16 +219,20 @@ def read_xarray_table(
       >>> ctx.register_table('air', table)
       >>>
       >>> # Data is only read here, during query execution
+      >>> # Filters on 'time' will prune partitions automatically!
       >>> result = ctx.sql('SELECT AVG(air) FROM air').to_arrow_table()
-      >>> # Can query again - each query creates a fresh stream
-      >>> result2 = ctx.sql('SELECT * FROM air LIMIT 10').to_arrow_table()
   """
   from ._native import LazyArrowStreamTable
 
   # Get schema from dataset without creating a stream
   schema = _parse_schema(ds)
 
-  blocks = block_slices(ds, chunks)
+  # Compute block slices - need list for metadata computation
+  blocks = list(block_slices(ds, chunks))
+
+  # Compute partition metadata for filter pushdown
+  # This extracts min/max coordinate values per partition
+  metadata = partition_metadata(ds, blocks)
 
   # Create a factory function for each block (partition)
   # Each factory produces a RecordBatchReader for its specific chunk
@@ -251,4 +256,5 @@ def read_xarray_table(
   # Create one factory per block
   factories = [make_partition_factory(block) for block in blocks]
 
-  return LazyArrowStreamTable(factories, schema)
+  # Pass factories, schema, and metadata to Rust
+  return LazyArrowStreamTable(factories, schema, metadata)

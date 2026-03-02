@@ -170,3 +170,74 @@ def _parse_schema(ds) -> pa.Schema:
     columns.append(pa.field(var_name, pa_type))
 
   return pa.schema(columns)
+
+
+# Type alias for partition metadata: maps dimension name to (min, max, dtype_str) values
+PartitionBounds = t.Dict[str, t.Tuple[t.Any, t.Any, str]]
+
+
+def partition_metadata(
+    ds: xr.Dataset, blocks: t.List[Block]
+) -> t.List[PartitionBounds]:
+  """Compute min/max coordinate values for each partition.
+
+  This metadata enables filter pushdown: SQL queries with WHERE clauses
+  on dimension columns can prune partitions that can't contain matching rows.
+
+  Args:
+      ds: The xarray Dataset containing coordinate values.
+      blocks: List of block slices from block_slices().
+
+  Returns:
+      List of dicts mapping dimension name to (min_value, max_value, dtype_str)
+      tuples.
+      - For datetime64, values are nanoseconds since Unix epoch (int64),
+        dtype_str is "timestamp_ns"
+      - For numeric types, values are Python int or float, dtype_str is
+        "int64" or "float64"
+
+  Note:
+      If a partition has an empty slice for a dimension, that dimension is
+      omitted from the partition's metadata. The Rust pruning logic treats
+      missing dimensions conservatively (never prunes on them).
+  """
+  # Hoist coordinate array reads outside the partition loop.
+  # ds.coords[dim].values materializes the full array on every call; doing it
+  # N_partitions × N_dims times is wasteful and, for remote Zarr-backed datasets
+  # (e.g. ARCO-ERA5 on GCS), may trigger repeated network I/O.
+  coord_arrays = {str(dim): ds.coords[dim].values for dim in ds.dims}
+
+  metadata = []
+  for block in blocks:
+    ranges: PartitionBounds = {}
+    for dim, slc in block.items():
+      coord_values = coord_arrays[str(dim)][slc]
+      if len(coord_values) > 0:
+        # Use endpoints for the common monotonic case (O(1)).
+        # xarray/CF-convention dimension coordinates are almost always
+        # monotonic; even for descending axes (e.g. latitude 90→-90)
+        # first/last gives the correct bounds after the min/max swap below.
+        first, last = coord_values[0], coord_values[-1]
+        if first <= last:
+          min_val, max_val = first, last
+        else:
+          min_val, max_val = last, first
+
+        # Convert numpy scalar types to Python native types
+        # This is required for PyO3 FFI conversion
+        if isinstance(min_val, (np.datetime64, pd.Timestamp)):
+          # Convert datetime to nanoseconds since epoch
+          min_val = int(pd.Timestamp(min_val).value)
+          max_val = int(pd.Timestamp(max_val).value)
+          ranges[str(dim)] = (min_val, max_val, "timestamp_ns")
+        elif hasattr(min_val, "item"):
+          # numpy scalar -> Python native
+          min_val = min_val.item()
+          max_val = max_val.item()
+          dtype = "float64" if isinstance(min_val, float) else "int64"
+          ranges[str(dim)] = (min_val, max_val, dtype)
+        else:
+          dtype = "float64" if isinstance(min_val, float) else "int64"
+          ranges[str(dim)] = (min_val, max_val, dtype)
+    metadata.append(ranges)
+  return metadata

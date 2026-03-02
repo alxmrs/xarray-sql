@@ -3443,6 +3443,7 @@ version = "0.2.0"
 dependencies = [
  "arrow",
  "async-stream",
+ "async-trait",
  "datafusion",
  "datafusion-ffi",
  "futures",
