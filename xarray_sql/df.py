@@ -209,6 +209,82 @@ def dataset_to_record_batch(
   return pa.RecordBatch.from_arrays(arrays, schema=schema)
 
 
+#: Default number of rows per emitted Arrow RecordBatch.
+#: 64 K rows balances DataFusion pipeline depth against per-batch overhead.
+DEFAULT_BATCH_SIZE: int = 65_536
+
+
+def iter_record_batches(
+    ds: xr.Dataset,
+    schema: pa.Schema,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> Iterator[pa.RecordBatch]:
+  """Yield RecordBatches of at most *batch_size* rows from a partition Dataset.
+
+  Unlike :func:`dataset_to_record_batch`, which materialises the entire
+  partition as one batch, this generator emits smaller batches so that
+  DataFusion can begin filtering and aggregating before the full partition
+  is loaded.  Peak memory per batch is O(batch_size) for coordinate columns
+  and O(partition_size) for data-variable columns (which must be loaded in
+  full from storage).
+
+  Coordinate values are computed per batch via strided index arithmetic —
+  no broadcast array spanning the whole partition is ever allocated.  Data
+  variable flat arrays are loaded once (triggering any remote I/O) and then
+  sliced as zero-copy views for each batch.
+
+  Args:
+      ds: A partition-sized xarray Dataset (already sliced via isel).
+      schema: The Arrow schema for the output, as produced by _parse_schema.
+      batch_size: Maximum number of rows per yielded RecordBatch.
+
+  Yields:
+      RecordBatches in schema column order, covering all rows of the
+      partition exactly once.
+  """
+  if ds.data_vars:
+    first_var = next(iter(ds.data_vars.values()))
+    dim_names = list(first_var.dims)
+    shape = first_var.shape
+  else:
+    dim_names = list(ds.sizes.keys())
+    shape = tuple(ds.sizes[d] for d in dim_names)
+
+  total_rows = int(np.prod(shape))
+
+  # Preload small 1-D coordinate arrays (negligible memory).
+  coord_values = {name: ds.coords[name].values for name in dim_names}
+
+  # C-order stride for each dimension: stride[k] = prod(shape[k+1:]).
+  # Flat row index i → coordinate index for dim k: (i // stride[k]) % shape[k].
+  strides = [int(np.prod(shape[k + 1 :])) for k in range(len(shape))]
+
+  # Load data-variable arrays fully (triggers Dask/Zarr compute once).
+  # ravel() is a zero-copy view for C-contiguous arrays.
+  data_arrays = {}
+  for field in schema:
+    if field.name not in ds.dims:
+      data_arrays[field.name] = ds[field.name].values.ravel()
+
+  for row_start in range(0, total_rows, batch_size):
+    row_end = min(row_start + batch_size, total_rows)
+    row_idx = np.arange(row_start, row_end)
+
+    arrays = []
+    for field in schema:
+      name = field.name
+      if name in ds.coords and name in ds.dims:
+        k = dim_names.index(name)
+        coord_idx = (row_idx // strides[k]) % shape[k]
+        arrays.append(pa.array(coord_values[name][coord_idx], type=field.type))
+      else:
+        arrays.append(
+            pa.array(data_arrays[name][row_start:row_end], type=field.type)
+        )
+
+    yield pa.RecordBatch.from_arrays(arrays, schema=schema)
+
+
 def _parse_schema(ds) -> pa.Schema:
   """Extracts a `pa.Schema` from the Dataset, treating dims and data_vars as columns."""
   columns = []
