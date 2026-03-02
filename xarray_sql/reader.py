@@ -20,10 +20,10 @@ from .df import (
     Block,
     Chunks,
     DEFAULT_BATCH_SIZE,
+    _block_metadata,
     _parse_schema,
     block_slices,
     iter_record_batches,
-    partition_metadata,
 )
 
 if TYPE_CHECKING:
@@ -242,36 +242,33 @@ def read_xarray_table(
   """
   from ._native import LazyArrowStreamTable
 
-  # Get schema from dataset without creating a stream
   schema = _parse_schema(ds)
 
-  # Compute block slices - need list for metadata computation
-  blocks = list(block_slices(ds, chunks))
+  # Hoist coordinate reads once; avoids N_partitions remote I/O calls for
+  # Zarr-backed datasets (e.g. ARCO-ERA5 on GCS).
+  coord_arrays = {str(dim): ds.coords[dim].values for dim in ds.dims}
 
-  # Compute partition metadata for filter pushdown
-  # This extracts min/max coordinate values per partition
-  metadata = partition_metadata(ds, blocks)
-
-  # Create a factory function for each block (partition)
-  # Each factory produces a RecordBatchReader for its specific chunk
   def make_partition_factory(
       block: Block,
   ) -> Callable[[], pa.RecordBatchReader]:
-    """Create a factory function for a specific block/chunk."""
-
     def make_stream() -> pa.RecordBatchReader:
-      # Call the iteration callback if provided (for testing)
       if _iteration_callback is not None:
         _iteration_callback(block)
-
       return pa.RecordBatchReader.from_batches(
           schema, iter_record_batches(ds.isel(block), schema, batch_size)
       )
 
     return make_stream
 
-  # Create one factory per block
-  factories = [make_partition_factory(block) for block in blocks]
+  def partition_pairs():
+    """Lazily yield (factory, metadata) for each partition.
 
-  # Pass factories, schema, and metadata to Rust
-  return LazyArrowStreamTable(factories, schema, metadata)
+    Consuming this generator one item at a time means Python never holds
+    all N block dicts, metadata dicts, and factory closures simultaneously.
+    Peak Python memory during registration is O(1) per partition instead
+    of O(N_partitions).
+    """
+    for block in block_slices(ds, chunks):
+      yield make_partition_factory(block), _block_metadata(coord_arrays, block)
+
+  return LazyArrowStreamTable(partition_pairs(), schema)

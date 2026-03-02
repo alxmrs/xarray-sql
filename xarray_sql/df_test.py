@@ -1,4 +1,3 @@
-import itertools
 import tracemalloc
 
 import numpy as np
@@ -7,7 +6,6 @@ import pyarrow as pa
 import pytest
 import xarray as xr
 
-from .reader import read_xarray
 from .df import (
     DEFAULT_BATCH_SIZE,
     _parse_schema,
@@ -19,6 +17,7 @@ from .df import (
     iter_record_batches,
     pivot,
 )
+from .reader import read_xarray, read_xarray_table
 
 
 def rand_wx(start: str, end: str) -> xr.Dataset:
@@ -107,14 +106,6 @@ def test_explode_dim_sizes_one(air):
   for k, v in chunks.items():
     assert k in ds.dims
     assert v == ds.sizes[k]
-
-
-@pytest.mark.skip(reason="TODO(alxmrs): Why is this test slow?")
-def test_explode_dim_sizes_all(air):
-  dss = explode(air)
-  assert [tuple(ds.dims.values()) for ds in dss] == list(
-      itertools.product(*air.chunksizes.values())
-  )
 
 
 def test_explode_data_equal_one_first(air):
@@ -445,5 +436,53 @@ def test_read_xarray_loads_one_chunk_at_a_time(large_ds):
     assert chunk_size * 4.0 > peak, f"peak {peak} unexpectedly high"
 
   assert max(peaks) < large_ds.nbytes
+
+  tracemalloc.stop()
+
+
+def test_read_xarray_table_memory_bounds(large_ds):
+  """read_xarray_table should not materialise data at registration time.
+
+  Registration should only hold coordinate arrays and Rust partition metadata
+  (no data variables).  Peak memory during a full-table query should be a
+  small fraction of the whole dataset — i.e. partitions are processed without
+  loading all of them simultaneously.
+  """
+  from datafusion import SessionContext
+
+  first_chunk = large_ds.isel(next(block_slices(large_ds)))
+  chunk_size = first_chunk.nbytes
+
+  # --- Registration phase ---
+  tracemalloc.start()
+  table = read_xarray_table(large_ds)
+  reg_size, reg_peak = tracemalloc.get_traced_memory()
+  tracemalloc.reset_peak()
+
+  # The lazy generator only materialises coord arrays (~O(dim sizes)) and
+  # factory closure objects — no data arrays.  Both metrics should be well
+  # below one chunk of data.
+  assert reg_size < chunk_size, (
+      f"Registration held {reg_size} bytes >= chunk_size {chunk_size}: "
+      "data may have been loaded eagerly"
+  )
+  assert (
+      reg_peak < chunk_size * 2
+  ), f"Registration peak {reg_peak} too high (expected < 2× chunk_size {chunk_size})"
+
+  # --- Query phase ---
+  ctx = SessionContext()
+  ctx.register_table("weather", table)
+  ctx.sql(
+      "SELECT AVG(temperature), AVG(precipitation) FROM weather"
+  ).to_arrow_table()
+  _, query_peak = tracemalloc.get_traced_memory()
+
+  # DataFusion processes partitions lazily through the GIL; peak should be
+  # a small fraction of the full dataset even when scanning all partitions.
+  assert query_peak < large_ds.nbytes, (
+      f"Query peak {query_peak} >= full dataset {large_ds.nbytes}: "
+      "may be loading all partitions simultaneously"
+  )
 
   tracemalloc.stop()

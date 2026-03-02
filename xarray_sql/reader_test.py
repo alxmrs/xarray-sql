@@ -791,8 +791,8 @@ class TestErrorPropagation:
       raise ValueError("Factory intentionally failed")
 
     schema = pa.schema([("value", pa.int64())])
-    # API now requires a list of factories (one per partition)
-    table = LazyArrowStreamTable([failing_factory], schema)
+    # partitions is an iterable of (factory, metadata_dict) pairs
+    table = LazyArrowStreamTable([(failing_factory, {})], schema)
 
     ctx = SessionContext()
     ctx.register_table("test_table", table)
