@@ -8,7 +8,17 @@ import pytest
 import xarray as xr
 
 from .reader import read_xarray
-from .df import explode, block_slices, dataset_to_record_batch, from_map, pivot, from_map_batched, _parse_schema
+from .df import (
+    DEFAULT_BATCH_SIZE,
+    _parse_schema,
+    block_slices,
+    dataset_to_record_batch,
+    explode,
+    from_map,
+    from_map_batched,
+    iter_record_batches,
+    pivot,
+)
 
 
 def rand_wx(start: str, end: str) -> xr.Dataset:
@@ -175,6 +185,55 @@ def test_from_map_with_pyarrow_tables():
   result = from_map(make_arrow_table, [1, 2, 3])
   assert isinstance(result, pa.Table)
   assert len(result) == 3
+
+
+def test_iter_record_batches_splits_into_multiple_batches(air_small):
+  """iter_record_batches should emit >1 batch when partition exceeds batch_size."""
+  schema = _parse_schema(air_small)
+  block = next(block_slices(air_small, chunks={"time": 4, "lat": 3, "lon": 4}))
+  ds_block = air_small.isel(block)
+  total_rows = int(np.prod([ds_block.sizes[d] for d in ds_block.sizes]))
+
+  small_batch = 16  # force many small batches
+  batches = list(iter_record_batches(ds_block, schema, batch_size=small_batch))
+
+  assert len(batches) == -(-total_rows // small_batch)  # ceiling division
+  assert all(b.num_rows <= small_batch for b in batches)
+  assert sum(b.num_rows for b in batches) == total_rows
+
+
+def test_iter_record_batches_matches_dataset_to_record_batch(air_small):
+  """Concatenating all iter_record_batches output must equal dataset_to_record_batch."""
+  schema = _parse_schema(air_small)
+  dim_cols = [f.name for f in schema if f.name in air_small.dims]
+  block = next(block_slices(air_small, chunks={"time": 4, "lat": 3, "lon": 4}))
+  ds_block = air_small.isel(block)
+
+  batches = list(iter_record_batches(ds_block, schema, batch_size=16))
+  actual_df = (
+      pa.Table.from_batches(batches)
+      .to_pandas()
+      .sort_values(dim_cols)
+      .reset_index(drop=True)
+  )
+  expected_df = (
+      dataset_to_record_batch(ds_block, schema)
+      .to_pandas()
+      .sort_values(dim_cols)
+      .reset_index(drop=True)
+  )
+  pd.testing.assert_frame_equal(actual_df, expected_df)
+
+
+def test_iter_record_batches_default_batch_size():
+  """A single-batch partition (rows <= DEFAULT_BATCH_SIZE) yields exactly one batch."""
+  ds = xr.tutorial.open_dataset("air_temperature").isel(time=slice(0, 2))
+  schema = _parse_schema(ds)
+  total_rows = int(np.prod([ds.sizes[d] for d in ds.sizes]))
+  assert total_rows <= DEFAULT_BATCH_SIZE, "fixture too large — adjust isel"
+  batches = list(iter_record_batches(ds, schema))
+  assert len(batches) == 1
+  assert batches[0].num_rows == total_rows
 
 
 def test_dataset_to_record_batch_matches_pivot(air_small):
@@ -371,20 +430,21 @@ def test_read_xarray_loads_one_chunk_at_a_time(large_ds):
     sizes.append(cur_size)
     peaks.append(cur_peak)
 
-  mean_size = np.mean(sizes)
-  mean_peak = np.mean(peaks)
-
   for size in sizes:
-    assert mean_size * 1.1 > size
+    # Upper bound: never exceed 3 chunks in memory at once.
     assert chunk_size * 3 > size
-    assert chunk_size * 2 < size
+    # Lower bound: data-variable arrays for the current chunk are held by
+    # iter_record_batches while it yields sub-batches, so at least one
+    # chunk's worth of raw data must always be allocated.
+    assert chunk_size < size
 
   for peak in peaks:
-    assert mean_peak * 1.1 > peak
+    # Upper bound: peak never exceeds 7× the raw chunk size.
     assert chunk_size * 7 > peak
-    # Lower bound: at least chunk + Arrow output must be allocated.
-    # The numpy-direct path peaks at ~2.5x (vs ~5x for the old pandas path).
-    assert chunk_size * 1.5 < peak
+    # Lower bound: at least the chunk data + one Arrow batch is allocated.
+    # The streaming path peaks at ~2–3× chunk_size (first batch triggers
+    # Dask compute for the full chunk, subsequent batches are lower).
+    assert chunk_size < peak
 
   assert max(peaks) < large_ds.nbytes
 

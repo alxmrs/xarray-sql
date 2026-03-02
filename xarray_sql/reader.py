@@ -19,9 +19,10 @@ import xarray as xr
 from .df import (
     Block,
     Chunks,
+    DEFAULT_BATCH_SIZE,
     _parse_schema,
     block_slices,
-    dataset_to_record_batch,
+    iter_record_batches,
     partition_metadata,
 )
 
@@ -61,6 +62,7 @@ class XarrayRecordBatchReader:
       ds: xr.Dataset,
       chunks: Chunks = None,
       *,
+      batch_size: int = DEFAULT_BATCH_SIZE,
       _iteration_callback: Callable[[Block], None] | None = None,
   ):
     """Initialize the lazy reader.
@@ -69,12 +71,16 @@ class XarrayRecordBatchReader:
         ds: An xarray Dataset. All data_vars must share the same dimensions.
         chunks: Xarray-like chunks specification. If not provided, uses
             the Dataset's existing chunks.
+        batch_size: Maximum rows per emitted Arrow RecordBatch.  Smaller
+            values let DataFusion start processing earlier at the cost of
+            more Python→Arrow conversion calls.
         _iteration_callback: Internal callback for testing. Called with
             each block dict just before it's converted to Arrow. This
             allows tests to track when iteration actually occurs.
     """
     self._ds = ds
     self._chunks = chunks
+    self._batch_size = batch_size
     self._schema = _parse_schema(ds)
     self._iteration_callback = _iteration_callback
     self._consumed = False
@@ -95,16 +101,17 @@ class XarrayRecordBatchReader:
     """Generate RecordBatches lazily from xarray blocks.
 
     This generator is only consumed when the Arrow stream's get_next
-    is called, ensuring true lazy evaluation.
+    is called, ensuring true lazy evaluation.  Each xarray block is
+    emitted as one or more RecordBatches of at most self._batch_size rows.
     """
     for block in block_slices(self._ds, self._chunks):
       # Call the iteration callback if provided (for testing)
       if self._iteration_callback is not None:
         self._iteration_callback(block)
 
-      # Convert this block to a RecordBatch directly from numpy arrays,
-      # bypassing the pandas round-trip for lower peak memory usage.
-      yield dataset_to_record_batch(self._ds.isel(block), self._schema)
+      yield from iter_record_batches(
+          self._ds.isel(block), self._schema, self._batch_size
+      )
 
   def __arrow_c_stream__(
       self, requested_schema: object | None = None
@@ -179,6 +186,7 @@ def read_xarray_table(
     ds: xr.Dataset,
     chunks: Chunks = None,
     *,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     _iteration_callback: Callable[[Block], None] | None = None,
 ) -> "LazyArrowStreamTable":
   """Create a lazy DataFusion table from an xarray Dataset.
@@ -208,6 +216,9 @@ def read_xarray_table(
       ds: An xarray Dataset. All data_vars must share the same dimensions.
       chunks: Xarray-like chunks specification. If not provided, uses
           the Dataset's existing chunks.
+      batch_size: Maximum rows per Arrow RecordBatch emitted per partition.
+          Smaller values let DataFusion start processing earlier; the default
+          (65 536) works well for most datasets.
       _iteration_callback: Internal callback for testing. Called with
           each block dict just before it's converted to Arrow.
 
@@ -253,10 +264,9 @@ def read_xarray_table(
       if _iteration_callback is not None:
         _iteration_callback(block)
 
-      # Convert this block to Arrow directly from numpy arrays,
-      # bypassing the pandas round-trip for lower peak memory usage.
-      batch = dataset_to_record_batch(ds.isel(block), schema)
-      return pa.RecordBatchReader.from_batches(schema, [batch])
+      return pa.RecordBatchReader.from_batches(
+          schema, iter_record_batches(ds.isel(block), schema, batch_size)
+      )
 
     return make_stream
 
