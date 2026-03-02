@@ -9,3 +9,6 @@ __pycache__
 target
 test_data
 *.so
+.chainlink
+.claude
+CHANGELOG.md
