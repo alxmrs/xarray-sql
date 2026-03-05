@@ -45,19 +45,28 @@ def small_ds():
 
 
 class IterationTracker:
-  """Tracks when iteration occurs for testing lazy evaluation."""
+  """Tracks when iteration occurs for testing lazy evaluation.
+
+  The callback signature is ``(block, projection_names)`` where
+  ``projection_names`` is the list of column names requested by the query
+  (``None`` when no projection pushdown occurred, e.g. for
+  ``XarrayRecordBatchReader`` or a ``SELECT *`` query).
+  """
 
   def __init__(self):
     self.iteration_count = 0
     self.blocks_seen = []
+    self.projections_seen = []
 
-  def __call__(self, block):
+  def __call__(self, block, projection_names=None):
     self.iteration_count += 1
     self.blocks_seen.append(block)
+    self.projections_seen.append(projection_names)
 
   def reset(self):
     self.iteration_count = 0
     self.blocks_seen = []
+    self.projections_seen = []
 
 
 class TestXarrayRecordBatchReaderCreation:
@@ -448,7 +457,7 @@ class StreamingTracker:
     self.batch_count = 0
     self._lock = threading.Lock()
 
-  def __call__(self, block):
+  def __call__(self, block, projection_names=None):
     with self._lock:
       self.batch_times.append(time.monotonic())
       self.batch_count += 1
@@ -515,7 +524,7 @@ class TestStreamingBehavior:
     """Verify that all partitions are processed (order may vary with parallelism)."""
     blocks_seen = []
 
-    def track_order(block):
+    def track_order(block, projection_names=None):
       # Record the time slice for ordering verification
       blocks_seen.append(block.get("time", None))
 
@@ -811,7 +820,7 @@ class TestErrorPropagation:
     """Errors during batch iteration should propagate to the user."""
     error_on_batch = 2  # Fail on the third batch
 
-    def failing_callback(block):
+    def failing_callback(block, projection_names=None):
       # Track which batch we're on using a mutable default
       if not hasattr(failing_callback, "count"):
         failing_callback.count = 0
@@ -873,7 +882,7 @@ class TestMultiplePartitions:
     call_count = {"value": 0}
     original_callback = None
 
-    def counting_callback(block):
+    def counting_callback(block, projection_names=None):
       call_count["value"] += 1
       if original_callback:
         original_callback(block)
@@ -1230,3 +1239,122 @@ class TestFilterPushdown:
     # Result should be 0 rows
     count = result.to_pandas()["cnt"].iloc[0]
     assert count == 0, f"Expected 0 rows, got {count}"
+
+
+class TestProjectionPushdown:
+  """Tests that column projection is pushed down to the xarray factory.
+
+  When a query requests only a subset of data variables, the factory should
+  receive only those column names — not the full schema — so that xarray
+  skips loading unrequested variables from disk.
+  """
+
+  @pytest.fixture
+  def two_var_ds(self):
+    """A small dataset with two data variables sharing the same dimensions."""
+    np.random.seed(0)
+    time = pd.date_range("2020-01-01", periods=10, freq="D")
+    lat = np.linspace(-10, 10, 5, dtype=np.float32)
+    shape = (10, 5)
+    return xr.Dataset(
+        {
+            "temperature": (
+                ["time", "lat"],
+                np.random.rand(*shape).astype(np.float32),
+            ),
+            "precipitation": (
+                ["time", "lat"],
+                np.random.rand(*shape).astype(np.float32),
+            ),
+        },
+        coords={"time": time, "lat": lat},
+    )
+
+  def test_single_column_select_projects_only_that_variable(self, two_var_ds):
+    """SELECT on one data variable should pass only that variable to the factory."""
+    tracker = IterationTracker()
+    table = read_xarray_table(
+        two_var_ds,
+        chunks={"time": 5},
+        _iteration_callback=tracker,
+    )
+
+    ctx = SessionContext()
+    ctx.register_table("data", table)
+    ctx.sql("SELECT AVG(temperature) FROM data").to_arrow_table()
+
+    assert (
+        tracker.iteration_count > 0
+    ), "Expected at least one partition to be read"
+    for proj in tracker.projections_seen:
+      assert (
+          proj is not None
+      ), "Expected projection_names to be set for a single-column SELECT, got None"
+      assert (
+          "temperature" in proj
+      ), f"Expected 'temperature' in projection_names, got {proj}"
+      assert (
+          "precipitation" not in proj
+      ), f"'precipitation' should not be loaded for a temperature-only query, got {proj}"
+
+  def test_full_select_includes_all_variables(self, two_var_ds):
+    """SELECT * should include all data variables in the projection."""
+    tracker = IterationTracker()
+    table = read_xarray_table(
+        two_var_ds,
+        chunks={"time": 5},
+        _iteration_callback=tracker,
+    )
+
+    ctx = SessionContext()
+    ctx.register_table("data", table)
+    ctx.sql("SELECT * FROM data").to_arrow_table()
+
+    assert (
+        tracker.iteration_count > 0
+    ), "Expected at least one partition to be read"
+    for proj in tracker.projections_seen:
+      # DataFusion sends all column names explicitly even for SELECT *.
+      # Either None (no pushdown) or a list containing both data variables.
+      if proj is not None:
+        assert "temperature" in proj, f"Missing 'temperature' in {proj}"
+        assert "precipitation" in proj, f"Missing 'precipitation' in {proj}"
+
+  def test_multi_column_select_includes_all_requested(self, two_var_ds):
+    """SELECT on multiple data variables should include all of them in the projection."""
+    tracker = IterationTracker()
+    table = read_xarray_table(
+        two_var_ds,
+        chunks={"time": 5},
+        _iteration_callback=tracker,
+    )
+
+    ctx = SessionContext()
+    ctx.register_table("data", table)
+    ctx.sql(
+        "SELECT AVG(temperature), AVG(precipitation) FROM data"
+    ).to_arrow_table()
+
+    assert tracker.iteration_count > 0
+    for proj in tracker.projections_seen:
+      # Both variables requested — either None (full scan) or both present
+      if proj is not None:
+        assert "temperature" in proj, f"Missing 'temperature' in {proj}"
+        assert "precipitation" in proj, f"Missing 'precipitation' in {proj}"
+
+  def test_projection_result_correctness(self, two_var_ds):
+    """Single-column projected query returns the same result as an unprojected one."""
+    table = read_xarray_table(two_var_ds, chunks={"time": 5})
+    ctx = SessionContext()
+    ctx.register_table("data", table)
+
+    projected = (
+        ctx.sql("SELECT AVG(temperature) as avg_t FROM data")
+        .to_arrow_table()
+        .to_pandas()["avg_t"]
+        .iloc[0]
+    )
+    expected = float(two_var_ds["temperature"].values.mean())
+    assert (
+        abs(projected - expected) < 1e-4
+    ), f"Projected AVG {projected} differs from expected {expected}"

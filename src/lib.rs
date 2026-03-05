@@ -556,8 +556,8 @@ impl TableProvider for PrunableStreamingTable {
         //
         // We push when the projection includes at least one data variable
         // (non-dimension column), because xarray can selectively load only
-        // the requested data arrays while dimension coordinates come for free
-        // via to_dataframe()'s MultiIndex.
+        // the requested data arrays while dimension coordinates are always
+        // available via xarray's coordinate system.
         //
         // We do NOT push when:
         //   - projection is None (load everything — factory receives None)
@@ -628,7 +628,11 @@ struct PyArrowStreamPartition {
     schema: SchemaRef,
     /// A Python callable (factory) that returns a fresh stream.
     /// Signature: `make_stream(projection_names: Optional[List[str]]) -> RecordBatchReader`
-    stream_factory: Py<PyAny>,
+    ///
+    /// Wrapped in `Arc` so `clone_with_projection` can share the same Python
+    /// object across projected partitions without acquiring the GIL — only an
+    /// atomic reference-count increment is needed.
+    stream_factory: Arc<Py<PyAny>>,
     /// Column names to pass to the factory. `None` means load all columns.
     projection: Option<Vec<String>>,
 }
@@ -637,21 +641,20 @@ impl PyArrowStreamPartition {
     fn new(stream_factory: Py<PyAny>, schema: SchemaRef) -> Self {
         Self {
             schema,
-            stream_factory,
+            stream_factory: Arc::new(stream_factory),
             projection: None,
         }
     }
 
     /// Create a new partition with a baked-in column projection.
     ///
-    /// The factory reference is cloned (requires the GIL) and the new
-    /// partition uses `projected_schema` so the stream it produces has only
-    /// the requested columns.
+    /// Clones the factory `Arc` (atomic refcount increment, no GIL) and
+    /// uses `projected_schema` so the stream it produces has only the
+    /// requested columns.
     fn clone_with_projection(&self, projection: Vec<String>, projected_schema: SchemaRef) -> Self {
-        let factory = Python::attach(|py| self.stream_factory.clone_ref(py));
         Self {
             schema: projected_schema,
-            stream_factory: factory,
+            stream_factory: Arc::clone(&self.stream_factory),
             projection: Some(projection),
         }
     }
@@ -673,8 +676,8 @@ impl PartitionStream for PyArrowStreamPartition {
     fn execute(&self, _ctx: Arc<TaskContext>) -> SendableRecordBatchStream {
         let schema = Arc::clone(&self.schema);
 
-        // Clone the factory and projection with the GIL held
-        let factory = Python::attach(|py| self.stream_factory.clone_ref(py));
+        // Clone the factory Arc (no GIL needed) and the projection list.
+        let factory = Arc::clone(&self.stream_factory);
         let projection = self.projection.clone();
 
         // Create a lazy stream using try_stream! macro.
