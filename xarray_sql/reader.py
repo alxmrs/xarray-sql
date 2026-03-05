@@ -266,9 +266,13 @@ def read_xarray_table(
         # Dimension coordinates come along automatically via coords.
         data_vars_needed = [c for c in projection_names if c in data_var_names]
         ds_block = (
-            ds[data_vars_needed].isel(block) if data_vars_needed else ds.isel(block)
+            ds[data_vars_needed].isel(block)
+            if data_vars_needed
+            else ds.isel(block)
         )
-        batch_schema = pa.schema([schema.field(name) for name in projection_names])
+        batch_schema = pa.schema(
+            [schema.field(name) for name in projection_names]
+        )
       else:
         ds_block = ds.isel(block)
         batch_schema = schema
