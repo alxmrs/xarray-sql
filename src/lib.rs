@@ -158,8 +158,9 @@ impl PartitionMetadata {
 struct PrunableStreamingTable {
     schema: SchemaRef,
     /// Partition streams paired with their coordinate range metadata.
-    /// Stored as the concrete type so scan() can clone them with a projection.
-    partitions: Vec<(Arc<PyArrowStreamPartition>, PartitionMetadata)>,
+    /// Stored behind the `ProjectableStream` trait so `PrunableStreamingTable`
+    /// is not coupled to `PyArrowStreamPartition`.
+    partitions: Vec<(Arc<dyn ProjectableStream>, PartitionMetadata)>,
     /// Set of column names that are dimension columns (eligible for pruning)
     dimension_columns: HashSet<String>,
 }
@@ -167,7 +168,7 @@ struct PrunableStreamingTable {
 impl PrunableStreamingTable {
     fn new(
         schema: SchemaRef,
-        partitions: Vec<(Arc<PyArrowStreamPartition>, PartitionMetadata)>,
+        partitions: Vec<(Arc<dyn ProjectableStream>, PartitionMetadata)>,
     ) -> Self {
         // Collect dimension column names from the first partition that has
         // non-empty metadata. All partitions share the same dimension names,
@@ -436,6 +437,24 @@ impl PrunableStreamingTable {
     }
 }
 
+/// Extension trait for partition streams that support column projection.
+///
+/// Implemented by `PyArrowStreamPartition` so that `PrunableStreamingTable`
+/// can push projections to Python factories without coupling to the concrete type.
+/// Any new stream implementation (e.g. for non-Python backends) can implement this
+/// trait and be used with `PrunableStreamingTable` directly.
+trait ProjectableStream: PartitionStream + Debug {
+    /// Return a new stream that emits only the specified columns.
+    fn clone_with_projection(
+        &self,
+        projection: Arc<[String]>,
+        projected_schema: SchemaRef,
+    ) -> Arc<dyn PartitionStream>;
+
+    /// Clone this stream as a generic `PartitionStream` Arc.
+    fn clone_as_stream(&self) -> Arc<dyn PartitionStream>;
+}
+
 /// Flip a comparison operator (for when literal is on left side).
 fn flip_operator(op: &Operator) -> Operator {
     match op {
@@ -581,37 +600,40 @@ impl TableProvider for PrunableStreamingTable {
                 .collect();
             let projected_schema = Arc::new(Schema::new(proj_fields));
 
-            // Collect the requested column names to send to the factory
-            let proj_col_names: Vec<String> = indices
+            // Collect the requested column names to send to the factory.
+            // Stored in an Arc so each clone_with_projection call shares the
+            // same allocation via an atomic refcount increment (no N Vec copies).
+            let proj_col_names: Arc<[String]> = indices
                 .iter()
                 .map(|&i| self.schema.field(i).name().to_string())
-                .collect();
+                .collect::<Vec<_>>()
+                .into();
 
             // Clone each pruned partition with the projection baked in.
             // The factory will receive proj_col_names and load only those vars.
             let projected_partitions: Vec<Arc<dyn PartitionStream>> = included_indices
                 .iter()
                 .map(|&idx| {
-                    Arc::new(self.partitions[idx].0.clone_with_projection(
-                        proj_col_names.clone(),
+                    self.partitions[idx].0.clone_with_projection(
+                        Arc::clone(&proj_col_names),
                         Arc::clone(&projected_schema),
-                    )) as Arc<dyn PartitionStream>
+                    )
                 })
                 .collect();
 
             // StreamingTable already has the projected schema — pass None for
             // projection so it doesn't wrap the stream in a redundant ProjectionExec.
             let streaming = StreamingTable::try_new(projected_schema, projected_partitions)?;
-            streaming.scan(state, None, &[], limit).await
+            streaming.scan(state, None, filters, limit).await
         } else {
             // No projection pushdown — factory is called with None (loads all
             // columns). StreamingTable applies projection via ProjectionExec.
             let included_partitions: Vec<Arc<dyn PartitionStream>> = included_indices
                 .iter()
-                .map(|&idx| Arc::clone(&self.partitions[idx].0) as Arc<dyn PartitionStream>)
+                .map(|&idx| self.partitions[idx].0.clone_as_stream())
                 .collect();
             let streaming = StreamingTable::try_new(Arc::clone(&self.schema), included_partitions)?;
-            streaming.scan(state, projection, &[], limit).await
+            streaming.scan(state, projection, filters, limit).await
         }
     }
 }
@@ -629,12 +651,13 @@ struct PyArrowStreamPartition {
     /// A Python callable (factory) that returns a fresh stream.
     /// Signature: `make_stream(projection_names: Optional[List[str]]) -> RecordBatchReader`
     ///
-    /// Wrapped in `Arc` so `clone_with_projection` can share the same Python
-    /// object across projected partitions without acquiring the GIL — only an
-    /// atomic reference-count increment is needed.
+    /// Wrapped in `Arc` so `ProjectableStream::clone_with_projection` can share
+    /// the same Python object across projected partitions without acquiring the
+    /// GIL — only an atomic reference-count increment is needed.
     stream_factory: Arc<Py<PyAny>>,
     /// Column names to pass to the factory. `None` means load all columns.
-    projection: Option<Vec<String>>,
+    /// Stored as `Arc<[String]>` so multiple projected clones share one allocation.
+    projection: Option<Arc<[String]>>,
 }
 
 impl PyArrowStreamPartition {
@@ -645,18 +668,31 @@ impl PyArrowStreamPartition {
             projection: None,
         }
     }
+}
 
-    /// Create a new partition with a baked-in column projection.
+impl ProjectableStream for PyArrowStreamPartition {
+    /// Return a new partition that emits only the given columns.
     ///
-    /// Clones the factory `Arc` (atomic refcount increment, no GIL) and
-    /// uses `projected_schema` so the stream it produces has only the
-    /// requested columns.
-    fn clone_with_projection(&self, projection: Vec<String>, projected_schema: SchemaRef) -> Self {
-        Self {
+    /// Clones the factory `Arc` (atomic refcount increment, no GIL) so the
+    /// same Python callable is shared across all projected partitions.
+    fn clone_with_projection(
+        &self,
+        projection: Arc<[String]>,
+        projected_schema: SchemaRef,
+    ) -> Arc<dyn PartitionStream> {
+        Arc::new(Self {
             schema: projected_schema,
             stream_factory: Arc::clone(&self.stream_factory),
             projection: Some(projection),
-        }
+        })
+    }
+
+    fn clone_as_stream(&self) -> Arc<dyn PartitionStream> {
+        Arc::new(Self {
+            schema: Arc::clone(&self.schema),
+            stream_factory: Arc::clone(&self.stream_factory),
+            projection: self.projection.clone(),
+        })
     }
 }
 
@@ -834,9 +870,9 @@ impl LazyArrowStreamTable {
         // eliminating the per-partition Python::attach() calls of the old
         // three-list approach.  Python can release each block dict, factory
         // closure, and metadata dict as soon as Rust has ingested them.
-        // Stored as Arc<PyArrowStreamPartition> (not erased to dyn PartitionStream)
-        // so that scan() can clone them with a projection at query time.
-        let mut partition_list: Vec<(Arc<PyArrowStreamPartition>, PartitionMetadata)> = Vec::new();
+        // Stored as Arc<dyn ProjectableStream> so PrunableStreamingTable
+        // is decoupled from PyArrowStreamPartition.
+        let mut partition_list: Vec<(Arc<dyn ProjectableStream>, PartitionMetadata)> = Vec::new();
         for item_result in partitions.try_iter()? {
             let item = item_result?;
             let (factory_obj, meta_obj): (Py<PyAny>, Py<PyAny>) = item.extract().map_err(|e| {
@@ -845,7 +881,8 @@ impl LazyArrowStreamTable {
                 ))
             })?;
             let meta = convert_python_metadata_from_bound(meta_obj.bind(partitions.py()))?;
-            let partition = Arc::new(PyArrowStreamPartition::new(factory_obj, schema_ref.clone()));
+            let partition: Arc<dyn ProjectableStream> =
+                Arc::new(PyArrowStreamPartition::new(factory_obj, schema_ref.clone()));
             partition_list.push((partition, meta));
         }
 

@@ -1358,3 +1358,25 @@ class TestProjectionPushdown:
     assert (
         abs(projected - expected) < 1e-4
     ), f"Projected AVG {projected} differs from expected {expected}"
+
+  def test_count_star_passes_none_projection(self, two_var_ds):
+    """COUNT(*) should not push a projection — factory receives None."""
+    projections_seen = []
+
+    def callback(block, projection_names):
+      projections_seen.append(projection_names)
+
+    table = read_xarray_table(
+        two_var_ds,
+        chunks={"time": 5},
+        _iteration_callback=callback,
+    )
+    ctx = SessionContext()
+    ctx.register_table("data", table)
+    result = ctx.sql("SELECT COUNT(*) FROM data").to_arrow_table()
+
+    total_rows = 10 * 5  # time=10, lat=5
+    assert result[0][0].as_py() == total_rows
+    assert all(
+        p is None for p in projections_seen
+    ), f"COUNT(*) should not push a projection, but got: {projections_seen}"

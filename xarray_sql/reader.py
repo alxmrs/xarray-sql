@@ -270,11 +270,12 @@ def read_xarray_table(
         # Restrict to the data variables mentioned in the projection.
         # Dimension coordinates come along automatically via coords.
         data_vars_needed = [c for c in projection_names if c in data_var_names]
-        ds_block = (
-            ds[data_vars_needed].isel(block)
-            if data_vars_needed
-            else ds.isel(block)
-        )
+        if data_vars_needed:
+          ds_block = ds[data_vars_needed].isel(block)
+        else:
+          # Only dimension coords requested — drop all data vars to avoid
+          # loading them unnecessarily (e.g. for queries like SELECT lat, lon).
+          ds_block = ds[[]].isel(block)
         batch_schema = pa.schema(
             [schema.field(name) for name in projection_names]
         )
