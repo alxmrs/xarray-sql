@@ -27,9 +27,7 @@
 //! ## Parallel Execution
 //!
 //! Each xarray chunk becomes a separate partition, enabling parallel execution across
-//! multiple cores. Due to a bug in DataFusion v51.0.0's `collect()` method, aggregation
-//! queries should use `to_arrow_table()` instead to ensure complete results.
-//! TODO(#107): Upgrading to the latest datafusion-python (52+) should fix this.
+//! multiple cores.
 //!
 //! ## Filter Pushdown (Partition Pruning)
 //!
@@ -66,10 +64,10 @@ use datafusion::logical_expr::{
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream;
 use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
+use datafusion_ffi::proto::logical_extension_codec::FFI_LogicalExtensionCodec;
 use datafusion_ffi::table_provider::FFI_TableProvider;
 use pyo3::prelude::*;
 use pyo3::types::{PyCapsule, PyList};
-use tokio::runtime::Handle;
 
 // ============================================================================
 // Partition Metadata Types for Filter Pushdown
@@ -788,6 +786,58 @@ impl PartitionStream for PyArrowStreamPartition {
     }
 }
 
+// ============================================================================
+// FFI Helpers
+// ============================================================================
+
+/// Extract an `FFI_LogicalExtensionCodec` from a Python session object.
+///
+/// DataFusion 52 passes the `SessionContext` to `__datafusion_table_provider__`
+/// so that the provider can obtain the codec needed for physical-plan
+/// serialisation across the FFI boundary.  The session exposes this via
+/// `__datafusion_logical_extension_codec__()`, which returns a PyCapsule
+/// named `"datafusion_logical_extension_codec"`.
+///
+/// Mirrors the helper in the official datafusion-python FFI example
+/// (`examples/datafusion-ffi-example/src/utils.rs`).
+fn ffi_logical_codec_from_pycapsule(
+    session: Bound<'_, PyAny>,
+) -> PyResult<FFI_LogicalExtensionCodec> {
+    let attr = "__datafusion_logical_extension_codec__";
+    let capsule = if session.hasattr(attr)? {
+        session.getattr(attr)?.call0()?
+    } else {
+        session
+    };
+
+    let capsule = capsule.downcast::<PyCapsule>().map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "session did not produce a PyCapsule for the logical extension codec: {e}"
+        ))
+    })?;
+
+    let capsule_name = capsule.name()?.ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(
+            "datafusion_logical_extension_codec PyCapsule has no name set",
+        )
+    })?;
+    let capsule_name = capsule_name.to_str()?;
+    if capsule_name != "datafusion_logical_extension_codec" {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "expected capsule name 'datafusion_logical_extension_codec', got '{capsule_name}'"
+        )));
+    }
+
+    // SAFETY: The capsule was produced by datafusion-python and contains a
+    // valid FFI_LogicalExtensionCodec (#[repr(C)] StableAbi struct).
+    let codec = unsafe { capsule.reference::<FFI_LogicalExtensionCodec>() };
+    Ok(codec.clone())
+}
+
+// ============================================================================
+// Python-visible Table Class
+// ============================================================================
+
 /// A lazy table provider that wraps Python stream factory functions.
 ///
 /// This class implements the `__datafusion_table_provider__` protocol, allowing
@@ -801,11 +851,6 @@ impl PartitionStream for PyArrowStreamPartition {
 ///
 /// SQL filters on dimension columns (time, lat, lon, etc.) automatically prune
 /// partitions that can't contain matching rows when metadata is supplied.
-///
-/// # Note
-///
-/// Due to a bug in DataFusion v51.0.0's `collect()` method, use `to_arrow_table()`
-/// instead for aggregation queries to ensure complete results.
 ///
 /// # Example
 ///
@@ -829,6 +874,7 @@ impl PartitionStream for PyArrowStreamPartition {
 /// ctx.register_table("air", table)
 /// result = ctx.sql("SELECT AVG(air) FROM air WHERE time > 500000000").to_arrow_table()
 /// ```
+
 #[pyclass(name = "LazyArrowStreamTable")]
 struct LazyArrowStreamTable {
     /// The underlying table provider with pruning support
@@ -902,27 +948,22 @@ impl LazyArrowStreamTable {
     ///
     /// This method is called by DataFusion's `register_table()` to get a
     /// foreign table provider that can be used in queries.
+    ///
+    /// In DataFusion 52+, the caller passes `session` (a `SessionContext`)
+    /// so that the provider can access task-context and codec information
+    /// needed for physical plan serialisation across the FFI boundary.
     fn __datafusion_table_provider__<'py>(
         &self,
         py: Python<'py>,
+        session: Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyCapsule>> {
-        // Create the FFI table provider
+        let codec = ffi_logical_codec_from_pycapsule(session)?;
+
         let provider: Arc<dyn TableProvider + Send> = self.table.clone();
 
-        // Try to get the current tokio runtime handle (available when called from DataFusion context)
-        let runtime = Handle::try_current().ok();
+        let ffi_provider = FFI_TableProvider::new_with_ffi_codec(provider, true, None, codec);
 
-        // Create FFI wrapper with filter pushdown ENABLED
-        let ffi_provider = FFI_TableProvider::new(
-            provider, true, // can_support_pushdown_filters = ENABLED
-            runtime,
-        );
-
-        // Create the capsule name
         let name = CString::new("datafusion_table_provider").unwrap();
-
-        // Create the PyCapsule without a destructor closure
-        // The PyCapsule takes ownership of the FFI_TableProvider
         PyCapsule::new(py, ffi_provider, Some(name))
     }
 
