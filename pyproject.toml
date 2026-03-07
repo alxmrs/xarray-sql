@@ -88,6 +88,7 @@ dev = [
     "py-spy>=0.4.0",
     "pyink>=24.10.1",
     "maturin>=1.9.1",
+    "pre-commit>=4.5.1",
 ]
 
 [tool.uv]
