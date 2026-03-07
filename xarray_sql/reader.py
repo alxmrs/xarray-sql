@@ -212,11 +212,6 @@ def read_xarray_table(
 
       Supported operators: =, <, >, <=, >=, BETWEEN, IN, AND, OR.
 
-  Note:
-      Due to a bug in DataFusion v51.0.0's collect() method, use
-      `to_arrow_table()` instead of `collect()` for aggregation queries
-      to ensure complete results. This should be fixed in datafusion-python 52+.
-
   Args:
       ds: An xarray Dataset. All data_vars must share the same dimensions.
       chunks: Xarray-like chunks specification. If not provided, uses

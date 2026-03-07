@@ -739,12 +739,8 @@ class TestBoundedMemoryBehavior:
     """Verify aggregation queries work correctly with many batches.
 
     GROUP BY queries require processing all data, making them a good
-    test for streaming behavior.
-
-    Note: We use to_arrow_table() instead of collect() due to a bug in
-    DataFusion v51.0.0 where collect() returns partial results for
-    parallel aggregation queries.
-    # TODO(#107): Upgrade to latest datafusion-python, which has the fix.
+    test for streaming behavior. Uses collect() to verify that parallel
+    aggregation returns complete results (fixed in DataFusion 52+).
     """
     np.random.seed(789)
     time_coord = pd.date_range("2020-01-01", periods=120, freq="h")
@@ -770,11 +766,11 @@ class TestBoundedMemoryBehavior:
     ctx = SessionContext()
     ctx.register_table("test_table", table)
 
-    # GROUP BY requires scanning all data
-    # Use to_arrow_table() to avoid DataFusion collect() bug
-    result = ctx.sql(
+    # GROUP BY requires scanning all data; collect() must return complete results
+    batches = ctx.sql(
         "SELECT lat, AVG(temperature) as avg_temp FROM test_table GROUP BY lat"
-    ).to_arrow_table()
+    ).collect()
+    result = pa.Table.from_batches(batches)
 
     # Should have result for each lat value
     df = result.to_pandas()
