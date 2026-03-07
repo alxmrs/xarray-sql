@@ -473,9 +473,7 @@ def test_read_xarray_table_memory_bounds(large_ds):
   # --- Query phase ---
   ctx = SessionContext()
   ctx.register_table("weather", table)
-  ctx.sql(
-      "SELECT AVG(temperature), AVG(precipitation) FROM weather"
-  ).to_arrow_table()
+  ctx.sql("SELECT AVG(temperature), AVG(precipitation) FROM weather").collect()
   _, query_peak = tracemalloc.get_traced_memory()
 
   # tracemalloc measures Python-heap allocations, which include Arrow

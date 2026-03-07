@@ -992,7 +992,7 @@ class TestFilterPushdown:
         SELECT COUNT(*) as cnt FROM test
         WHERE time >= '2020-03-16'
     """
-    ).to_arrow_table()
+    ).to_pandas()
 
     # Should read only 1 partition (the last one)
     assert (
@@ -1000,7 +1000,7 @@ class TestFilterPushdown:
     ), f"Expected 1 partition after filter pushdown, got {tracker.iteration_count}"
 
     # Verify data correctness - 25 days * 5 lat = 125 rows
-    count = result.to_pandas()["cnt"].iloc[0]
+    count = result["cnt"].iloc[0]
     assert count == 125, f"Expected 125 rows, got {count}"
 
   def test_time_lt_filter_prunes_late_partitions(self, time_chunked_ds):
@@ -1022,7 +1022,7 @@ class TestFilterPushdown:
         SELECT COUNT(*) as cnt FROM test
         WHERE time < '2020-01-26'
     """
-    ).to_arrow_table()
+    ).to_pandas()
 
     # Should read only 1 partition (the first one)
     assert (
@@ -1030,7 +1030,7 @@ class TestFilterPushdown:
     ), f"Expected 1 partition after filter pushdown, got {tracker.iteration_count}"
 
     # Verify correctness: Jan 1–25 (25 days) × 5 lat = 125 rows
-    count = result.to_pandas()["cnt"].iloc[0]
+    count = result["cnt"].iloc[0]
     assert count == 125, f"Expected 125 rows, got {count}"
 
   def test_time_between_filter_prunes_outside_range(self, time_chunked_ds):
@@ -1052,7 +1052,7 @@ class TestFilterPushdown:
         SELECT COUNT(*) as cnt FROM test
         WHERE time BETWEEN '2020-02-01' AND '2020-03-21'
     """
-    ).to_arrow_table()
+    ).collect()
 
     # Partition 0 (Jan 1–25) ends before Feb 1 and is pruned.
     # Partitions 1, 2, 3 each overlap with Feb 1–Mar 21.
@@ -1095,7 +1095,7 @@ class TestFilterPushdown:
         SELECT COUNT(*) as cnt FROM test
         WHERE lat < 0
     """
-    ).to_arrow_table()
+    ).collect()
 
     # np.linspace(-90, 90, 100) chunked by 25:
     #   Partition 0: indices 0–24,  lat -90.0 to -46.4 (all negative)
@@ -1124,7 +1124,7 @@ class TestFilterPushdown:
         """
         SELECT COUNT(*) FROM test WHERE temperature > 0.5
     """
-    ).to_arrow_table()
+    ).collect()
 
     # All 4 partitions should be read (can't prune on data column)
     assert (
@@ -1147,11 +1147,11 @@ class TestFilterPushdown:
         SELECT COUNT(*) as cnt FROM test
         WHERE time >= '2020-02-15' AND time <= '2020-03-15'
     """
-    ).to_arrow_table()
+    ).to_pandas()
 
     # Manual calculation: Feb 15 (day 45) to Mar 15 (day 74) = 30 days
     # 30 days * 5 lat values = 150 rows
-    count = filtered.to_pandas()["cnt"].iloc[0]
+    count = filtered["cnt"].iloc[0]
     assert count == 150, f"Expected 150 rows, got {count}"
 
   def test_and_filter_combines_pruning(self, time_chunked_ds):
@@ -1173,7 +1173,7 @@ class TestFilterPushdown:
         SELECT * FROM test
         WHERE time >= '2020-03-20' AND time <= '2020-04-05'
     """
-    ).to_arrow_table()
+    ).collect()
 
     # Should read only 1 partition
     assert (
@@ -1199,7 +1199,7 @@ class TestFilterPushdown:
         SELECT * FROM test
         WHERE time < '2020-01-10' OR time > '2020-03-30'
     """
-    ).to_arrow_table()
+    ).collect()
 
     # Should read at least 2 partitions (first and last)
     assert (
@@ -1225,7 +1225,7 @@ class TestFilterPushdown:
         SELECT COUNT(*) as cnt FROM test
         WHERE time > '2025-01-01'
     """
-    ).to_arrow_table()
+    ).to_pandas()
 
     # Should read 0 partitions (all pruned)
     assert (
@@ -1233,7 +1233,7 @@ class TestFilterPushdown:
     ), f"Expected 0 partitions for impossible filter, got {tracker.iteration_count}"
 
     # Result should be 0 rows
-    count = result.to_pandas()["cnt"].iloc[0]
+    count = result["cnt"].iloc[0]
     assert count == 0, f"Expected 0 rows, got {count}"
 
 
@@ -1277,7 +1277,7 @@ class TestProjectionPushdown:
 
     ctx = SessionContext()
     ctx.register_table("data", table)
-    ctx.sql("SELECT AVG(temperature) FROM data").to_arrow_table()
+    ctx.sql("SELECT AVG(temperature) FROM data").collect()
 
     assert (
         tracker.iteration_count > 0
@@ -1304,7 +1304,7 @@ class TestProjectionPushdown:
 
     ctx = SessionContext()
     ctx.register_table("data", table)
-    ctx.sql("SELECT * FROM data").to_arrow_table()
+    ctx.sql("SELECT * FROM data").collect()
 
     assert (
         tracker.iteration_count > 0
@@ -1327,9 +1327,7 @@ class TestProjectionPushdown:
 
     ctx = SessionContext()
     ctx.register_table("data", table)
-    ctx.sql(
-        "SELECT AVG(temperature), AVG(precipitation) FROM data"
-    ).to_arrow_table()
+    ctx.sql("SELECT AVG(temperature), AVG(precipitation) FROM data").collect()
 
     assert tracker.iteration_count > 0
     for proj in tracker.projections_seen:
@@ -1346,7 +1344,6 @@ class TestProjectionPushdown:
 
     projected = (
         ctx.sql("SELECT AVG(temperature) as avg_t FROM data")
-        .to_arrow_table()
         .to_pandas()["avg_t"]
         .iloc[0]
     )
@@ -1369,10 +1366,10 @@ class TestProjectionPushdown:
     )
     ctx = SessionContext()
     ctx.register_table("data", table)
-    result = ctx.sql("SELECT COUNT(*) FROM data").to_arrow_table()
+    result = ctx.sql("SELECT COUNT(*) FROM data").collect()
 
     total_rows = 10 * 5  # time=10, lat=5
-    assert result[0][0].as_py() == total_rows
+    assert result[0][0][0].as_py() == total_rows
     assert all(
         p is None for p in projections_seen
     ), f"COUNT(*) should not push a projection, but got: {projections_seen}"

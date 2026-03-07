@@ -208,7 +208,7 @@ def read_xarray_table(
       automatically prune partitions that can't contain matching rows. For example:
 
           # This query will skip loading partitions with time < '2020-02-01'
-          result = ctx.sql('SELECT * FROM air WHERE time > \"2020-02-01\"').to_arrow_table()
+          result = ctx.sql('SELECT * FROM air WHERE time > \"2020-02-01\"').collect()
 
       Supported operators: =, <, >, <=, >=, BETWEEN, IN, AND, OR.
 
@@ -238,7 +238,7 @@ def read_xarray_table(
       >>>
       >>> # Data is only read here, during query execution
       >>> # Filters on 'time' will prune partitions automatically!
-      >>> result = ctx.sql('SELECT AVG(air) FROM air').to_arrow_table()
+      >>> result = ctx.sql('SELECT AVG(air) FROM air').collect()
   """
   from ._native import LazyArrowStreamTable
 
