@@ -767,13 +767,10 @@ class TestBoundedMemoryBehavior:
     ctx.register_table("test_table", table)
 
     # GROUP BY requires scanning all data; collect() must return complete results
-    batches = ctx.sql(
+    df = ctx.sql(
         "SELECT lat, AVG(temperature) as avg_temp FROM test_table GROUP BY lat"
-    ).collect()
-    result = pa.Table.from_batches(batches)
+    ).to_pandas()
 
-    # Should have result for each lat value
-    df = result.to_pandas()
     assert len(df) == 5, f"Expected 5 lat groups, got {len(df)}"
 
     # All partitions processed
