@@ -63,7 +63,9 @@ class XarrayRecordBatchReader:
       chunks: Chunks = None,
       *,
       batch_size: int = DEFAULT_BATCH_SIZE,
-      _iteration_callback: Callable[[Block], None] | None = None,
+      _iteration_callback: (
+          Callable[[Block, list[str] | None], None] | None
+      ) = None,
   ):
     """Initialize the lazy reader.
 
@@ -105,9 +107,10 @@ class XarrayRecordBatchReader:
     emitted as one or more RecordBatches of at most self._batch_size rows.
     """
     for block in block_slices(self._ds, self._chunks):
-      # Call the iteration callback if provided (for testing)
+      # Call the iteration callback if provided (for testing).
+      # XarrayRecordBatchReader has no projection concept, so always passes None.
       if self._iteration_callback is not None:
-        self._iteration_callback(block)
+        self._iteration_callback(block, None)
 
       yield from iter_record_batches(
           self._ds.isel(block), self._schema, self._batch_size
@@ -187,7 +190,9 @@ def read_xarray_table(
     chunks: Chunks = None,
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
-    _iteration_callback: Callable[[Block], None] | None = None,
+    _iteration_callback: (
+        Callable[[Block, list[str] | None], None] | None
+    ) = None,
 ) -> "LazyArrowStreamTable":
   """Create a lazy DataFusion table from an xarray Dataset.
 
@@ -248,14 +253,38 @@ def read_xarray_table(
   # Zarr-backed datasets (e.g. ARCO-ERA5 on GCS).
   coord_arrays = {str(dim): ds.coords[dim].values for dim in ds.dims}
 
+  # Determine which column names are data variables (not dimension coordinates).
+  # Used by the factory to skip loading unrequested variables.
+  data_var_names = set(ds.data_vars.keys())
+
   def make_partition_factory(
       block: Block,
-  ) -> Callable[[], pa.RecordBatchReader]:
-    def make_stream() -> pa.RecordBatchReader:
+  ) -> Callable[[list[str] | None], pa.RecordBatchReader]:
+    def make_stream(
+        projection_names: list[str] | None,
+    ) -> pa.RecordBatchReader:
       if _iteration_callback is not None:
-        _iteration_callback(block)
+        _iteration_callback(block, projection_names)
+
+      if projection_names is not None:
+        # Restrict to the data variables mentioned in the projection.
+        # Dimension coordinates come along automatically via coords.
+        data_vars_needed = [c for c in projection_names if c in data_var_names]
+        if data_vars_needed:
+          ds_block = ds[data_vars_needed].isel(block)
+        else:
+          # Only dimension coords requested — drop all data vars to avoid
+          # loading them unnecessarily (e.g. for queries like SELECT lat, lon).
+          ds_block = ds[[]].isel(block)
+        batch_schema = pa.schema(
+            [schema.field(name) for name in projection_names]
+        )
+      else:
+        ds_block = ds.isel(block)
+        batch_schema = schema
+
       return pa.RecordBatchReader.from_batches(
-          schema, iter_record_batches(ds.isel(block), schema, batch_size)
+          batch_schema, iter_record_batches(ds_block, batch_schema, batch_size)
       )
 
     return make_stream
