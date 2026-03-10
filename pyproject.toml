@@ -36,10 +36,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+io = [
+    "xarray[io]",
+    "gcsfs",
+]
 test = [
-  "pytest",
-  "xarray[io]",
-  "gcsfs",
+    "xarray_sql[io]",
+    "pytest",
+]
+
+demo = [
+    "xarray_sql[io]",
+    "coiled"
 ]
 
 [project.urls]
