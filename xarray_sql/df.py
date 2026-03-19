@@ -7,6 +7,9 @@ import pandas as pd
 import pyarrow as pa
 import xarray as xr
 
+from . import cft
+
+
 Block = dict[Hashable, slice]
 Chunks = dict[str, int] | None
 
@@ -198,13 +201,18 @@ def dataset_to_record_batch(
       # Broadcast 1-D coordinate to the full N-D partition shape, then ravel.
       axis = dim_names.index(name)
       coord = ds.coords[name].values
+      if cft.is_cftime(coord):
+        coord = cft.convert_for_field(coord, field)
       reshape = [1] * len(shape)
       reshape[axis] = coord.shape[0]
       arr = np.broadcast_to(coord.reshape(reshape), shape).ravel()
       arrays.append(pa.array(arr, type=field.type))
     else:
       # Data variable: ravel to 1-D (zero-copy for C-contiguous arrays).
-      arrays.append(pa.array(ds[name].values.ravel(), type=field.type))
+      raw = ds[name].values.ravel()
+      if cft.is_cftime(ds[name].values):
+        raw = cft.convert_for_field(ds[name].values, field)
+      arrays.append(pa.array(raw, type=field.type))
 
   return pa.RecordBatch.from_arrays(arrays, schema=schema)
 
@@ -253,7 +261,14 @@ def iter_record_batches(
   total_rows = int(np.prod(shape))
 
   # Preload small 1-D coordinate arrays (negligible memory).
-  coord_values = {name: ds.coords[name].values for name in dim_names}
+  # Convert cftime objects to numeric values matching the schema type.
+  coord_values = {}
+  for name in dim_names:
+    vals = ds.coords[name].values
+    if cft.is_cftime(vals):
+      coord_values[name] = cft.convert_for_field(vals, schema.field(name))
+    else:
+      coord_values[name] = vals
 
   # C-order stride for each dimension: stride[k] = prod(shape[k+1:]).
   # Flat row index i → coordinate index for dim k: (i // stride[k]) % shape[k].
@@ -264,7 +279,11 @@ def iter_record_batches(
   data_arrays = {}
   for field in schema:
     if field.name not in ds.dims:
-      data_arrays[field.name] = ds[field.name].values.ravel()
+      raw = ds[field.name].values
+      if cft.is_cftime(raw):
+        data_arrays[field.name] = cft.convert_for_field(raw, field)
+      else:
+        data_arrays[field.name] = raw.ravel()
 
   for row_start in range(0, total_rows, batch_size):
     row_end = min(row_start + batch_size, total_rows)
@@ -285,19 +304,45 @@ def iter_record_batches(
     yield pa.RecordBatch.from_arrays(arrays, schema=schema)
 
 
-def _parse_schema(ds) -> pa.Schema:
-  """Extracts a `pa.Schema` from the Dataset, treating dims and data_vars as columns."""
+def _parse_schema(ds: xr.Dataset) -> pa.Schema:
+  """Extracts a `pa.Schema` from the Dataset, treating dims and data_vars as columns.
+
+  Uses the xarray index type to detect cftime coordinates without
+  materializing their data — important for Dask/Zarr-backed datasets
+  where .values would trigger eager computation.
+
+  cftime coordinates are mapped to one of two Arrow types:
+
+  * **Gregorian-like calendars** (standard, noleap, all_leap, etc.):
+    ``pa.timestamp('us')`` so string-based SQL filters work naturally.
+  * **Non-Gregorian calendars** (360_day, julian):
+    ``pa.int64()`` with ``xarray:units`` / ``xarray:calendar`` metadata
+    on the field, preserving lossless CF-convention encoding.
+  """
   columns = []
 
   for coord_name, coord_var in ds.coords.items():
     # Only include dimension coordinates
     if coord_name in ds.dims:
-      pa_type = pa.from_numpy_dtype(coord_var.dtype)
-      columns.append(pa.field(coord_name, pa_type))
+      if cft.is_cftime_index(ds, coord_name):
+        units, calendar = cft.encoding(ds, coord_name)
+        columns.append(cft.arrow_field(coord_name, units, calendar))
+      else:
+        pa_type = pa.from_numpy_dtype(coord_var.dtype)
+        columns.append(pa.field(coord_name, pa_type))
 
   for var_name, var in ds.data_vars.items():
-    pa_type = pa.from_numpy_dtype(var.dtype)
-    columns.append(pa.field(var_name, pa_type))
+    # Data variables are virtually never cftime, but check dtype as a
+    # cheap guard.  Only fall back to _is_cftime (which materializes
+    # element 0) when dtype is object.
+    if var.dtype == np.dtype('O') and cft.is_cftime(var.values):
+      # Rare: a data variable holding cftime objects.  Use same encoding
+      # as the first cftime dimension coordinate, or default.
+      cal = var.values.ravel()[0].calendar
+      columns.append(cft.arrow_field(var_name, cft.DEFAULT_UNITS, cal))
+    else:
+      pa_type = pa.from_numpy_dtype(var.dtype)
+      columns.append(pa.field(var_name, pa_type))
 
   return pa.schema(columns)
 
@@ -327,6 +372,11 @@ def _block_metadata(coord_arrays: dict, block: Block) -> PartitionBounds:
       # Use actual min/max rather than first/last so that non-monotonic
       # coordinate axes (e.g. descending latitude 90→-90) are handled
       # correctly.  np.min/max work for both numeric and datetime64 arrays.
+
+      if cft.is_cftime(coord_values):
+        ranges[str(dim)] = cft.partition_bounds(coord_values)
+        continue
+
       min_val = coord_values.min()
       max_val = coord_values.max()
 
