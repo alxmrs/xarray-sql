@@ -16,3 +16,4 @@ class XarrayContext(SessionContext):
   ):
     table = read_xarray_table(input_table, chunks)
     self.register_table(table_name, table)
+    return self
