@@ -192,3 +192,65 @@ def test_cross_join(air_and_stations):
       "SELECT COUNT(*) AS total FROM air_data CROSS JOIN stations"
   ).to_pandas()
   assert result["total"].iloc[0] > 0
+
+
+class TestNanAsNull:
+  """NaN in float columns should become Arrow nulls so SQL aggregates work."""
+
+  @pytest.fixture
+  def nan_ds(self):
+    import numpy as np
+    import pandas as pd
+    data = np.array([[[1.0, 2.0], [np.nan, 4.0]],
+                     [[5.0, np.nan], [7.0, 8.0]]])
+    return xr.Dataset(
+        {"temp": (["time", "x", "y"], data)},
+        coords={
+            "time": pd.date_range("2020-01-01", periods=2),
+            "x": [0, 1],
+            "y": [0, 1],
+        },
+    ).chunk({"time": 1})
+
+  def test_max_ignores_nan(self, nan_ds):
+    ctx = XarrayContext()
+    ctx.from_dataset("data", nan_ds)
+    result = ctx.sql("SELECT MAX(temp) AS mx FROM data").to_pandas()
+    assert result["mx"].iloc[0] == 8.0
+
+  def test_min_ignores_nan(self, nan_ds):
+    ctx = XarrayContext()
+    ctx.from_dataset("data", nan_ds)
+    result = ctx.sql("SELECT MIN(temp) AS mn FROM data").to_pandas()
+    assert result["mn"].iloc[0] == 1.0
+
+  def test_avg_ignores_nan(self, nan_ds):
+    import numpy as np
+    ctx = XarrayContext()
+    ctx.from_dataset("data", nan_ds)
+    result = ctx.sql("SELECT AVG(temp) AS avg FROM data").to_pandas()
+    expected = np.nanmean([1.0, 2.0, 4.0, 5.0, 7.0, 8.0])
+    assert abs(result["avg"].iloc[0] - expected) < 1e-6
+
+  def test_count_excludes_nan(self, nan_ds):
+    ctx = XarrayContext()
+    ctx.from_dataset("data", nan_ds)
+    result = ctx.sql("SELECT COUNT(temp) AS cnt FROM data").to_pandas()
+    # 8 total cells, 2 are NaN → 6 non-null
+    assert result["cnt"].iloc[0] == 6
+
+  def test_is_null_matches_nan(self, nan_ds):
+    ctx = XarrayContext()
+    ctx.from_dataset("data", nan_ds)
+    result = ctx.sql(
+        "SELECT COUNT(*) AS cnt FROM data WHERE temp IS NULL"
+    ).to_pandas()
+    assert result["cnt"].iloc[0] == 2
+
+  def test_from_dataset_returns_self(self):
+    ds = xr.tutorial.open_dataset("air_temperature").isel(
+        time=slice(0, 2), lat=slice(0, 2), lon=slice(0, 2)
+    ).chunk({"time": 1})
+    ctx = XarrayContext()
+    ret = ctx.from_dataset("air", ds)
+    assert ret is ctx
