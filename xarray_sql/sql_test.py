@@ -1,5 +1,6 @@
 """SQL functionality tests for xarray-sql using pytest."""
 
+import numpy as np
 import pytest
 import xarray as xr
 
@@ -192,3 +193,135 @@ def test_cross_join(air_and_stations):
       "SELECT COUNT(*) AS total FROM air_data CROSS JOIN stations"
   ).to_pandas()
   assert result["total"].iloc[0] > 0
+
+
+class TestCftimeGregorianLike:
+  """Tests for Gregorian-like cftime calendars (noleap, standard, etc.).
+
+  These use pa.timestamp('us') and support string-based SQL filters.
+  """
+
+  @pytest.fixture
+  def rasm_ds(self):
+    """The rasm tutorial dataset uses cftime.DatetimeNoLeap (noleap)."""
+    return xr.tutorial.open_dataset("rasm")
+
+  def test_noleap_dataset_registers(self, rasm_ds):
+    """A noleap dataset should register without errors."""
+    ctx = XarrayContext()
+    ctx.from_dataset("rasm", rasm_ds, chunks={"time": 12})
+    result = ctx.sql("SELECT COUNT(*) AS cnt FROM rasm").to_pandas()
+    assert result["cnt"].iloc[0] > 0
+
+  def test_select_time_column(self, rasm_ds):
+    """Querying the time column should return valid timestamps."""
+    ctx = XarrayContext()
+    ctx.from_dataset("rasm", rasm_ds, chunks={"time": 12})
+    result = ctx.sql(
+        "SELECT DISTINCT time FROM rasm ORDER BY time LIMIT 5"
+    ).to_pandas()
+    assert len(result) == 5
+    times = result["time"].tolist()
+    assert times == sorted(times)
+
+  def test_string_filter_works(self, rasm_ds):
+    """String-based time filters should work for Gregorian-like calendars."""
+    ctx = XarrayContext()
+    ctx.from_dataset("rasm", rasm_ds, chunks={"time": 12})
+    result = ctx.sql(
+        "SELECT COUNT(*) AS cnt FROM rasm WHERE time >= '1980-10-01'"
+    ).to_pandas()
+    full = ctx.sql("SELECT COUNT(*) AS cnt FROM rasm").to_pandas()
+    assert 0 < result["cnt"].iloc[0] < full["cnt"].iloc[0]
+
+  def test_aggregation(self, rasm_ds):
+    """MIN/MAX on timestamp columns should work."""
+    ctx = XarrayContext()
+    ctx.from_dataset("rasm", rasm_ds, chunks={"time": 12})
+    result = ctx.sql(
+        'SELECT MIN(time) AS t_min, MAX(time) AS t_max FROM rasm'
+    ).to_pandas()
+    assert result["t_min"].iloc[0] < result["t_max"].iloc[0]
+
+  def test_row_count_matches_xarray(self, rasm_ds):
+    """Total row count should equal the product of dimension sizes."""
+    ctx = XarrayContext()
+    ctx.from_dataset("rasm", rasm_ds, chunks={"time": 12})
+    result = ctx.sql("SELECT COUNT(*) AS cnt FROM rasm").to_pandas()
+    expected = int(np.prod([
+        rasm_ds.sizes[d] for d in rasm_ds["Tair"].dims
+    ]))
+    assert result["cnt"].iloc[0] == expected
+
+
+class TestCftimeNonGregorian:
+  """Tests for non-Gregorian cftime calendars (360_day, julian).
+
+  These use pa.int64() with CF-convention metadata and the cftime() UDF.
+  """
+
+  @pytest.fixture
+  def ds_360day(self):
+    """Synthetic 360-day calendar dataset."""
+    import cftime
+    times = [cftime.Datetime360Day(2000, m, 1) for m in range(1, 13)]
+    return xr.Dataset(
+        {"temp": ("time", np.arange(12, dtype=np.float32))},
+        coords={"time": times},
+    )
+
+  def test_360day_registers(self, ds_360day):
+    """A 360-day dataset should register without errors."""
+    ctx = XarrayContext()
+    ctx.from_dataset("ds360", ds_360day, chunks={"time": 6})
+    result = ctx.sql("SELECT COUNT(*) AS cnt FROM ds360").to_pandas()
+    assert result["cnt"].iloc[0] == 12
+
+  def test_360day_select_ordered(self, ds_360day):
+    """Integer offsets should be orderable."""
+    ctx = XarrayContext()
+    ctx.from_dataset("ds360", ds_360day, chunks={"time": 6})
+    result = ctx.sql(
+        "SELECT DISTINCT time FROM ds360 ORDER BY time"
+    ).to_pandas()
+    times = result["time"].tolist()
+    assert times == sorted(times)
+    assert len(times) == 12
+
+  def test_360day_integer_filter(self, ds_360day):
+    """Direct integer comparisons should work on int64 time columns."""
+    ctx = XarrayContext()
+    ctx.from_dataset("ds360", ds_360day, chunks={"time": 6})
+    # Get all distinct time values to find a midpoint
+    all_times = ctx.sql(
+        "SELECT DISTINCT time FROM ds360 ORDER BY time"
+    ).to_pandas()["time"].tolist()
+    mid = all_times[len(all_times) // 2]
+    result = ctx.sql(
+        f"SELECT COUNT(*) AS cnt FROM ds360 WHERE time >= {mid}"
+    ).to_pandas()
+    assert 0 < result["cnt"].iloc[0] < 12
+
+  def test_360day_cftime_udf_registered(self, ds_360day):
+    """from_dataset should auto-register a cftime() UDF for 360-day calendars."""
+    ctx = XarrayContext()
+    ctx.from_dataset("ds360", ds_360day, chunks={"time": 6})
+    # The cftime() UDF should convert a date string to the int64 offset,
+    # enabling ergonomic filtering.
+    result = ctx.sql(
+        "SELECT COUNT(*) AS cnt FROM ds360 "
+        "WHERE time >= cftime('2000-07-01')"
+    ).to_pandas()
+    # July through December = 6 months
+    assert result["cnt"].iloc[0] == 6
+
+  def test_gregorian_like_no_cftime_udf(self):
+    """Gregorian-like calendars should NOT register a cftime() UDF."""
+    ds = xr.tutorial.open_dataset("rasm")
+    ctx = XarrayContext()
+    ctx.from_dataset("rasm", ds, chunks={"time": 12})
+    # Using cftime() should fail since it's not registered for noleap.
+    with pytest.raises(Exception):
+      ctx.sql(
+          "SELECT COUNT(*) FROM rasm WHERE time >= cftime('1980-01-01')"
+      ).collect()
