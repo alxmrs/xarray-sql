@@ -37,7 +37,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = [
-  "cftime>",
+  "cftime",
   "pytest",
   "xarray[io]",
   "gcsfs",
