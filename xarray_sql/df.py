@@ -328,7 +328,7 @@ def _block_metadata(coord_arrays: dict, block: Block) -> PartitionBounds:
     # String/object dtypes are not representable as ScalarBound
     # (Int64/Float64/TimestampNanos) and numpy min/max ufuncs do not
     # support them.  Skip so pruning treats the dimension conservatively.
-    if coord_values.dtype.kind in ('U', 'S', 'O'):
+    if coord_values.dtype.kind in ("U", "S", "O"):
       continue
     # Use actual min/max rather than first/last so that non-monotonic
     # coordinate axes (e.g. descending latitude 90→-90) are handled
