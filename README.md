@@ -94,11 +94,11 @@ That's it!
 _2025 update_: This library now implements a Dask-like `from_map` interface in
 pure DataFusion and PyArrow, but works with the same principle!
 
-_2026 update_: Instead of `from_map()`, we make factory functions from blocks of
-Xarray datasets that return RecordBatchReaders. These feed into a Rust-based
-DataFusion `TableProvider`. Every chunk is uses the Arrow in memory format to
-translate between Python and Rust. Even still, the core of what makes this idea
-work is the core `pivot()` operation from where this project began!
+_2026 update_: Instead of `from_map()`, we create a way to translate Xarray chunks
+into Arrow RecordBatches. We pass a Python callback into a DataFusion `TableProvider`
+that lets the DB engine translate the underlying Dataset arrays into DataFusion partitions.
+Ultimately, the initial insight of the `pivot()` function -- that any ndarray can be
+translated into a 2D table -- underlies this performant query mechanism. 
 
 ## Why does this work?
 
@@ -115,11 +115,6 @@ TBD, DataFusion provides a whole new world! Currently, we're looking for
 early users – "tire kickers", if you will. We'd love your input to shape the direction of this
 project! Please, give this a try and [file issues](https://github.com/alxmrs/xarray-sql/issues) as
 you see fit. Check out our [contributing guide](CONTRIBUTING.md), too 😉.
-
-I can say that for now, the library is oriented towards making whole scans of
-Xarray Datasets. Common filter optimizations (even basic ones like an `.sel()` on
-core dimensions, let alone predicate push downs) are not fully implemented yet.
-However, these operations and more are on our roadmap.
 
 ## What would a deeper integration look like?
 
@@ -138,15 +133,16 @@ _2025 update_: Something like this is being built across a few projects! The one
 - [CartoDB's Raquet](https://github.com/CartoDB/raquet)
 - The DataFusion community's [arrow-zarr](https://github.com/datafusion-contrib/arrow-zarr)
 
-As of writing, this project is [amid integrating](https://github.com/alxmrs/xarray-sql/pull/69) a
-rust-based DataFusion backend provided by arrow-zarr.
+_2026 update_: A collegue and I are experimenting with native Zarr RDBMS engines. Check out:
+- [Zarr-Datafusion](https://lib.rs/crates/zarr-datafusion)
+- [DuckDB-Zarr](https://github.com/hobbes-bot/duckdb-zarr)
 
 ## Roadmap
 
 - [x] ~Lazy evaluation via the pyarrow Dataset interface [#93](https://github.com/alxmrs/xarray-sql/issues/93).~ _Implemented in [#100](https://github.com/alxmrs/xarray-sql/pull/100)_
-- [ ] Support proper parallelism via proper partition handling on the rust/datafusion side. [#106](https://github.com/alxmrs/xarray-sql/issues/106)
-- [ ] Support core datafusion optimizations to scan less data, like [104](https://github.com/alxmrs/xarray-sql/issues/104), ...
-- [ ] Translate a single Zarr to a collection of tables via DataFusion's catalog interface [#85](https://github.com/alxmrs/xarray-sql/issues/85).
+- [x] Support proper parallelism via proper partition handling on the rust/datafusion side. [#106](https://github.com/alxmrs/xarray-sql/issues/106)
+- [x] Support core datafusion optimizations to scan less data, like [104](https://github.com/alxmrs/xarray-sql/issues/104), ...
+- [ ] Translate a single Zarr to a collection of tables [#85](https://github.com/alxmrs/xarray-sql/issues/85).
 - [ ] Distributed beyond a single node through the DataFusion integration with Ray Datasets [#68](https://github.com/alxmrs/xarray-sql/issues/68) or Apache Ballista [#98](https://github.com/alxmrs/xarray-sql/issues/98).
 - [ ] Demo: calculate Sea Surface Temperature from 1940 - Present in SQL [#36](https://github.com/alxmrs/xarray-sql/issues/36).
 - [ ] Provide an option to integrate DataFusion directly to Zarr via Rust [#4](https://github.com/alxmrs/xarray-sql/issues/4).
