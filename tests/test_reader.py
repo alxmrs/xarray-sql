@@ -23,9 +23,9 @@ import pytest
 import xarray as xr
 from datafusion import SessionContext
 
-from ._native import LazyArrowStreamTable
-from .reader import XarrayRecordBatchReader, read_xarray_table
-from .df import _parse_schema
+from xarray_sql._native import LazyArrowStreamTable
+from xarray_sql.reader import XarrayRecordBatchReader, read_xarray_table
+from xarray_sql.df import _parse_schema
 
 
 @pytest.fixture

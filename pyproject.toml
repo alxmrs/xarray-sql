@@ -51,7 +51,7 @@ features = ["pyo3/extension-module"]
 module-name = "xarray_sql._native"
 
 [tool.setuptools.packages.find]
-exclude = ["demo", "perf_tests"]
+exclude = ["demo", "perf_tests", "tests", "tests.*"]
 
 [tool.pyink]
 line-length = 80
@@ -93,3 +93,6 @@ dev = [
 [tool.uv]
 # Rebuild package when any rust files change
 cache-keys = [{file = "pyproject.toml"}, {file = "rust/Cargo.toml"}, {file = "**/*.rs"}]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

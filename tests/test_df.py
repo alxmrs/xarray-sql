@@ -6,7 +6,7 @@ import pyarrow as pa
 import pytest
 import xarray as xr
 
-from .df import (
+from xarray_sql.df import (
     DEFAULT_BATCH_SIZE,
     _parse_schema,
     block_slices,
@@ -17,82 +17,7 @@ from .df import (
     iter_record_batches,
     pivot,
 )
-from .reader import read_xarray, read_xarray_table
-
-
-def rand_wx(start: str, end: str) -> xr.Dataset:
-  np.random.seed(42)
-  lat = np.linspace(-90, 90, num=720)
-  lon = np.linspace(-180, 180, num=1440)
-  time = pd.date_range(start, end, freq="h")
-  level = np.array([1000, 500], dtype=np.int32)
-  reference_time = pd.Timestamp(start)
-  temperature = 15 + 8 * np.random.randn(720, 1440, len(time), len(level))
-  precipitation = 10 * np.random.rand(720, 1440, len(time), len(level))
-  return xr.Dataset(
-      data_vars=dict(
-          temperature=(["lat", "lon", "time", "level"], temperature),
-          precipitation=(["lat", "lon", "time", "level"], precipitation),
-      ),
-      coords=dict(
-          lat=lat,
-          lon=lon,
-          time=time,
-          level=level,
-          reference_time=reference_time,
-      ),
-      attrs=dict(description="Random weather."),
-  )
-
-
-def create_large_dataset(time_steps=1000, lat_points=100, lon_points=100):
-  """Create a large xarray dataset for memory testing."""
-  np.random.seed(42)
-
-  time = pd.date_range("2020-01-01", periods=time_steps, freq="h")
-  lat = np.linspace(-90, 90, lat_points)
-  lon = np.linspace(-180, 180, lon_points)
-
-  temp_data = np.random.rand(time_steps, lat_points, lon_points) * 40 - 10
-  precip_data = np.random.rand(time_steps, lat_points, lon_points) * 100
-
-  return xr.Dataset(
-      {
-          "temperature": (["time", "lat", "lon"], temp_data),
-          "precipitation": (["time", "lat", "lon"], precip_data),
-      },
-      coords={"time": time, "lat": lat, "lon": lon},
-  )
-
-
-def adding_function(x, y):
-  """Simple function that adds two values and returns a DataFrame."""
-  result = pd.DataFrame({"x": [x], "y": [y], "sum": [x + y]})
-  return result
-
-
-@pytest.fixture
-def air():
-  ds = xr.tutorial.open_dataset("air_temperature")
-  chunks = {"time": 240}
-  return ds.chunk(chunks)
-
-
-@pytest.fixture
-def air_small(air):
-  return air.isel(time=slice(0, 12), lat=slice(0, 11), lon=slice(0, 10)).chunk(
-      {"time": 240}
-  )
-
-
-@pytest.fixture
-def randwx():
-  return rand_wx("1995-01-13T00", "1995-01-13T01")
-
-
-@pytest.fixture
-def large_ds():
-  return create_large_dataset().chunk({"time": 25})
+from xarray_sql.reader import read_xarray, read_xarray_table
 
 
 def test_explode_cardinality(air):
@@ -293,6 +218,12 @@ def test_from_map_batched_basic_functionality(air_small):
   for batch in batches:
     assert batch.schema == expected_schema
     assert len(batch) > 0
+
+
+def adding_function(x, y):
+  """Simple function that adds two values and returns a DataFrame."""
+  result = pd.DataFrame({"x": [x], "y": [y], "sum": [x + y]})
+  return result
 
 
 def test_from_map_batched_multiple_iterables():

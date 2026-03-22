@@ -3,72 +3,7 @@
 import pytest
 import xarray as xr
 
-from . import XarrayContext
-from .df_test import create_large_dataset, rand_wx
-
-
-@pytest.fixture
-def air_dataset_small():
-  ds = xr.tutorial.open_dataset("air_temperature").chunk({"time": 240})
-  return ds.isel(time=slice(0, 12), lat=slice(0, 11), lon=slice(0, 10))
-
-
-@pytest.fixture
-def air_dataset_large():
-  return xr.tutorial.open_dataset("air_temperature").chunk({"time": 240})
-
-
-@pytest.fixture
-def weather_dataset():
-  ds = rand_wx("2023-01-01T00", "2023-01-01T12")
-  return ds.isel(time=slice(0, 6), lat=slice(0, 10), lon=slice(0, 10)).chunk(
-      {"time": 3}
-  )
-
-
-@pytest.fixture
-def synthetic_dataset():
-  return create_large_dataset(
-      time_steps=50, lat_points=20, lon_points=20
-  ).chunk({"time": 25})
-
-
-@pytest.fixture
-def station_dataset():
-  return xr.Dataset(
-      {
-          "station_id": (["station"], [1, 2, 3, 4, 5]),
-          "elevation": (["station"], [100, 250, 500, 750, 1000]),
-          "name": (
-              ["station"],
-              ["Station_A", "Station_B", "Station_C", "Station_D", "Station_E"],
-          ),
-      }
-  ).chunk({"station": 5})
-
-
-@pytest.fixture
-def air_and_stations():
-  air = (
-      xr.tutorial.open_dataset("air_temperature")
-      .isel(time=slice(0, 12), lat=slice(0, 5), lon=slice(0, 8))
-      .chunk({"time": 6})
-  )
-  stations = xr.Dataset(
-      {
-          "station_id": (["station"], [101, 102, 103]),
-          "lat": (
-              ["station"],
-              [air.lat.values[0], air.lat.values[2], air.lat.values[4]],
-          ),
-          "lon": (
-              ["station"],
-              [air.lon.values[1], air.lon.values[3], air.lon.values[5]],
-          ),
-          "elevation": (["station"], [100, 250, 500]),
-      }
-  ).chunk({"station": 3})
-  return air, stations
+from xarray_sql import XarrayContext
 
 
 def test_sanity(air_dataset_small):
