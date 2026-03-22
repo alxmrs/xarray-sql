@@ -1,5 +1,6 @@
 """SQL functionality tests for xarray-sql using pytest."""
 
+import numpy as np
 import pytest
 import xarray as xr
 
@@ -127,3 +128,21 @@ def test_cross_join(air_and_stations):
       "SELECT COUNT(*) AS total FROM air_data CROSS JOIN stations"
   ).to_pandas()
   assert result["total"].iloc[0] > 0
+
+
+def test_string_coordinates():
+  """String-typed coordinates should not crash during registration."""
+  ds = xr.Dataset(
+      {"score": (["student", "subject"], np.random.rand(3, 2))},
+      coords={
+          "student": ["alice", "bob", "charlie"],
+          "subject": ["math", "science"],
+      },
+  )
+  ctx = XarrayContext()
+  ctx.from_dataset("scores", ds.chunk({"student": 3, "subject": 2}))
+  result = ctx.sql("SELECT * FROM scores").to_pandas()
+  assert len(result) == 6
+  assert "student" in result.columns
+  assert "subject" in result.columns
+  assert "score" in result.columns

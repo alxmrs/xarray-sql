@@ -323,25 +323,31 @@ def _block_metadata(coord_arrays: dict, block: Block) -> PartitionBounds:
   ranges: PartitionBounds = {}
   for dim, slc in block.items():
     coord_values = coord_arrays[str(dim)][slc]
-    if len(coord_values) > 0:
-      # Use actual min/max rather than first/last so that non-monotonic
-      # coordinate axes (e.g. descending latitude 90→-90) are handled
-      # correctly.  np.min/max work for both numeric and datetime64 arrays.
-      min_val = coord_values.min()
-      max_val = coord_values.max()
+    if len(coord_values) == 0:
+      continue
+    # String/object dtypes are not representable as ScalarBound
+    # (Int64/Float64/TimestampNanos) and numpy min/max ufuncs do not
+    # support them.  Skip so pruning treats the dimension conservatively.
+    if coord_values.dtype.kind in ("U", "S", "O"):
+      continue
+    # Use actual min/max rather than first/last so that non-monotonic
+    # coordinate axes (e.g. descending latitude 90→-90) are handled
+    # correctly.  np.min/max work for both numeric and datetime64 arrays.
+    min_val = coord_values.min()
+    max_val = coord_values.max()
 
-      if isinstance(min_val, (np.datetime64, pd.Timestamp)):
-        min_val = int(pd.Timestamp(min_val).value)
-        max_val = int(pd.Timestamp(max_val).value)
-        ranges[str(dim)] = (min_val, max_val, "timestamp_ns")
-      elif hasattr(min_val, "item"):
-        min_val = min_val.item()
-        max_val = max_val.item()
-        dtype = "float64" if isinstance(min_val, float) else "int64"
-        ranges[str(dim)] = (min_val, max_val, dtype)
-      else:
-        dtype = "float64" if isinstance(min_val, float) else "int64"
-        ranges[str(dim)] = (min_val, max_val, dtype)
+    if isinstance(min_val, (np.datetime64, pd.Timestamp)):
+      min_val = int(pd.Timestamp(min_val).value)
+      max_val = int(pd.Timestamp(max_val).value)
+      ranges[str(dim)] = (min_val, max_val, "timestamp_ns")
+    elif hasattr(min_val, "item"):
+      min_val = min_val.item()
+      max_val = max_val.item()
+      dtype = "float64" if isinstance(min_val, float) else "int64"
+      ranges[str(dim)] = (min_val, max_val, dtype)
+    else:
+      dtype = "float64" if isinstance(min_val, float) else "int64"
+      ranges[str(dim)] = (min_val, max_val, dtype)
   return ranges
 
 
