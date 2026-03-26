@@ -31,7 +31,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Build documentation
-        run: uv run --extra dev zensical build
+        run: uv run --extra docs zensical build
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
