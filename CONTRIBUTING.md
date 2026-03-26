@@ -16,7 +16,7 @@ We use [uv](https://docs.astral.sh/uv/) to manage the project.
 
 0. Install uv: https://docs.astral.sh/uv/getting-started/installation/
 1. Clone the repository (bonus: [via SSH](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account))
-   and `cd xarray-sql`.
+   and `cd xarray_sql` (the project root).
 2. Install dev dependencies: `uv sync --dev`
 3. Install pre-commit hooks: `uv run pre-commit install`
 
@@ -37,11 +37,11 @@ appreciate your help. A few things to keep in mind:
 
 Here are a few requests for your development process:
 
-- We require all code to be formatted and linted. These checks run automatically
-  via pre-commit hooks (see Developer setup above). You can run them manually:
-  ```bash
-  uv run pre-commit run --all-files
-  ```
+- We require all code to be formatted with `pyink` and type-checked with `mypy`.
+  These checks run automatically via pre-commit hooks (see Developer setup above).
+  If you need to run them manually:
+  - Formatting: `uv run pre-commit run pyink --all-files` or `uvx pyink .`
+  - Type checking: `uv run pre-commit run mypy --all-files` or `uv run mypy xarray_sql/`
 - Please include unit tests, if possible, and performance tests when you touch the core functionality (see `perf_tests/`).
 - It's polite to do a self review before asking for one from a maintainer. Don't stress if you forget; we all do sometimes.
 - Please add (or update) documentation when adding new code. We use [Google Style docstrings](https://sphinxcontrib-napoleon.readthedocs.io/en/latest/example_google.html).
