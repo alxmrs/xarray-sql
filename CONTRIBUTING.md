@@ -18,11 +18,11 @@ We use [uv](https://docs.astral.sh/uv/) to manage the project.
 1. Clone the repository (bonus: [via SSH](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account))
    and `cd xarray_sql` (the project root).
 2. Install dev dependencies: `uv sync --dev`
-3. Install pre-commit hooks: `uv run pre-commit install`
+3. Install pre-commit hooks: `uvx pre-commit install`
 
    This will automatically run code formatting and type checking before each commit.
-   You can also run the hooks manually with: `uv run pre-commit run --all-files`
-4. Build and serve docs locally: `uv run zensical serve`
+   You can also run the hooks manually with: `uvx pre-commit run --all-files`
+4. Build and serve docs locally: `uvx zensical serve`
 
 
 ## Before submitting a pull request...
@@ -40,8 +40,8 @@ Here are a few requests for your development process:
 - We require all code to be formatted with `pyink` and type-checked with `mypy`.
   These checks run automatically via pre-commit hooks (see Developer setup above).
   If you need to run them manually:
-  - Formatting: `uv run pre-commit run pyink --all-files` or `uvx pyink .`
-  - Type checking: `uv run pre-commit run mypy --all-files` or `uv run mypy xarray_sql/`
+  - Formatting: `uvx pre-commit run pyink --all-files` or `uvx pyink .`
+  - Type checking: `uvx pre-commit run mypy --all-files` or `uvx mypy xarray_sql/`
 - Please include unit tests, if possible, and performance tests when you touch the core functionality (see `perf_tests/`).
 - It's polite to do a self review before asking for one from a maintainer. Don't stress if you forget; we all do sometimes.
 - Please add (or update) documentation when adding new code. We use [Google Style docstrings](https://sphinxcontrib-napoleon.readthedocs.io/en/latest/example_google.html).
