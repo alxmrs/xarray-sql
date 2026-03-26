@@ -27,13 +27,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Pixi
-        uses: prefix-dev/setup-pixi@ba3bb36eb2066252b2363392b7739741bb777659 # v0.8.1
-        with:
-          environments: docs
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
 
       - name: Build documentation
-        run: pixi run -e docs docs-build
+        run: uv run --extra dev zensical build
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
