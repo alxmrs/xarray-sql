@@ -12,3 +12,5 @@ test_data
 .chainlink
 .claude
 CHANGELOG.md
+*.ipynb
+/site

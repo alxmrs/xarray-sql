@@ -64,10 +64,10 @@ def _block_len(block: Block) -> int:
 
 def from_map_batched(
     func: Callable[..., pd.DataFrame],
-    *iterables,
+    *iterables: Any,
     args: tuple | None = None,
     schema: pa.Schema = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> pa.RecordBatchReader:
   """Create a PyArrow RecordBatchReader by mapping a function over iterables.
 
@@ -76,8 +76,8 @@ def from_map_batched(
   RecordBatches which are created via the `func` one-at-a-time.
 
   Args:
-    func: Function to apply to each element of the iterables. Currently, the function
-      must return a Pandas DataFrame.
+    func: Function to apply to each element of the iterables. Currently, the
+      function must return a Pandas DataFrame.
     *iterables: Iterable objects to map the function over.
     schema: Optional schema needed for the RecordBatchReader.
     args: Additional positional arguments to pass to func.
@@ -98,7 +98,7 @@ def from_map_batched(
 
 
 def from_map(
-    func: Callable, *iterables, args: tuple | None = None, **kwargs
+    func: Callable, *iterables: Any, args: tuple | None = None, **kwargs: Any
 ) -> pa.Table:
   """Create a PyArrow Table by mapping a function over iterables.
 
@@ -358,12 +358,13 @@ def partition_metadata(
       blocks: List of block slices from block_slices().
 
   Returns:
-      List of dicts mapping dimension name to (min_value, max_value, dtype_str)
-      tuples.
-      - For datetime64, values are nanoseconds since Unix epoch (int64),
-        dtype_str is "timestamp_ns"
-      - For numeric types, values are Python int or float, dtype_str is
-        "int64" or "float64"
+      List of dicts mapping dimension name to
+      (min_value, max_value, dtype_str) tuples.
+
+          - For datetime64, values are nanoseconds since Unix epoch
+            (int64), dtype_str is "timestamp_ns"
+          - For numeric types, values are Python int or float,
+            dtype_str is "int64" or "float64"
 
   Note:
       If a partition has an empty slice for a dimension, that dimension is

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 60" width="200" height="60">
+  <style>
+    .title { font: bold 24px 'Segoe UI', system-ui, sans-serif; fill: #1a1a2e; }
+    .sql { font: bold 24px 'Segoe UI', system-ui, sans-serif; fill: #0072b5; }
+    @media (prefers-color-scheme: dark) {
+      .title { fill: #e0e0e0; }
+    }
+  </style>
+  <text x="10" y="40" class="title">xarray</text>
+  <text x="108" y="40" class="sql">-sql</text>
+</svg>

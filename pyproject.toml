@@ -42,6 +42,13 @@ test = [
   "xarray[io]",
   "gcsfs",
 ]
+dev = [
+    "zensical",
+    "mkdocstrings[python]",
+    "pre-commit",
+    "pytest",
+    "watchfiles",
+]
 
 [project.urls]
 Homepage = "https://github.com/alxmrs/xarray-sql"

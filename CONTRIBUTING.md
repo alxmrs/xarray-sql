@@ -26,12 +26,14 @@ reading [Xarray's contributing guide](https://docs.xarray.dev/en/stable/contribu
 
 Thanks so much for your contribution! For a volunteer led project, we so
 appreciate your help. A few things to keep in mind:
+
 - Please be nice. We assume good intent from you, and we ask you to do the same for us.
 - Development in this project will be slow if not sporadic. Reviews will come
   as time allows.
 - Every contribution, big or small, matters and deserves credit.
 
 Here are a few requests for your development process:
+
 - We require all code to be formatted with `pyink` and type-checked with `mypy`.
   These checks run automatically via pre-commit hooks (see Developer setup above).
   If you need to run them manually:
