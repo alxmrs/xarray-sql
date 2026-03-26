@@ -12,13 +12,50 @@ reading [Xarray's contributing guide](https://docs.xarray.dev/en/stable/contribu
 
 ## Developer setup
 
-0. We use `uv` to manage the project: https://docs.astral.sh/uv/getting-started/installation/
-1. Clone the repository (bonus: [via SSH](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account))
-   and `cd xarray_sql` (the project root).
-2. Install dev dependencies via: `uv sync --dev`
+We support two workflows: **pixi** (recommended) and **uv**.
+
+### With pixi (recommended)
+
+[Pixi](https://pixi.sh) manages both Python and non-Python dependencies (including the Rust toolchain) in isolated environments.
+
+1. Install pixi: https://pixi.sh/latest/#installation
+2. Clone the repository and `cd xarray-sql`.
+3. Install and build the Rust extension:
+   ```bash
+   pixi run postinstall-maturin
+   ```
+4. Run tests:
+   ```bash
+   pixi run test
+   ```
+5. Install pre-commit hooks:
+   ```bash
+   pixi run -e lint lint-install
+   ```
+6. Build and serve docs locally:
+   ```bash
+   pixi run -e docs docs
+   ```
+
+Pixi environments are defined in `pixi.toml`. Common tasks:
+
+| Command | Description |
+|---|---|
+| `pixi run test` | Run pytest |
+| `pixi run test-coverage` | Run pytest with coverage |
+| `pixi run -e lint lint` | Run all pre-commit hooks |
+| `pixi run -e docs docs` | Serve docs locally |
+| `pixi run -e docs docs-build` | Build docs to `site/` |
+| `pixi run -e build build-wheel` | Build a wheel with maturin |
+
+### With uv
+
+0. Install `uv`: https://docs.astral.sh/uv/getting-started/installation/
+1. Clone the repository and `cd xarray-sql`.
+2. Install dev dependencies: `uv sync --dev`
 3. Install pre-commit hooks: `uv run pre-commit install`
 
-   This will automatically run code formatting (pyink) and type checking (mypy) before each commit.
+   This will automatically run code formatting and type checking before each commit.
    You can also run the hooks manually with: `uv run pre-commit run --all-files`
 
 
@@ -34,11 +71,13 @@ appreciate your help. A few things to keep in mind:
 
 Here are a few requests for your development process:
 
-- We require all code to be formatted with `pyink` and type-checked with `mypy`.
-  These checks run automatically via pre-commit hooks (see Developer setup above).
-  If you need to run them manually:
-  - Formatting: `uv run pre-commit run pyink --all-files` or `uvx pyink .`
-  - Type checking: `uv run pre-commit run mypy --all-files` or `uv run mypy xarray_sql/`
+- We require all code to be formatted and linted. These checks run automatically
+  via pre-commit hooks (see Developer setup above). You can run them manually:
+  ```bash
+  pixi run -e lint lint
+  # or with uv:
+  uv run pre-commit run --all-files
+  ```
 - Please include unit tests, if possible, and performance tests when you touch the core functionality (see `perf_tests/`).
 - It's polite to do a self review before asking for one from a maintainer. Don't stress if you forget; we all do sometimes.
 - Please add (or update) documentation when adding new code. We use [Google Style docstrings](https://sphinxcontrib-napoleon.readthedocs.io/en/latest/example_google.html).
