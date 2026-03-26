@@ -64,10 +64,10 @@ def _block_len(block: Block) -> int:
 
 def from_map_batched(
     func: Callable[..., pd.DataFrame],
-    *iterables: Any,
+    *iterables: tuple[Any, ...],
     args: tuple | None = None,
     schema: pa.Schema = None,
-    **kwargs: Any,
+    **kwargs: dict[str, Any],
 ) -> pa.RecordBatchReader:
   """Create a PyArrow RecordBatchReader by mapping a function over iterables.
 
@@ -98,7 +98,10 @@ def from_map_batched(
 
 
 def from_map(
-    func: Callable, *iterables: Any, args: tuple | None = None, **kwargs: Any
+    func: Callable,
+    *iterables: tuple[Any, ...],
+    args: tuple | None = None,
+    **kwargs: dict[str, Any],
 ) -> pa.Table:
   """Create a PyArrow Table by mapping a function over iterables.
 
