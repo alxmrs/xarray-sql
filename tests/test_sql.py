@@ -1,6 +1,7 @@
 """SQL functionality tests for xarray-sql using pytest."""
 
 import numpy as np
+import pandas as pd
 import pytest
 import xarray as xr
 
@@ -153,9 +154,6 @@ class TestNanAsNull:
 
   @pytest.fixture
   def nan_ds(self):
-    import numpy as np
-    import pandas as pd
-
     data = np.array([[[1.0, 2.0], [np.nan, 4.0]], [[5.0, np.nan], [7.0, 8.0]]])
     return xr.Dataset(
         {"temp": (["time", "x", "y"], data)},
@@ -167,8 +165,6 @@ class TestNanAsNull:
     ).chunk({"time": 1})
 
   def test_nan_aggregates(self, nan_ds):
-    import numpy as np
-
     ctx = XarrayContext()
     ctx.from_dataset("data", nan_ds)
 
