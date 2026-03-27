@@ -173,9 +173,9 @@ def read_xarray(ds: xr.Dataset, chunks: Chunks = None) -> pa.RecordBatchReader:
 
   Args:
     ds: An Xarray Dataset. All `data_vars` must share the same dimensions.
-    chunks: Xarray-like chunks. If not provided, will default to the Dataset's
-     chunks. The product of the chunk sizes becomes the standard length of each
-     dataframe partition.
+    chunks: Xarray-like chunks. If not provided, will default to the
+      Dataset's chunks. The product of the chunk sizes becomes the
+      standard length of each dataframe partition.
 
   Returns:
     A PyArrow RecordBatchReader, which is a table representation of the input

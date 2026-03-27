@@ -41,6 +41,16 @@ test = [
   "xarray[io]",
   "gcsfs",
 ]
+docs = [
+    "zensical",
+    "mkdocstrings[python]",
+]
+dev = [
+    "xarray_sql[docs]",
+    "pre-commit",
+    "pytest",
+    "watchfiles",
+]
 
 [project.urls]
 Homepage = "https://github.com/alxmrs/xarray-sql"
@@ -85,6 +95,7 @@ ignore_missing_imports = true
 [dependency-groups]
 dev = [
     "xarray_sql[test]",
+    "xarray_sql[docs]",
     "py-spy>=0.4.0",
     "pyink>=24.10.1",
     "maturin>=1.9.1",
