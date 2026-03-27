@@ -31,7 +31,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Build documentation
-        run: uv run --extra docs zensical build
+        run: uvx --with "mkdocstrings[python]" zensical build
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v4
