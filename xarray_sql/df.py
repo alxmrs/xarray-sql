@@ -207,7 +207,11 @@ def dataset_to_record_batch(
       arrays.append(pa.array(arr, type=field.type))
     else:
       # Data variable: ravel to 1-D (zero-copy for C-contiguous arrays).
-      arrays.append(pa.array(ds[name].values.ravel(), type=field.type))
+      # from_pandas=True maps NaN → Arrow null inside the C++ copy kernel,
+      # so SQL aggregates (MAX, MIN, AVG) skip missing values correctly.
+      arrays.append(
+          pa.array(ds[name].values.ravel(), type=field.type, from_pandas=True)
+      )
 
   return pa.RecordBatch.from_arrays(arrays, schema=schema)
 
@@ -282,7 +286,11 @@ def iter_record_batches(
         arrays.append(pa.array(coord_values[name][coord_idx], type=field.type))
       else:
         arrays.append(
-            pa.array(data_arrays[name][row_start:row_end], type=field.type)
+            pa.array(
+                data_arrays[name][row_start:row_end],
+                type=field.type,
+                from_pandas=True,
+            )
         )
 
     yield pa.RecordBatch.from_arrays(arrays, schema=schema)

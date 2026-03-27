@@ -1,6 +1,7 @@
 """SQL functionality tests for xarray-sql using pytest."""
 
 import numpy as np
+import pandas as pd
 import pytest
 import xarray as xr
 
@@ -146,3 +147,44 @@ def test_string_coordinates():
   assert "student" in result.columns
   assert "subject" in result.columns
   assert "score" in result.columns
+
+
+class TestNanAsNull:
+  """NaN in float columns should become Arrow nulls so SQL aggregates work."""
+
+  @pytest.fixture
+  def nan_ds(self):
+    data = np.array([[[1.0, 2.0], [np.nan, 4.0]], [[5.0, np.nan], [7.0, 8.0]]])
+    return xr.Dataset(
+        {"temp": (["time", "x", "y"], data)},
+        coords={
+            "time": pd.date_range("2020-01-01", periods=2),
+            "x": [0, 1],
+            "y": [0, 1],
+        },
+    ).chunk({"time": 1})
+
+  def test_nan_aggregates(self, nan_ds):
+    ctx = XarrayContext()
+    ctx.from_dataset("data", nan_ds)
+
+    # Test multiple aggregates at once:
+    # MAX/MIN/AVG should ignore NaN, COUNT(col) should exclude NaN,
+    # and WHERE col IS NULL should match NaN.
+    query = """
+        SELECT
+            MAX(temp) AS mx,
+            MIN(temp) AS mn,
+            AVG(temp) AS avg,
+            COUNT(temp) AS cnt,
+            COUNT(*) FILTER (WHERE temp IS NULL) AS null_cnt
+        FROM data
+    """
+    result = ctx.sql(query).to_pandas().iloc[0]
+
+    assert result["mx"] == 8.0
+    assert result["mn"] == 1.0
+    expected_avg = np.nanmean([1.0, 2.0, 4.0, 5.0, 7.0, 8.0])
+    assert abs(result["avg"] - expected_avg) < 1e-6
+    assert result["cnt"] == 6
+    assert result["null_cnt"] == 2
