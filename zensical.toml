@@ -2,7 +2,7 @@
 site_name = "xarray-sql"
 site_description = "Query Xarray with SQL"
 site_author = "Alexander Merose"
-site_url = "https://alex.merose.com/xarray-sql"
+site_url = "https://alxmrs.github.io/xarray-sql"
 repo_url = "https://github.com/alxmrs/xarray-sql"
 repo_name = "alxmrs/xarray-sql"
 edit_uri = "edit/main/docs/"
