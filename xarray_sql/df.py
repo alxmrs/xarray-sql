@@ -228,7 +228,7 @@ def iter_record_batches(
 ) -> Iterator[pa.RecordBatch]:
   """Yield RecordBatches of at most *batch_size* rows from a partition Dataset.
 
-  Unlike :func:`dataset_to_record_batch`, which materialises the entire
+  Unlike `dataset_to_record_batch`, which materialises the entire
   partition as one batch, this generator emits smaller batches so that
   DataFusion can begin filtering and aggregating before the full partition
   is loaded.  Peak memory per batch is O(batch_size) for coordinate columns
