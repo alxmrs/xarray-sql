@@ -12,17 +12,33 @@ reading [Xarray's contributing guide](https://docs.xarray.dev/en/stable/contribu
 
 ## Developer setup
 
-We use [uv](https://docs.astral.sh/uv/) to manage the project.
+We use [uv](https://docs.astral.sh/uv/) to manage the project. This project
+also contains a Rust extension (built with [maturin](https://www.maturin.rs/)),
+so a Rust toolchain is required.
 
-0. Install uv: https://docs.astral.sh/uv/getting-started/installation/
-1. Clone the repository (bonus: [via SSH](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account))
-   and `cd xarray_sql` (the project root).
-2. Install dev dependencies: `uv sync --dev`
-3. Install pre-commit hooks: `uvx pre-commit install`
+0. Install Rust: https://rustup.rs/
+1. Install uv: https://docs.astral.sh/uv/getting-started/installation/
+2. Clone the repository (bonus: [via SSH](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account))
+   and `cd xarray-sql` (the project root).
+3. Install Python dev dependencies (without building the Rust extension yet):
+   ```shell
+   uv sync --dev --no-install-package xarray-sql
+   ```
+4. Build and install the Rust extension into the virtual environment:
+   ```shell
+   uv run --no-project maturin develop --uv
+   ```
+   This compiles the native code and links it so that `import xarray_sql` works.
+   Re-run this step whenever you modify any Rust source files under `src/`.
+5. Run the test suite to verify your setup:
+   ```shell
+   uv run --no-project pytest -v . -m "not integration"
+   ```
+6. Install pre-commit hooks: `uvx pre-commit install`
 
    This will automatically run code formatting and type checking before each commit.
    You can also run the hooks manually with: `uvx pre-commit run --all-files`
-4. Build and serve docs locally: `uvx zensical serve`
+7. Build and serve docs locally: `uvx zensical serve`
 
 
 ## Before submitting a pull request...

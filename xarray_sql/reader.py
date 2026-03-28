@@ -203,14 +203,15 @@ def read_xarray_table(
   Each chunk becomes a separate partition, enabling DataFusion's parallel
   execution across multiple cores.
 
-  Filter Pushdown:
+  Note:
       SQL queries with WHERE clauses on dimension columns (time, lat, lon, etc.)
-      automatically prune partitions that can't contain matching rows. For example:
+      automatically prune partitions that can't contain matching rows — this is
+      called *filter pushdown*. For example:
 
           # This query will skip loading partitions with time < '2020-02-01'
-          result = ctx.sql('SELECT * FROM air WHERE time > \"2020-02-01\"').collect()
+          result = ctx.sql('SELECT * FROM air WHERE time > "2020-02-01"').collect()
 
-      Supported operators: =, <, >, <=, >=, BETWEEN, IN, AND, OR.
+      Supported operators: `=`, `<`, `>`, `<=`, `>=`, `BETWEEN`, `IN`, `AND`, `OR`.
 
   Args:
       ds: An xarray Dataset. All data_vars must share the same dimensions.

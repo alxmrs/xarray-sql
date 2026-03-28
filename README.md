@@ -130,10 +130,12 @@ and BigQuery. More thoughts on this
 in [#4](https://github.com/alxmrs/xarray-sql/issues/4).
 
 _2025 update_: Something like this is being built across a few projects! The ones I know about are:
+
 - [CartoDB's Raquet](https://github.com/CartoDB/raquet)
 - The DataFusion community's [arrow-zarr](https://github.com/datafusion-contrib/arrow-zarr)
 
-_2026 update_: A collegue and I are experimenting with native Zarr RDBMS engines. Check out:
+_2026 update_: A colleague and I are experimenting with native Zarr RDBMS engines. Check out:
+
 - [Zarr-Datafusion](https://lib.rs/crates/zarr-datafusion)
 - [DuckDB-Zarr](https://github.com/hobbes-bot/duckdb-zarr)
 
