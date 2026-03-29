@@ -12,6 +12,7 @@ from .df import _parse_schema
 
 # -- Fixtures ---------------------------------------------------------------
 
+
 @pytest.fixture
 def rasm_ds():
   """rasm uses cftime.DatetimeNoLeap (noleap / 365_day) for time."""
@@ -22,6 +23,7 @@ def rasm_ds():
 def ds_360day():
   """Synthetic 360-day calendar dataset."""
   import cftime
+
   times = [cftime.Datetime360Day(2000, m, 1) for m in range(1, 13)]
   return xr.Dataset(
       {"temp": ("time", np.arange(12, dtype=np.float32))},
@@ -30,6 +32,7 @@ def ds_360day():
 
 
 # -- Detection helpers ------------------------------------------------------
+
 
 class TestDetection:
 
@@ -55,6 +58,7 @@ class TestDetection:
 
 # -- Calendar classification ------------------------------------------------
 
+
 class TestCalendarClassification:
 
   def test_calendar_returns_noleap(self, rasm_ds):
@@ -79,6 +83,7 @@ class TestCalendarClassification:
 
 
 # -- Numeric conversion -----------------------------------------------------
+
 
 class TestConversion:
 
@@ -119,21 +124,23 @@ class TestConversion:
 
 # -- Arrow schema helpers ---------------------------------------------------
 
+
 class TestArrowField:
 
   def test_gregorian_like_produces_timestamp_us(self):
     field = cft.arrow_field("time", cft.DEFAULT_UNITS, "noleap")
-    assert field.type == pa.timestamp('us')
-    assert field.metadata[b'xarray:calendar'] == b'noleap'
-    assert field.metadata[b'xarray:units'] == cft.DEFAULT_UNITS.encode()
+    assert field.type == pa.timestamp("us")
+    assert field.metadata[b"xarray:calendar"] == b"noleap"
+    assert field.metadata[b"xarray:units"] == cft.DEFAULT_UNITS.encode()
 
   def test_non_gregorian_produces_int64(self):
     field = cft.arrow_field("time", cft.DEFAULT_UNITS, "360_day")
     assert field.type == pa.int64()
-    assert field.metadata[b'xarray:calendar'] == b'360_day'
+    assert field.metadata[b"xarray:calendar"] == b"360_day"
 
 
 # -- Partition bounds -------------------------------------------------------
+
 
 class TestPartitionBounds:
 
@@ -152,19 +159,20 @@ class TestPartitionBounds:
 
 # -- Integration with _parse_schema ----------------------------------------
 
+
 class TestParseSchemaIntegration:
 
   def test_noleap_produces_timestamp_us(self, rasm_ds):
     schema = _parse_schema(rasm_ds[["Tair"]])
     time_field = schema.field("time")
-    assert time_field.type == pa.timestamp('us')
-    assert time_field.metadata[b'xarray:calendar'] == b'noleap'
+    assert time_field.type == pa.timestamp("us")
+    assert time_field.metadata[b"xarray:calendar"] == b"noleap"
 
   def test_360day_produces_int64(self, ds_360day):
     schema = _parse_schema(ds_360day)
     time_field = schema.field("time")
     assert time_field.type == pa.int64()
-    assert time_field.metadata[b'xarray:calendar'] == b'360_day'
+    assert time_field.metadata[b"xarray:calendar"] == b"360_day"
 
   def test_datetime64_unchanged(self):
     ds = xr.tutorial.open_dataset("air_temperature")
