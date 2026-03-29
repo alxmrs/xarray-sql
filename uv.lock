@@ -2613,6 +2613,7 @@ docs = [
     { name = "zensical" },
 ]
 test = [
+    { name = "cftime" },
     { name = "gcsfs" },
     { name = "pytest" },
     { name = "xarray", version = "2025.6.1", source = { registry = "https://pypi.org/simple" }, extra = ["io"], marker = "python_full_version < '3.11'" },
@@ -2629,6 +2630,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cftime", marker = "extra == 'test'" },
     { name = "dask", specifier = ">=2024.8.0" },
     { name = "datafusion", specifier = "==52.0.0" },
     { name = "gcsfs", marker = "extra == 'test'" },
