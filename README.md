@@ -164,6 +164,8 @@ I want to give a special thanks to the following folks and institutions:
   and DataFusion-specific collaboration.
 - The gracious volunteer data science students at [UCSD's DS3](https://www.ds3atucsd.com/) org,
   who are working to make this library better.
+- Andrew Huang for the sense of taste he brings to the project and consummate code
+  changes.
 
 
 ## License
