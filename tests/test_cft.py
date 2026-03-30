@@ -6,8 +6,8 @@ import pyarrow as pa
 import pytest
 import xarray as xr
 
-from . import cft
-from .df import _parse_schema
+from xarray_sql import cft
+from xarray_sql.df import _parse_schema
 
 
 # -- Fixtures ---------------------------------------------------------------
