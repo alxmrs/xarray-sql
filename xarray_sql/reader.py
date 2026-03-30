@@ -271,7 +271,7 @@ def read_xarray_table(
         else:
           # Only dimension coords requested — drop all data vars to avoid
           # loading them unnecessarily (e.g. for queries like SELECT lat, lon).
-          ds_block = ds[[]].isel(block)
+          ds_block = ds.drop_vars(list(ds.data_vars)).isel(block)
         batch_schema = pa.schema(
             [schema.field(name) for name in projection_names]
         )
