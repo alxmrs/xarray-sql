@@ -384,14 +384,15 @@ def _block_metadata(coord_arrays: dict, block: Block) -> PartitionBounds:
     # (Int64/Float64/TimestampNanos) and numpy min/max ufuncs do not
     # support them.  Skip so pruning treats the dimension conservatively.
     if coord_values.dtype.kind in ("U", "S", "O"):
-      continue  # Use actual min/max rather than first/last so that non-monotonic
-      # coordinate axes (e.g. descending latitude 90→-90) are handled
-      # correctly.  np.min/max work for both numeric and datetime64 arrays.
+      continue
 
     if cft.is_cftime(coord_values):
       ranges[str(dim)] = cft.partition_bounds(coord_values)
       continue
 
+    # Use actual min/max rather than first/last so that non-monotonic
+    # coordinate axes (e.g. descending latitude 90→-90) are handled
+    # correctly.  np.min/max work for both numeric and datetime64 arrays.
     min_val = coord_values.min()
     max_val = coord_values.max()
 
