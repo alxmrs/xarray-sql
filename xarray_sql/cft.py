@@ -30,11 +30,17 @@ import xarray as xr
 # ---------------------------------------------------------------------------
 
 #: Calendars close enough to proleptic Gregorian for ``pa.timestamp('us')``.
-GREGORIAN_LIKE_CALENDARS: frozenset[str] = frozenset({
-    'standard', 'gregorian', 'proleptic_gregorian',
-    'noleap', '365_day',
-    'all_leap', '366_day',
-})
+GREGORIAN_LIKE_CALENDARS: frozenset[str] = frozenset(
+    {
+        'standard',
+        'gregorian',
+        'proleptic_gregorian',
+        'noleap',
+        '365_day',
+        'all_leap',
+        '366_day',
+    }
+)
 
 #: Default CF-convention units when no encoding is available on the coordinate.
 #: Microseconds give sub-second precision and fit int64 for ±292 k years.
@@ -50,10 +56,12 @@ def is_gregorian_like(calendar: str) -> bool:
 # Detection helpers (avoid materializing Dask/Zarr data where possible)
 # ---------------------------------------------------------------------------
 
-def is_cftime(values) -> bool:
+
+def is_cftime(values: np.ndarray) -> bool:
   """Check if a numpy array contains cftime datetime objects."""
   try:
     import cftime
+
     if values.dtype == np.dtype('O') and len(values) > 0:
       sample = values.ravel()[0]
       return isinstance(sample, cftime.datetime)
@@ -68,8 +76,9 @@ def is_cftime_index(ds: xr.Dataset, coord_name: str) -> bool:
     idx = ds.indexes.get(coord_name)
     if idx is not None:
       from xarray import CFTimeIndex
+
       return isinstance(idx, CFTimeIndex)
-  except Exception:
+  except (ImportError, AttributeError):
     pass
   return False
 
@@ -84,15 +93,16 @@ def calendar(ds: xr.Dataset, coord_name: str) -> str | None:
     idx = ds.indexes.get(coord_name)
     if idx is not None:
       from xarray import CFTimeIndex
+
       if isinstance(idx, CFTimeIndex):
-        return idx.calendar  # type: ignore[attr-defined]
-  except Exception:
+        return str(idx.calendar)  # type: ignore[attr-defined]
+  except (ImportError, AttributeError):
     pass
   try:
     values = ds.coords[coord_name].values
     if is_cftime(values):
-      return values.ravel()[0].calendar
-  except Exception:
+      return str(values.ravel()[0].calendar)
+  except (AttributeError, KeyError):
     pass
   return None
 
@@ -113,6 +123,7 @@ def encoding(ds: xr.Dataset, coord_name: str) -> tuple[str, str]:
 # Numeric conversion
 # ---------------------------------------------------------------------------
 
+
 def to_microseconds(values) -> np.ndarray:
   """Convert cftime objects to int64 microseconds since Unix epoch.
 
@@ -120,6 +131,7 @@ def to_microseconds(values) -> np.ndarray:
   (implemented in C).
   """
   import cftime as _cftime
+
   us = _cftime.date2num(
       values.ravel(),
       units=DEFAULT_UNITS,
@@ -134,6 +146,7 @@ def to_offsets(values, units: str, cal: str) -> np.ndarray:
   Used for non-Gregorian calendars where data is stored as ``pa.int64()``.
   """
   import cftime as _cftime
+
   raw = _cftime.date2num(values.ravel(), units=units, calendar=cal)
   return np.asarray(raw, dtype=np.float64).astype(np.int64)
 
@@ -155,6 +168,7 @@ def convert_for_field(values, field: pa.Field) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Partition pruning helpers
 # ---------------------------------------------------------------------------
+
 
 def partition_bounds(
     values,
@@ -178,6 +192,7 @@ def partition_bounds(
 # Arrow schema helpers
 # ---------------------------------------------------------------------------
 
+
 def arrow_field(name: str, units: str, cal: str) -> pa.Field:
   """Build a ``pa.Field`` for a cftime coordinate.
 
@@ -192,3 +207,42 @@ def arrow_field(name: str, units: str, cal: str) -> pa.Field:
   if is_gregorian_like(cal):
     return pa.field(name, pa.timestamp('us'), metadata=meta)
   return pa.field(name, pa.int64(), metadata=meta)
+
+
+# ---------------------------------------------------------------------------
+# DataFusion UDF
+# ---------------------------------------------------------------------------
+
+
+def make_cftime_udf(units: str, calendar: str):
+  """Create a DataFusion scalar UDF that converts date strings to int64 offsets.
+
+  This enables ergonomic SQL filtering on non-Gregorian cftime columns::
+
+      SELECT * FROM ds360 WHERE time > cftime('0500-01-01')
+
+  The UDF parses the input string as a cftime datetime in the given
+  calendar system and returns the corresponding int64 offset in the
+  specified units.
+  """
+  import cftime as _cftime
+  from datafusion import udf
+
+  def _cftime_scalar(date_strings: pa.Array) -> pa.Array:
+    results: list[int | None] = []
+    for s in date_strings.to_pylist():
+      if s is None:
+        results.append(None)
+        continue
+      dt = _cftime.datetime.strptime(s, '%Y-%m-%d', calendar=calendar)
+      val = _cftime.date2num(dt, units=units, calendar=calendar)
+      results.append(int(val))
+    return pa.array(results, type=pa.int64())
+
+  return udf(
+      _cftime_scalar,
+      [pa.utf8()],
+      pa.int64(),
+      'immutable',
+      'cftime',
+  )
