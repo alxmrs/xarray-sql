@@ -86,6 +86,12 @@ def air_dataset_large():
 
 
 @pytest.fixture
+def rasm_ds():
+  """rasm uses cftime.DatetimeNoLeap (noleap / 365_day) for time."""
+  return xr.tutorial.open_dataset("rasm")
+
+
+@pytest.fixture
 def weather_dataset():
   ds = rand_wx("2023-01-01T00", "2023-01-01T12")
   return ds.isel(time=slice(0, 6), lat=slice(0, 10), lon=slice(0, 10)).chunk(
