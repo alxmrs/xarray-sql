@@ -196,11 +196,6 @@ class TestCftimeGregorianLike:
   These use pa.timestamp('us') and support string-based SQL filters.
   """
 
-  @pytest.fixture
-  def rasm_ds(self):
-    """The rasm tutorial dataset uses cftime.DatetimeNoLeap (noleap)."""
-    return xr.tutorial.open_dataset("rasm")
-
   def test_noleap_dataset_registers(self, rasm_ds):
     """A noleap dataset should register without errors."""
     ctx = XarrayContext()
@@ -234,7 +229,7 @@ class TestCftimeGregorianLike:
     ctx = XarrayContext()
     ctx.from_dataset("rasm", rasm_ds, chunks={"time": 12})
     result = ctx.sql(
-        'SELECT MIN(time) AS t_min, MAX(time) AS t_max FROM rasm'
+        "SELECT MIN(time) AS t_min, MAX(time) AS t_max FROM rasm"
     ).to_pandas()
     assert result["t_min"].iloc[0] < result["t_max"].iloc[0]
 
@@ -243,9 +238,7 @@ class TestCftimeGregorianLike:
     ctx = XarrayContext()
     ctx.from_dataset("rasm", rasm_ds, chunks={"time": 12})
     result = ctx.sql("SELECT COUNT(*) AS cnt FROM rasm").to_pandas()
-    expected = int(np.prod([
-        rasm_ds.sizes[d] for d in rasm_ds["Tair"].dims
-    ]))
+    expected = int(np.prod([rasm_ds.sizes[d] for d in rasm_ds["Tair"].dims]))
     assert result["cnt"].iloc[0] == expected
 
 
@@ -259,6 +252,7 @@ class TestCftimeNonGregorian:
   def ds_360day(self):
     """Synthetic 360-day calendar dataset."""
     import cftime
+
     times = [cftime.Datetime360Day(2000, m, 1) for m in range(1, 13)]
     return xr.Dataset(
         {"temp": ("time", np.arange(12, dtype=np.float32))},
@@ -288,9 +282,11 @@ class TestCftimeNonGregorian:
     ctx = XarrayContext()
     ctx.from_dataset("ds360", ds_360day, chunks={"time": 6})
     # Get all distinct time values to find a midpoint
-    all_times = ctx.sql(
-        "SELECT DISTINCT time FROM ds360 ORDER BY time"
-    ).to_pandas()["time"].tolist()
+    all_times = (
+        ctx.sql("SELECT DISTINCT time FROM ds360 ORDER BY time")
+        .to_pandas()["time"]
+        .tolist()
+    )
     mid = all_times[len(all_times) // 2]
     result = ctx.sql(
         f"SELECT COUNT(*) AS cnt FROM ds360 WHERE time >= {mid}"

@@ -7,7 +7,7 @@ import pandas as pd
 import pyarrow as pa
 import xarray as xr
 
-from . import cft
+from . import cftime as cft
 
 
 Block = dict[Hashable, slice]

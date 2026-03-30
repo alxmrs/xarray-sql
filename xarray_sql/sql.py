@@ -1,7 +1,7 @@
 import xarray as xr
 from datafusion import SessionContext
 
-from . import cft
+from . import cftime as cft
 from .df import Chunks
 from .reader import read_xarray_table
 
@@ -15,6 +15,39 @@ class XarrayContext(SessionContext):
       input_table: xr.Dataset,
       chunks: Chunks = None,
   ):
+    """Register an xarray Dataset as a queryable SQL table.
+
+    For datasets with non-Gregorian cftime coordinates (e.g. 360_day,
+    julian), a ``cftime()`` scalar UDF is automatically registered so
+    you can write ergonomic SQL filters::
+
+        ctx.from_dataset("ds360", ds, chunks={"time": 6})
+        ctx.sql("SELECT * FROM ds360 WHERE time >= cftime('2000-07-01')")
+
+    The UDF converts a date string to the int64 offset used to store
+    that calendar's time axis.
+
+    .. note::
+
+        Only one ``cftime()`` UDF is registered per context, using the
+        units and calendar of the *first* non-Gregorian coordinate
+        encountered. If you register multiple datasets with *different*
+        non-Gregorian calendars (e.g. one 360_day and one julian), the
+        UDF from the first registration will be used for all subsequent
+        ``cftime()`` calls and may produce incorrect offsets for the
+        other dataset. In that case, create a separate ``XarrayContext``
+        for each calendar.
+
+    Args:
+        table_name: The SQL table name to register the dataset under.
+        input_table: An xarray Dataset. All data_vars must share the
+            same dimensions.
+        chunks: Xarray-like chunks specification. If not provided, uses
+            the Dataset's existing chunks.
+
+    Returns:
+        self, to allow chaining.
+    """
     table = read_xarray_table(input_table, chunks)
     self.register_table(table_name, table)
 

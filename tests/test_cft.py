@@ -1,4 +1,4 @@
-"""Unit tests for the cft module (cftime ↔ Arrow bridge)."""
+"""Unit tests for the cftime module (cftime ↔ Arrow bridge)."""
 
 import numpy as np
 import pandas as pd
@@ -6,17 +6,11 @@ import pyarrow as pa
 import pytest
 import xarray as xr
 
-from xarray_sql import cft
+from xarray_sql import cftime as cft
 from xarray_sql.df import _parse_schema
 
 
 # -- Fixtures ---------------------------------------------------------------
-
-
-@pytest.fixture
-def rasm_ds():
-  """rasm uses cftime.DatetimeNoLeap (noleap / 365_day) for time."""
-  return xr.tutorial.open_dataset("rasm")
 
 
 @pytest.fixture
