@@ -330,45 +330,48 @@ def test_from_map_batched_integration_with_datafusion_via_read_xarray():
 
 
 def test_read_xarray_loads_one_chunk_at_a_time(large_ds):
+  tracemalloc.stop()  # reset any state left by a previously-failed test
   tracemalloc.start()
-  iterable = read_xarray(large_ds)
-  first_size, first_peak = tracemalloc.get_traced_memory()
-  tracemalloc.reset_peak()
-
-  sizes, peaks = [], []
-
-  first_chunk = large_ds.isel(next(block_slices(large_ds)))
-  chunk_size = first_chunk.nbytes
-
-  # Creating the iterator should be inexpensive -- less than one chunk.
-  # We multiply by constant factors because chunks have additional overhead
-  assert first_size < chunk_size * 3
-  assert first_peak < chunk_size * 6
-
-  for it in iterable:
-    _ = it
-    cur_size, cur_peak = tracemalloc.get_traced_memory()
+  try:
+    iterable = read_xarray(large_ds)
+    first_size, first_peak = tracemalloc.get_traced_memory()
     tracemalloc.reset_peak()
-    sizes.append(cur_size)
-    peaks.append(cur_peak)
 
-  for size in sizes:
-    # Observed range: 1.59–1.83× chunk_size.
-    # iter_record_batches holds data-variable arrays (≈1× chunk) while
-    # yielding sub-batches, plus the current Arrow batch (≈0.65× chunk).
-    assert chunk_size * 1.3 < size, f"size {size} unexpectedly low"
-    assert chunk_size * 2.2 > size, f"size {size} unexpectedly high"
+    sizes, peaks = [], []
 
-  for peak in peaks:
-    # Observed range: 1.84–3.28× chunk_size.
-    # Peak includes data arrays + Arrow batch + temporary coordinate index
-    # arrays; the first batch of each chunk is highest (Dask compute overhead).
-    assert chunk_size * 1.5 < peak, f"peak {peak} unexpectedly low"
-    assert chunk_size * 4.0 > peak, f"peak {peak} unexpectedly high"
+    first_chunk = large_ds.isel(next(block_slices(large_ds)))
+    chunk_size = first_chunk.nbytes
 
-  assert max(peaks) < large_ds.nbytes
+    # Creating the iterator should be inexpensive -- less than one chunk.
+    # We multiply by constant factors because chunks have additional overhead
+    assert first_size < chunk_size * 3
+    assert first_peak < chunk_size * 6
 
-  tracemalloc.stop()
+    for it in iterable:
+      _ = it
+      cur_size, cur_peak = tracemalloc.get_traced_memory()
+      tracemalloc.reset_peak()
+      sizes.append(cur_size)
+      peaks.append(cur_peak)
+
+    for size in sizes:
+      # Observed range: 1.59–1.83× on macOS, up to ~2.7× on Linux
+      # (glibc + Arrow allocate more intermediate buffers).
+      # iter_record_batches holds data-variable arrays (≈1× chunk) while
+      # yielding sub-batches, plus the current Arrow batch (≈0.65× chunk).
+      assert chunk_size * 1.3 < size, f"size {size} unexpectedly low"
+      assert chunk_size * 3.5 > size, f"size {size} unexpectedly high"
+
+    for peak in peaks:
+      # Observed range: 1.84–3.28× chunk_size.
+      # Peak includes data arrays + Arrow batch + temporary coordinate index
+      # arrays; the first batch of each chunk is highest (Dask compute overhead).
+      assert chunk_size * 1.5 < peak, f"peak {peak} unexpectedly low"
+      assert chunk_size * 4.0 > peak, f"peak {peak} unexpectedly high"
+
+    assert max(peaks) < large_ds.nbytes
+  finally:
+    tracemalloc.stop()
 
 
 def test_read_xarray_table_memory_bounds(large_ds):
@@ -384,37 +387,41 @@ def test_read_xarray_table_memory_bounds(large_ds):
   first_chunk = large_ds.isel(next(block_slices(large_ds)))
   chunk_size = first_chunk.nbytes
 
+  tracemalloc.stop()  # reset any state left by a previously-failed test
   # --- Registration phase ---
   tracemalloc.start()
-  table = read_xarray_table(large_ds)
-  reg_size, reg_peak = tracemalloc.get_traced_memory()
-  tracemalloc.reset_peak()
+  try:
+    table = read_xarray_table(large_ds)
+    reg_size, reg_peak = tracemalloc.get_traced_memory()
+    tracemalloc.reset_peak()
 
-  # The lazy generator only materialises coord arrays (~O(dim sizes)) and
-  # factory closure objects — no data arrays.  Both metrics should be well
-  # below one chunk of data.
-  assert reg_size < chunk_size, (
-      f"Registration held {reg_size} bytes >= chunk_size {chunk_size}: "
-      "data may have been loaded eagerly"
-  )
-  assert (
-      reg_peak < chunk_size * 2
-  ), f"Registration peak {reg_peak} too high (expected < 2× chunk_size {chunk_size})"
+    # The lazy generator only materialises coord arrays (~O(dim sizes)) and
+    # factory closure objects — no data arrays.  Both metrics should be well
+    # below one chunk of data.
+    assert reg_size < chunk_size, (
+        f"Registration held {reg_size} bytes >= chunk_size {chunk_size}: "
+        "data may have been loaded eagerly"
+    )
+    assert (
+        reg_peak < chunk_size * 2
+    ), f"Registration peak {reg_peak} too high (expected < 2× chunk_size {chunk_size})"
 
-  # --- Query phase ---
-  ctx = SessionContext()
-  ctx.register_table("weather", table)
-  ctx.sql("SELECT AVG(temperature), AVG(precipitation) FROM weather").collect()
-  _, query_peak = tracemalloc.get_traced_memory()
+    # --- Query phase ---
+    ctx = SessionContext()
+    ctx.register_table("weather", table)
+    ctx.sql(
+        "SELECT AVG(temperature), AVG(precipitation) FROM weather"
+    ).collect()
+    _, query_peak = tracemalloc.get_traced_memory()
 
-  # tracemalloc measures Python-heap allocations, which include Arrow
-  # buffer copies and object overhead on top of the raw data.  The
-  # observed peak is typically 1.1–1.5× the raw dataset size; we use
-  # 2× as a generous bound that would still catch catastrophic regressions
-  # (e.g. loading all partitions twice simultaneously).
-  assert query_peak < large_ds.nbytes * 2, (
-      f"Query peak {query_peak} >= 2× dataset {large_ds.nbytes}: "
-      "may be holding excessive data in memory"
-  )
-
-  tracemalloc.stop()
+    # tracemalloc measures Python-heap allocations, which include Arrow
+    # buffer copies and object overhead on top of the raw data.  The
+    # observed peak is typically 1.1–1.5× the raw dataset size; we use
+    # 2× as a generous bound that would still catch catastrophic regressions
+    # (e.g. loading all partitions twice simultaneously).
+    assert query_peak < large_ds.nbytes * 2, (
+        f"Query peak {query_peak} >= 2× dataset {large_ds.nbytes}: "
+        "may be holding excessive data in memory"
+    )
+  finally:
+    tracemalloc.stop()
