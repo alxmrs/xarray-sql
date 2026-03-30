@@ -363,11 +363,12 @@ def test_read_xarray_loads_one_chunk_at_a_time(large_ds):
       assert chunk_size * 3.5 > size, f"size {size} unexpectedly high"
 
     for peak in peaks:
-      # Observed range: 1.84–3.28× chunk_size.
+      # Observed range: 1.84–3.28× on macOS, up to ~4.15× on Linux
+      # (glibc + Arrow hold more intermediate buffers at peak).
       # Peak includes data arrays + Arrow batch + temporary coordinate index
       # arrays; the first batch of each chunk is highest (Dask compute overhead).
       assert chunk_size * 1.5 < peak, f"peak {peak} unexpectedly low"
-      assert chunk_size * 4.0 > peak, f"peak {peak} unexpectedly high"
+      assert chunk_size * 5.0 > peak, f"peak {peak} unexpectedly high"
 
     assert max(peaks) < large_ds.nbytes
   finally:
