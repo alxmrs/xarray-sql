@@ -102,6 +102,8 @@ dev = [
     "py-spy>=0.4.0",
     "ruff>=0.15.10",
     "maturin>=1.9.1",
+    "mkdocstrings>=1.0.3",
+    "mkdocstrings-python>=2.0.3",
 ]
 
 [tool.uv]
