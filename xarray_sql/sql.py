@@ -1,5 +1,6 @@
 import xarray as xr
 from datafusion import SessionContext
+from collections import defaultdict
 
 from . import cftime as cft
 from .df import Chunks
@@ -48,6 +49,7 @@ class XarrayContext(SessionContext):
         Returns:
             self, to allow chaining.
         """
+
         table = read_xarray_table(input_table, chunks)
         self.register_table(table_name, table)
 
@@ -61,3 +63,61 @@ class XarrayContext(SessionContext):
                     break  # One UDF per context is enough.
 
         return self
+
+    def from_dataset_multi(
+        self,
+        dataset_name: str,
+        input_table: xr.Dataset,
+        dim_aliases: dict[tuple[str, ...], str] | None = None,
+        chunks: Chunks = None,
+    ):
+        """Register an xarray Dataset with mixed dimensions as multiple SQL tables.
+
+        When a Dataset contains variables with different dimensions (e.g. some
+        variables on a 3D grid and others on a 4D grid), this method splits them
+        into separate tables and registers each one. Each table is named
+        ``<dataset_name>.<dim1>_<dim2>_...`` by default, or using the override
+        provided in ``dim_aliases``::
+
+            ctx.from_dataset_multi('era5', ds, chunks={'time': 24})
+            # registers: 'era5.time_lat_lon' and 'era5.time_lat_lon_level'
+            ctx.sql('SELECT AVG(temperature_2m) FROM "era5.time_lat_lon"')
+
+        Args:
+        dataset_name: A name for the dataset, used as a prefix for all
+            registered table names.
+        input_table: An xarray Dataset. Variables may have differing dimensions.
+        dim_aliases: Optional mapping from dimension tuples to custom table
+            name suffixes. For example,
+            ``{('time', 'lat', 'lon'): 'surface'}`` registers the table as
+            ``era5.surface`` instead of ``era5.time_lat_lon``.
+        chunks: Xarray-like chunks specification. If not provided, uses
+            the Dataset's existing chunks.
+
+        Returns:
+            self, to allow chaining.
+        """
+
+        dim_aliases = dim_aliases or {}
+        groups = _group_vars_by_dims(input_table)
+
+        for dims, var_names in groups.items():
+            suffix = dim_aliases.get(dims, "_".join(dims))
+            table_name = f"{dataset_name}_{suffix}"
+            sub_ds = input_table[var_names]
+            self.from_dataset(table_name, sub_ds, chunks)
+
+        return self
+
+
+def _group_vars_by_dims(ds: xr.Dataset) -> dict[tuple[str, ...], list[str]]:
+    """Group variables in the dataset based on shared dims.
+
+    ("time", "lat", "lon"):          ["temperature_2m", "wind_speed"],
+    ("time", "lat", "lon", "level"): ["pressure", "humidity"]
+    """
+    groups = defaultdict(list)
+    for var_name, var in ds.data_vars.items():
+        dims = var.dims
+        groups[dims].append(var_name)
+    return groups
