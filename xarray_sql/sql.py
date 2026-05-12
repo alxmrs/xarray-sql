@@ -93,5 +93,6 @@ class XarrayContext(SessionContext):
         registry = _RegistryView(
             templates=dict(self._registered_datasets),
             query=query,
+            ctx=self,
         )
         return XarrayDataFrame(inner, registry=registry)

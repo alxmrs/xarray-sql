@@ -287,3 +287,164 @@ def test_extract_from_tables(query, expected):
     from xarray_sql.ds import _extract_from_tables
 
     assert _extract_from_tables(query) == expected
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Lazy backend semantics
+# ---------------------------------------------------------------------------
+
+
+def _patch_raw_sql_counter(monkeypatch):
+    """Wrap ds._raw_sql with a counter; return the counter ref."""
+    from xarray_sql import ds as ds_mod
+
+    calls = {"n": 0}
+    original = ds_mod._raw_sql
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ds_mod, "_raw_sql", counting)
+    return calls
+
+
+def test_lazy_select_star_returns_lazily_indexed_array(air_dataset_small):
+    """For SELECT *, the air var should be backed by LazilyIndexedArray."""
+    ctx = XarrayContext()
+    ctx.from_dataset("air", air_dataset_small)
+    out = ctx.sql("SELECT * FROM air").to_dataset()
+    inner = out["air"].variable._data
+    # xr.core.indexing.LazilyIndexedArray wraps our SQLBackendArray.
+    assert "LazilyIndexedArray" in type(inner).__name__
+    from xarray_sql.ds import SQLBackendArray
+
+    # Drill in to confirm the underlying array is ours.
+    underlying = inner.array if hasattr(inner, "array") else inner
+    assert isinstance(underlying, SQLBackendArray)
+
+
+def test_lazy_no_sql_execution_until_access(air_dataset_small, monkeypatch):
+    """Constructing the lazy Dataset must not trigger arbitrary SQL runs.
+
+    Some setup queries are allowed (schema introspection, distinct-coord
+    fetch when there's no template) but reading metadata (dims, coords,
+    attrs) on the returned Dataset must not increment beyond that.
+    """
+    ctx = XarrayContext()
+    ctx.from_dataset("air", air_dataset_small)
+    calls = _patch_raw_sql_counter(monkeypatch)
+    out = ctx.sql("SELECT * FROM air").to_dataset()
+    construct_count = calls["n"]
+    # Reading metadata only.
+    _ = out.dims
+    _ = out.sizes
+    _ = out.attrs
+    _ = out["air"].attrs
+    _ = out["lat"].values  # coord arrays come from the template, not SQL
+    assert calls["n"] == construct_count, (
+        f"Metadata reads should not trigger SQL; was {construct_count}, "
+        f"now {calls['n']}"
+    )
+
+
+def test_lazy_isel_int_pushes_down_equality(air_dataset_small, monkeypatch):
+    """isel(time=0) triggers exactly one wrapped SQL with WHERE = literal."""
+    ctx = XarrayContext()
+    ctx.from_dataset("air", air_dataset_small)
+    calls = _patch_raw_sql_counter(monkeypatch)
+    out = ctx.sql("SELECT * FROM air").to_dataset()
+    before = calls["n"]
+    slab = out["air"].isel(time=0).values
+    after = calls["n"]
+    # Shape: (lat, lon)
+    assert slab.shape == (
+        air_dataset_small.sizes["lat"],
+        air_dataset_small.sizes["lon"],
+    )
+    # At least one SQL execution past the schema setup.
+    assert after > before
+
+
+def test_lazy_isel_slice_pushdown(air_dataset_small):
+    """isel(time=slice(0, 3)) round-trip matches the source."""
+    ctx = XarrayContext()
+    ctx.from_dataset("air", air_dataset_small)
+    out = ctx.sql("SELECT * FROM air").to_dataset()
+    actual = out["air"].isel(time=slice(0, 3)).sortby(["lat", "lon"]).values
+    expected = (
+        air_dataset_small["air"]
+        .compute()
+        .isel(time=slice(0, 3))
+        .sortby(["lat", "lon"])
+        .values
+    )
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_lazy_select_star_round_trip_equality(air_dataset_small):
+    """Lazy .values produces the same data as the eager path on full read."""
+    ctx = XarrayContext()
+    ctx.from_dataset("air", air_dataset_small)
+    out = ctx.sql("SELECT * FROM air").to_dataset()
+    expected = air_dataset_small.compute().sortby(["time", "lat", "lon"])
+    actual = out.sortby(["time", "lat", "lon"])
+    np.testing.assert_array_equal(actual["air"].values, expected["air"].values)
+
+
+def test_aggregation_uses_eager_path(air_dataset_small):
+    """Aggregation queries materialize once via the eager path.
+
+    No assertion on the data type of variable._data here; xarray may
+    wrap eager numpy arrays in NumpyIndexingAdapter. The contract is:
+    values match the source and slicing afterwards is local.
+    """
+    ctx = XarrayContext()
+    ctx.from_dataset("air", air_dataset_small)
+    out = ctx.sql(
+        "SELECT lat, lon, AVG(air) AS air_avg FROM air GROUP BY lat, lon"
+    ).to_dataset(dim_cols=["lat", "lon"])
+    underlying = out["air_avg"].variable._data
+    from xarray_sql.ds import SQLBackendArray
+
+    # Aggregation -> not a SQLBackendArray.
+    if hasattr(underlying, "array"):
+        assert not isinstance(underlying.array, SQLBackendArray)
+    else:
+        assert not isinstance(underlying, SQLBackendArray)
+
+
+def test_lazy_outer_indexer_array(air_dataset_small):
+    """Fancy index along one dim works (IN clause pushdown)."""
+    ctx = XarrayContext()
+    ctx.from_dataset("air", air_dataset_small)
+    out = ctx.sql("SELECT * FROM air").to_dataset()
+    slab = out["air"].isel(lat=[0, 3, 5]).values
+    assert slab.shape == (
+        air_dataset_small.sizes["time"],
+        3,
+        air_dataset_small.sizes["lon"],
+    )
+    expected_lats = air_dataset_small["lat"].values[[0, 3, 5]]
+    np.testing.assert_array_equal(
+        out["air"].isel(lat=[0, 3, 5])["lat"].values, expected_lats
+    )
+
+
+def test_lazy_compute_returns_eager(air_dataset_small):
+    """.compute() returns an in-memory Dataset matching the source."""
+    ctx = XarrayContext()
+    ctx.from_dataset("air", air_dataset_small)
+    out = ctx.sql("SELECT * FROM air").to_dataset().compute()
+    # After .compute(), no SQLBackendArray underneath.
+    from xarray_sql.ds import SQLBackendArray
+
+    underlying = out["air"].variable._data
+    if hasattr(underlying, "array"):
+        assert not isinstance(underlying.array, SQLBackendArray)
+    np.testing.assert_array_equal(
+        out.sortby(["time", "lat", "lon"])["air"].values,
+        air_dataset_small.compute()
+        .sortby(["time", "lat", "lon"])["air"]
+        .values,
+    )

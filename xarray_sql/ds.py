@@ -39,17 +39,23 @@ class _RegistryView:
     """Snapshot of ``XarrayContext`` registrations handed to a wrapper.
 
     Held privately by :class:`XarrayDataFrame` so it can derive defaults
-    (``dim_cols``, ``template``) and recover metadata that the forward
-    pivot drops. Not part of the public API.
+    (``dim_cols``, ``template``), recover metadata that the forward
+    pivot drops, and re-execute sub-queries for lazy pushdown. Not part
+    of the public API.
 
     Attributes:
         templates: Map of registered table name -> source ``xr.Dataset``.
         query: SQL string this wrapper was produced from. Used for
-            FROM-clause matching.
+            FROM-clause matching and as the base query for lazy
+            sub-queries.
+        ctx: Reference to the ``XarrayContext`` that produced this
+            wrapper, used to execute sub-queries via the parent
+            ``SessionContext.sql`` (avoids wrapper recursion).
     """
 
     templates: dict[str, xr.Dataset] = field(default_factory=dict)
     query: str = ""
+    ctx: Any = None
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +208,271 @@ def _apply_template(ds: xr.Dataset, template: xr.Dataset) -> xr.Dataset:
     return out
 
 
+def _raw_sql(ctx: Any, query: str) -> Any:
+    """Run a SQL query through the parent ``SessionContext.sql``.
+
+    Bypasses :meth:`XarrayContext.sql` to avoid wrapping the result, used
+    internally by :class:`SQLBackendArray` and :func:`_lazy_to_xarray`
+    for sub-queries.
+    """
+    from datafusion import SessionContext
+
+    return SessionContext.sql(ctx, query)
+
+
+def _sql_literal(value: Any) -> str:
+    """Format a Python/numpy scalar as a SQL literal accepted by DataFusion."""
+    if isinstance(value, np.datetime64) or isinstance(value, pd.Timestamp):
+        ts = pd.Timestamp(value)
+        return f"TIMESTAMP '{ts.strftime('%Y-%m-%d %H:%M:%S.%f')}'"
+    if hasattr(value, "item") and not isinstance(value, (str, bytes)):
+        try:
+            value = value.item()
+        except (ValueError, TypeError):
+            pass
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value)
+    if isinstance(value, (str, bytes)):
+        s = value.decode() if isinstance(value, bytes) else value
+        escaped = s.replace("'", "''")
+        return f"'{escaped}'"
+    raise TypeError(
+        f"Cannot build SQL literal for value of type {type(value).__name__}"
+    )
+
+
+class SQLBackendArray(xr.backends.BackendArray):
+    """Lazy N-D array backed by re-executing a wrapped SQL query.
+
+    Translates xarray indexers (BasicIndexer, OuterIndexer; Vectorized
+    falls back to materialize) into SQL ``WHERE`` clauses pushed down
+    into a sub-query of the original SQL. Materializes only the
+    requested slice on each ``__getitem__`` call.
+
+    Constructed by :func:`_lazy_to_xarray`; users should not instantiate
+    this class directly.
+    """
+
+    def __init__(
+        self,
+        ctx: Any,
+        base_query: str,
+        var_name: str,
+        dim_cols: list[str],
+        coord_arrays: dict[str, np.ndarray],
+        shape: tuple[int, ...],
+        dtype: np.dtype,
+    ) -> None:
+        self._ctx = ctx
+        self._base_query = base_query
+        self._var_name = var_name
+        self._dim_cols = list(dim_cols)
+        self._coord_arrays = coord_arrays
+        self.shape = tuple(shape)
+        self.dtype = np.dtype(dtype)
+        self._full_cache: np.ndarray | None = None
+
+    def __getitem__(self, key: Any) -> np.ndarray:
+        return xr.core.indexing.explicit_indexing_adapter(
+            key,
+            self.shape,
+            xr.core.indexing.IndexingSupport.OUTER,
+            self._raw_getitem,
+        )
+
+    def __copy__(self) -> "SQLBackendArray":
+        # The backend is read-only and re-executes the same SQL on every
+        # access, so returning self is semantically equivalent to a copy.
+        return self
+
+    def __deepcopy__(self, memo: dict) -> "SQLBackendArray":
+        # SessionContext is not picklable; sharing the same backend across
+        # the copy is safe because every access re-runs SQL from scratch.
+        return self
+
+    # ------------------------------------------------------------------
+
+    def _raw_getitem(self, key: tuple) -> np.ndarray:
+        """Materialize the slab described by *key* via a wrapped SQL query.
+
+        ``key`` is a tuple of ``int``/``slice``/1-D integer-array, one per
+        dim, in :attr:`_dim_cols` order.
+        """
+        requested: dict[str, list[Any]] = {}
+        drop_axes: list[int] = []
+        for axis, (dim, k) in enumerate(zip(self._dim_cols, key)):
+            coord = self._coord_arrays[dim]
+            if isinstance(k, slice):
+                if k.step not in (None, 1):
+                    return self._fallback_materialize_and_index(key)
+                requested[dim] = list(coord[k])
+            elif isinstance(k, (int, np.integer)):
+                requested[dim] = [coord[int(k)]]
+                drop_axes.append(axis)
+            else:
+                arr = np.asarray(k)
+                if arr.ndim != 1:
+                    return self._fallback_materialize_and_index(key)
+                requested[dim] = list(coord[arr])
+
+        out_shape = tuple(len(requested[d]) for d in self._dim_cols)
+        if any(n == 0 for n in out_shape):
+            empty = np.empty(out_shape, dtype=self.dtype)
+            return (
+                np.squeeze(empty, axis=tuple(drop_axes)) if drop_axes else empty
+            )
+
+        try:
+            conds = [
+                self._build_cond(dim, requested[dim]) for dim in self._dim_cols
+            ]
+        except TypeError:
+            return self._fallback_materialize_and_index(key)
+
+        cols = ", ".join(f'"{c}"' for c in self._dim_cols + [self._var_name])
+        wrapped = (
+            f"SELECT {cols} FROM ({self._base_query}) AS _xql_base "
+            f"WHERE {' AND '.join(conds)}"
+        )
+        try:
+            raw_df = _raw_sql(self._ctx, wrapped).to_pandas()
+        except Exception:
+            return self._fallback_materialize_and_index(key)
+
+        if len(raw_df) == 0:
+            # WHERE matched no rows: caller asked for empty slab.
+            return np.empty(out_shape, dtype=self.dtype)
+
+        da = raw_df.set_index(list(self._dim_cols)).to_xarray()[self._var_name]
+        # Reorder to match the caller's requested coord order per dim.
+        try:
+            da = da.sel({d: requested[d] for d in self._dim_cols})
+        except (KeyError, ValueError):
+            return self._fallback_materialize_and_index(key)
+        arr = np.asarray(da.values)
+        if drop_axes:
+            arr = np.squeeze(arr, axis=tuple(drop_axes))
+        return arr
+
+    def _build_cond(self, dim: str, vals: list[Any]) -> str:
+        if len(vals) == 1:
+            return f'"{dim}" = {_sql_literal(vals[0])}'
+        in_list = ", ".join(_sql_literal(v) for v in vals)
+        return f'"{dim}" IN ({in_list})'
+
+    def _fallback_materialize_and_index(self, key: tuple) -> np.ndarray:
+        """Materialize the full base query once, cache it, then numpy-index."""
+        if self._full_cache is None:
+            all_df = _raw_sql(self._ctx, self._base_query).to_pandas()
+            sorted_df = all_df.sort_values(self._dim_cols).reset_index(
+                drop=True
+            )
+            full = sorted_df.set_index(self._dim_cols).to_xarray()[
+                self._var_name
+            ]
+            full = full.sel({d: self._coord_arrays[d] for d in self._dim_cols})
+            self._full_cache = np.asarray(full.values)
+        return self._full_cache[key]
+
+
+def _is_pushdownable(
+    template: xr.Dataset | None,
+    dim_cols: list[str],
+    result_cols: list[str],
+) -> bool:
+    """Decide whether a query can be lazily pushed down.
+
+    True when there is a registered template, every requested ``dim_cols``
+    appears in the result, and the result has no columns beyond the
+    template's dim coords and data vars (i.e. no aggregation aliases).
+    """
+    if template is None:
+        return False
+    allowed = set(template.dims) | set(template.data_vars)
+    rcols = set(result_cols)
+    if not rcols <= allowed:
+        return False
+    if not set(dim_cols) <= rcols:
+        return False
+    return True
+
+
+def _lazy_to_xarray(
+    ctx: Any,
+    base_query: str,
+    dim_cols: list[str],
+    template: xr.Dataset | None,
+    sparse_extent: SparseExtent,
+    fill_value: Any,
+) -> xr.Dataset:
+    """Build a lazy ``xr.Dataset`` whose data vars are SQLBackendArrays."""
+    if sparse_extent not in ("result", "template"):
+        raise ValueError(
+            "sparse_extent must be 'result' or 'template', got "
+            f"{sparse_extent!r}"
+        )
+    if sparse_extent == "template" and template is None:
+        raise ValueError(
+            "sparse_extent='template' requires template= to be supplied"
+        )
+
+    schema = _raw_sql(ctx, base_query).schema()
+    field_names = [f.name for f in schema]
+    field_types = {f.name: f.type for f in schema}
+
+    # Coord arrays from template when available; else SELECT DISTINCT per dim.
+    coord_arrays: dict[str, np.ndarray] = {}
+    for d in dim_cols:
+        if template is not None and d in template.coords:
+            coord_arrays[d] = np.asarray(template.coords[d].values)
+        else:
+            distinct_q = (
+                f'SELECT DISTINCT "{d}" FROM ({base_query}) AS _xql_base '
+                f'ORDER BY "{d}"'
+            )
+            df = _raw_sql(ctx, distinct_q).to_pandas()
+            coord_arrays[d] = np.asarray(df[d].values)
+    shape = tuple(len(coord_arrays[d]) for d in dim_cols)
+
+    data_vars: dict[str, xr.Variable] = {}
+    for name in field_names:
+        if name in dim_cols:
+            continue
+        np_dtype = field_types[name].to_pandas_dtype()
+        backend = SQLBackendArray(
+            ctx=ctx,
+            base_query=base_query,
+            var_name=name,
+            dim_cols=dim_cols,
+            coord_arrays=coord_arrays,
+            shape=shape,
+            dtype=np_dtype,
+        )
+        lazy = xr.core.indexing.LazilyIndexedArray(backend)
+        data_vars[name] = xr.Variable(dim_cols, lazy)
+
+    coords_arg = {d: coord_arrays[d] for d in dim_cols}
+    ds = xr.Dataset(data_vars=data_vars, coords=coords_arg)
+
+    if sparse_extent == "template":
+        assert template is not None
+        indexers = {
+            d: template.coords[d].values
+            for d in dim_cols
+            if d in template.coords and d in template.dims
+        }
+        if indexers:
+            ds = ds.reindex(indexers, fill_value=fill_value)
+
+    if template is not None:
+        ds = _apply_template(ds, template)
+    return ds
+
+
 def _eager_to_xarray(
     result: Any,
     dim_cols: list[str],
@@ -339,6 +610,17 @@ class XarrayDataFrame:
             template = self._resolve_template(template_table)
         if dim_cols is None:
             dim_cols = self._infer_dim_cols(preferred_template=template)
+        if _is_pushdownable(template, dim_cols, self._result_columns()):
+            ctx = self._registry.ctx
+            assert ctx is not None  # set by XarrayContext.sql
+            return _lazy_to_xarray(
+                ctx=ctx,
+                base_query=self._registry.query,
+                dim_cols=dim_cols,
+                template=template,
+                sparse_extent=sparse_extent,
+                fill_value=fill_value,
+            )
         return _eager_to_xarray(
             self,
             dim_cols=dim_cols,
