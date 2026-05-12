@@ -3,11 +3,19 @@ from datafusion import SessionContext
 
 from . import cftime as cft
 from .df import Chunks
+from .ds import XarrayDataFrame, _RegistryView
 from .reader import read_xarray_table
 
 
 class XarrayContext(SessionContext):
     """A datafusion `SessionContext` that also supports `xarray.Dataset`s."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Track registered xarray Datasets so XarrayDataFrame can recover
+        # defaults (dim_cols) and metadata (var/dataset attrs, non-dim
+        # coords, dim-coord dtype) the forward pivot strips.
+        self._registered_datasets: dict[str, xr.Dataset] = {}
 
     def from_dataset(
         self,
@@ -50,6 +58,7 @@ class XarrayContext(SessionContext):
         """
         table = read_xarray_table(input_table, chunks)
         self.register_table(table_name, table)
+        self._registered_datasets[table_name] = input_table
 
         # Auto-register a cftime() UDF for non-Gregorian cftime coordinates
         # so users can write: WHERE time > cftime('0500-01-01')
@@ -61,3 +70,28 @@ class XarrayContext(SessionContext):
                     break  # One UDF per context is enough.
 
         return self
+
+    def sql(self, query: str, *args, **kwargs) -> XarrayDataFrame:
+        """Run a SQL query, returning an :class:`XarrayDataFrame` wrapper.
+
+        Identical to ``datafusion.SessionContext.sql`` except the returned
+        object wraps the DataFusion DataFrame. The wrapper exposes
+        ``.to_pandas()`` (unchanged), forwards every other DataFusion
+        method via ``__getattr__``, and adds
+        ``.to_dataset(dim_cols=[...])`` for round-tripping the result
+        back to an ``xr.Dataset``.
+
+        Args:
+            query: A SQL query string.
+            *args: Forwarded to ``SessionContext.sql``.
+            **kwargs: Forwarded to ``SessionContext.sql``.
+
+        Returns:
+            An :class:`XarrayDataFrame` wrapping the DataFusion DataFrame.
+        """
+        inner = super().sql(query, *args, **kwargs)
+        registry = _RegistryView(
+            templates=dict(self._registered_datasets),
+            query=query,
+        )
+        return XarrayDataFrame(inner, registry=registry)
