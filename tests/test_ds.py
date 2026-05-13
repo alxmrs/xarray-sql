@@ -635,6 +635,31 @@ def test_bare_select_star_skips_distinct_scans(air_dataset_small, monkeypatch):
     )
 
 
+def test_vectorized_indexer_falls_back_via_xarray_adapter(
+    air_dataset_small,
+):
+    """VectorizedIndexer paths through xarray's adapter to outer + gather.
+
+    Our SQLBackendArray declares ``IndexingSupport.OUTER``, so xarray's
+    ``explicit_indexing_adapter`` converts vectorized indexers into a
+    series of outer reads followed by an in-memory numpy gather. The
+    public contract: values match the eager-computed equivalent.
+    """
+    ctx = XarrayContext()
+    ctx.from_dataset("air", air_dataset_small)
+    lazy = ctx.sql("SELECT * FROM air").to_dataset()
+    eager = ctx.sql("SELECT * FROM air").to_dataset().compute()
+
+    # Vectorized indexing: pick (time, lat) pairs along a new dim "point".
+    points_t = xr.DataArray([0, 3, 1], dims="point")
+    points_lat = xr.DataArray([2, 0, 5], dims="point")
+    lazy_pts = lazy["air"].isel(time=points_t, lat=points_lat).values
+    eager_pts = eager["air"].isel(time=points_t, lat=points_lat).values
+    np.testing.assert_array_equal(lazy_pts, eager_pts)
+    # Shape: (point=3, lon=53).
+    assert lazy_pts.shape == (3, air_dataset_small.sizes["lon"])
+
+
 def test_full_dim_slice_omits_where_clause(air_dataset_small, monkeypatch):
     """``isel(time=0)`` -- full-extent lat/lon dims drop from the WHERE.
 

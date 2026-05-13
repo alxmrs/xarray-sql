@@ -8,10 +8,14 @@ Inverse of the forward "raster -> table" pivot done by
   :meth:`XarrayDataFrame.to_dataset` for converting query results back to
   ``xr.Dataset`` while keeping every other DataFusion method available.
 
-Phase 1 is eager: ``to_dataset`` materializes through pandas, then
-reshapes back to an N-D Dataset. The structure is shaped so the lazy
-``BackendArray`` swap in Phase 2 is a localized change in
-``_eager_to_xarray``.
+``.to_dataset()`` is lazy by default for ``SELECT *``-style queries: data
+variables are backed by :class:`SQLBackendArray` wrapped in
+``xarray.core.indexing.LazilyIndexedArray``. Slicing and ``.sel`` translate
+to SQL ``WHERE`` clauses pushed into a sub-query of the original SQL, so
+only the requested slab is materialized. Aggregation queries (where the
+result contains columns that are not in the registered template) fall
+back to an eager materialize-and-reshape path. ``.compute()`` always
+returns an in-memory Dataset.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ from __future__ import annotations
 import re
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -285,11 +289,14 @@ class SQLBackendArray(xr.backends.BackendArray):
         self._full_cache: np.ndarray | None = None
 
     def __getitem__(self, key: Any) -> np.ndarray:
-        return xr.core.indexing.explicit_indexing_adapter(
-            key,
-            self.shape,
-            xr.core.indexing.IndexingSupport.OUTER,
-            self._raw_getitem,
+        return cast(
+            np.ndarray,
+            xr.core.indexing.explicit_indexing_adapter(
+                key,
+                self.shape,
+                xr.core.indexing.IndexingSupport.OUTER,
+                self._raw_getitem,
+            ),
         )
 
     def __copy__(self) -> "SQLBackendArray":
@@ -345,9 +352,10 @@ class SQLBackendArray(xr.backends.BackendArray):
         out_shape = tuple(len(requested[d]) for d in self._dim_cols)
         if any(n == 0 for n in out_shape):
             empty = np.empty(out_shape, dtype=self.dtype)
-            return (
+            squeezed = (
                 np.squeeze(empty, axis=tuple(drop_axes)) if drop_axes else empty
             )
+            return cast(np.ndarray, squeezed)
 
         try:
             conds = [
@@ -371,7 +379,7 @@ class SQLBackendArray(xr.backends.BackendArray):
 
         if len(raw_df) == 0:
             # WHERE matched no rows: caller asked for empty slab.
-            return np.empty(out_shape, dtype=self.dtype)
+            return cast(np.ndarray, np.empty(out_shape, dtype=self.dtype))
 
         da = raw_df.set_index(list(self._dim_cols)).to_xarray()[self._var_name]
         # Reorder to match the caller's requested coord order per dim.
@@ -382,7 +390,7 @@ class SQLBackendArray(xr.backends.BackendArray):
         arr = np.asarray(da.values)
         if drop_axes:
             arr = np.squeeze(arr, axis=tuple(drop_axes))
-        return arr
+        return cast(np.ndarray, arr)
 
     def _build_cond(self, dim: str, vals: list[Any]) -> str:
         if len(vals) == 1:
@@ -402,7 +410,7 @@ class SQLBackendArray(xr.backends.BackendArray):
             ]
             full = full.sel({d: self._coord_arrays[d] for d in self._dim_cols})
             self._full_cache = np.asarray(full.values)
-        return self._full_cache[key]
+        return cast(np.ndarray, self._full_cache[key])
 
 
 def _is_pushdownable(
