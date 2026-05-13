@@ -66,6 +66,54 @@ df.head()
 Succinctly, we "pivot" Xarray Datasets (with consistent dimensions) to treat them like tables so we can run
 SQL queries against them.
 
+## Round-tripping back to Xarray
+
+`ctx.sql(...)` returns an `XarrayDataFrame` that exposes `.to_pandas()`
+(unchanged) and a new `.to_dataset()` for converting the result back to an
+`xr.Dataset`. The reverse path is **lazy by default**: the returned Dataset
+is backed by a `BackendArray` that translates xarray indexing into SQL
+`WHERE` clauses pushed into a sub-query of the original SQL. Data only
+materializes for the slice actually accessed.
+
+```python
+out = ctx.sql('SELECT * FROM "air"').to_dataset()
+# <xarray.Dataset>
+# Dimensions:  (time: 2920, lat: 25, lon: 53)
+# Coordinates:
+#   * time     (time) datetime64[ns] ...
+#   * lat      (lat) float32 ...
+#   * lon      (lon) float32 ...
+# Data variables:
+#     air      (time, lat, lon) float32 ...
+
+# Slicing pushes down into SQL; only the requested slab is materialized.
+slab = out["air"].isel(time=0).values
+
+# For full eager materialization, call .compute().
+eager = out.compute()
+```
+
+`dim_cols` defaults to the dims of the registered Dataset referenced by the
+SQL `FROM` clause. Variable attrs, dataset attrs, non-dimension coords, and
+dim-coordinate dtypes are recovered from the registered Dataset
+automatically.
+
+For filtered queries that return only part of the original extent, pass
+`sparse_extent="template"` to reindex back to the full grid with NaN
+fills:
+
+```python
+out = ctx.sql(
+    'SELECT * FROM "air" WHERE lat > 50'
+).to_dataset(sparse_extent="template")
+# Full lat range restored; cells with lat <= 50 are NaN.
+```
+
+Aggregation queries (e.g. `AVG(air) AS air_avg ... GROUP BY lat, lon`)
+materialize once because their output does not align with the source dim
+structure. Pass `dim_cols=[...]` explicitly when an aggregation drops a
+dim.
+
 ## Why build this?
 
 A few reasons:
