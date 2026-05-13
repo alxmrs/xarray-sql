@@ -71,6 +71,14 @@ _FROM_OR_JOIN_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Matches a bare unfiltered SELECT *, e.g. ``SELECT * FROM "air"``. Used by
+# ``_lazy_to_xarray`` to skip the DISTINCT-per-dim coord scan when the
+# query is known to cover the full registered Dataset.
+_UNFILTERED_SELECT_STAR_RE = re.compile(
+    r'^\s*SELECT\s+\*\s+FROM\s+"?([A-Za-z_][A-Za-z0-9_]*)"?\s*;?\s*$',
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def _extract_from_tables(query: str) -> list[str]:
     """Return identifiers appearing after FROM/JOIN in *query*.
@@ -303,13 +311,23 @@ class SQLBackendArray(xr.backends.BackendArray):
         dim, in :attr:`_dim_cols` order.
         """
         requested: dict[str, list[Any]] = {}
+        # Dims whose indexer covers the full extent (slice(None) or
+        # equivalent). For these we omit the WHERE clause entirely to avoid
+        # generating huge ``dim IN (...)`` clauses that DataFusion would
+        # then have to parse only to constant-fold to TRUE.
+        full_dims: set[str] = set()
         drop_axes: list[int] = []
         for axis, (dim, k) in enumerate(zip(self._dim_cols, key)):
             coord = self._coord_arrays[dim]
             if isinstance(k, slice):
                 if k.step not in (None, 1):
                     return self._fallback_materialize_and_index(key)
+                start = 0 if k.start is None else k.start
+                stop = len(coord) if k.stop is None else k.stop
+                covers_all = start == 0 and stop >= len(coord)
                 requested[dim] = list(coord[k])
+                if covers_all:
+                    full_dims.add(dim)
             elif isinstance(k, (int, np.integer)):
                 requested[dim] = [coord[int(k)]]
                 drop_axes.append(axis)
@@ -318,6 +336,11 @@ class SQLBackendArray(xr.backends.BackendArray):
                 if arr.ndim != 1:
                     return self._fallback_materialize_and_index(key)
                 requested[dim] = list(coord[arr])
+                if (
+                    len(arr) == len(coord)
+                    and (arr == np.arange(len(coord))).all()
+                ):
+                    full_dims.add(dim)
 
         out_shape = tuple(len(requested[d]) for d in self._dim_cols)
         if any(n == 0 for n in out_shape):
@@ -328,15 +351,18 @@ class SQLBackendArray(xr.backends.BackendArray):
 
         try:
             conds = [
-                self._build_cond(dim, requested[dim]) for dim in self._dim_cols
+                self._build_cond(dim, requested[dim])
+                for dim in self._dim_cols
+                if dim not in full_dims
             ]
         except TypeError:
             return self._fallback_materialize_and_index(key)
 
         cols = ", ".join(f'"{c}"' for c in self._dim_cols + [self._var_name])
+        where_clause = f" WHERE {' AND '.join(conds)}" if conds else ""
         wrapped = (
-            f"SELECT {cols} FROM ({self._base_query}) AS _xql_base "
-            f"WHERE {' AND '.join(conds)}"
+            f"SELECT {cols} FROM ({self._base_query}) AS _xql_base"
+            f"{where_clause}"
         )
         try:
             raw_df = _raw_sql(self._ctx, wrapped).to_pandas()
@@ -424,19 +450,32 @@ def _lazy_to_xarray(
     field_names = [f.name for f in schema]
     field_types = {f.name: f.type for f in schema}
 
-    # Always derive coord arrays from the actual query result via DISTINCT
-    # per dim, even when a template is available. This guarantees the lazy
-    # backend's coord_arrays match the rows the SQL will return -- crucial
-    # for filtered queries (e.g. WHERE lat > 50), where the template's
-    # full-range coords would mismatch the actual filtered subset.
+    # Coord-array source. For a bare ``SELECT * FROM <table>`` query where
+    # the table is registered, the template's full coord arrays are correct
+    # and avoid a per-dim DISTINCT scan that would otherwise read the whole
+    # dataset 3-4 times at construction. For anything else (WHERE / JOIN /
+    # CTE) the template may mismatch the actual filtered result, so fall
+    # back to DISTINCT-per-dim (correct but more expensive).
+    is_bare_select_star = (
+        _UNFILTERED_SELECT_STAR_RE.match(base_query) is not None
+    )
+    can_skip_distinct = (
+        is_bare_select_star
+        and template is not None
+        and all(d in template.coords for d in dim_cols)
+    )
     coord_arrays: dict[str, np.ndarray] = {}
     for d in dim_cols:
-        distinct_q = (
-            f'SELECT DISTINCT "{d}" FROM ({base_query}) AS _xql_base '
-            f'ORDER BY "{d}"'
-        )
-        df = _raw_sql(ctx, distinct_q).to_pandas()
-        coord_arrays[d] = np.asarray(df[d].values)
+        if can_skip_distinct:
+            assert template is not None
+            coord_arrays[d] = np.asarray(template.coords[d].values)
+        else:
+            distinct_q = (
+                f'SELECT DISTINCT "{d}" FROM ({base_query}) AS _xql_base '
+                f'ORDER BY "{d}"'
+            )
+            df = _raw_sql(ctx, distinct_q).to_pandas()
+            coord_arrays[d] = np.asarray(df[d].values)
     shape = tuple(len(coord_arrays[d]) for d in dim_cols)
 
     data_vars: dict[str, xr.Variable] = {}

@@ -605,3 +605,62 @@ def test_to_dataset_explicit_template_overrides_auto_resolve(
         dim_cols=["time", "lat", "lon"], template=other
     )
     assert out.attrs == {"flag": "explicit"}
+
+
+def test_bare_select_star_skips_distinct_scans(air_dataset_small, monkeypatch):
+    """``SELECT * FROM <registered>`` uses template coords; no DISTINCT scans.
+
+    Locks in the optimization that avoids reading the full dataset 3-4
+    times at construction. Filtered queries (with WHERE/JOIN/CTE) still
+    fall back to DISTINCT per dim.
+    """
+    ctx = XarrayContext()
+    ctx.from_dataset("air", air_dataset_small)
+    calls = _patch_raw_sql_counter(monkeypatch)
+    ctx.sql("SELECT * FROM air").to_dataset()
+    bare_count = calls["n"]
+    # 1 query: schema introspection. Zero DISTINCT scans.
+    assert bare_count == 1, (
+        f"bare SELECT * should issue 1 setup query; got {bare_count}"
+    )
+
+    calls["n"] = 0
+    # A query that does not match the bare-select-star regex must fall
+    # back to DISTINCT per dim (one per dim, plus the schema query).
+    ctx.sql("SELECT * FROM air WHERE lat > 50").to_dataset()
+    filtered_count = calls["n"]
+    assert filtered_count > bare_count, (
+        f"filtered query should issue more setup queries; got "
+        f"{filtered_count} vs bare {bare_count}"
+    )
+
+
+def test_full_dim_slice_omits_where_clause(air_dataset_small, monkeypatch):
+    """``isel(time=0)`` -- full-extent lat/lon dims drop from the WHERE.
+
+    Prevents emitting huge ``lat IN (all 25 values) AND lon IN (all 53
+    values)`` clauses that would only constant-fold to TRUE.
+    """
+    from xarray_sql import ds as ds_mod
+
+    seen: list[str] = []
+    original = ds_mod._raw_sql
+
+    def trace(ctx, q):
+        seen.append(q)
+        return original(ctx, q)
+
+    monkeypatch.setattr(ds_mod, "_raw_sql", trace)
+
+    ctx = XarrayContext()
+    ctx.from_dataset("air", air_dataset_small)
+    out = ctx.sql("SELECT * FROM air").to_dataset()
+    seen.clear()
+    _ = out["air"].isel(time=0).values
+    # Exactly one wrapped query; it must filter on time only, not on lat
+    # or lon (which are full-extent).
+    assert len(seen) == 1
+    wrapped = seen[0]
+    assert '"time"' in wrapped
+    assert "lat IN" not in wrapped
+    assert "lon IN" not in wrapped
