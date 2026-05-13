@@ -424,18 +424,19 @@ def _lazy_to_xarray(
     field_names = [f.name for f in schema]
     field_types = {f.name: f.type for f in schema}
 
-    # Coord arrays from template when available; else SELECT DISTINCT per dim.
+    # Always derive coord arrays from the actual query result via DISTINCT
+    # per dim, even when a template is available. This guarantees the lazy
+    # backend's coord_arrays match the rows the SQL will return -- crucial
+    # for filtered queries (e.g. WHERE lat > 50), where the template's
+    # full-range coords would mismatch the actual filtered subset.
     coord_arrays: dict[str, np.ndarray] = {}
     for d in dim_cols:
-        if template is not None and d in template.coords:
-            coord_arrays[d] = np.asarray(template.coords[d].values)
-        else:
-            distinct_q = (
-                f'SELECT DISTINCT "{d}" FROM ({base_query}) AS _xql_base '
-                f'ORDER BY "{d}"'
-            )
-            df = _raw_sql(ctx, distinct_q).to_pandas()
-            coord_arrays[d] = np.asarray(df[d].values)
+        distinct_q = (
+            f'SELECT DISTINCT "{d}" FROM ({base_query}) AS _xql_base '
+            f'ORDER BY "{d}"'
+        )
+        df = _raw_sql(ctx, distinct_q).to_pandas()
+        coord_arrays[d] = np.asarray(df[d].values)
     shape = tuple(len(coord_arrays[d]) for d in dim_cols)
 
     data_vars: dict[str, xr.Variable] = {}
