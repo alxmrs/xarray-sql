@@ -13,32 +13,32 @@ class XarrayContext(SessionContext):
 
     def from_dataset(
         self,
-        table_name: str,
+        name: str,
         input_table: xr.Dataset,
         *,
-        dim_group_aliases: dict[tuple[str, ...], str] | None = None,
+        table_names: dict[tuple[str, ...], str] | None = None,
         chunks: Chunks = None,
     ):
         """Register an xarray Dataset as one or more queryable SQL tables.
 
         When all data variables share the same dimensions, the dataset is
-        registered as a single table named ``table_name``. When variables
-        have differing dimensions (e.g. some on a 3D grid and others on a
-        4D grid), the dataset is split into one table per dimension group.
+        registered as a single table named ``name``. When variables have
+        differing dimensions (e.g. some on a 3D grid and others on a 4D
+        grid), the dataset is split into one table per dimension group.
         The tables are registered under a SQL schema (namespace) named
-        ``table_name`` and named ``<dim1>_<dim2>_...`` by default::
+        ``name`` and named ``<dim1>_<dim2>_...`` by default::
 
             ctx.from_dataset('era5', ds, chunks={'time': 24})
             # registers tables: 'era5.time_lat_lon' and
             #                   'era5.time_lat_lon_level'
             ctx.sql('SELECT AVG(temperature_2m) FROM era5.time_lat_lon')
 
-        Use ``dim_group_aliases`` to override the suffix for specific
-        dimension tuples::
+        Use ``table_names`` to override the name for specific dimension
+        tuples::
 
             ctx.from_dataset(
                 'era5', ds,
-                dim_group_aliases={('time', 'lat', 'lon'): 'surface'},
+                table_names={('time', 'lat', 'lon'): 'surface'},
             )
             ctx.sql('SELECT * FROM era5.surface')
 
@@ -61,13 +61,15 @@ class XarrayContext(SessionContext):
             for each calendar.
 
         Args:
-            table_name: The SQL table name. For datasets with mixed
-                dimensions, this becomes the name of a SQL schema
-                (namespace) containing one table per dimension group.
+            name: The SQL identifier under which the dataset is registered.
+                For datasets with uniform dimensions, this is the table
+                name. For datasets with mixed dimensions, this is the name
+                of a SQL schema (namespace) containing one table per
+                dimension group.
             input_table: An xarray Dataset.
-            dim_group_aliases: Optional mapping from dimension tuples to
-                custom table names within the schema, used when the dataset
-                has variables with differing dimensions.
+            table_names: Optional mapping from dimension tuples to custom
+                table names within the schema, used when the dataset has
+                variables with differing dimensions.
             chunks: Xarray-like chunks specification. If not provided, uses
                 the Dataset's existing chunks.
 
@@ -77,14 +79,14 @@ class XarrayContext(SessionContext):
         groups = _group_vars_by_dims(input_table)
 
         if len(groups) <= 1:
-            return self._from_dataset(table_name, input_table, chunks)
+            return self._from_dataset(name, input_table, chunks)
 
-        dim_group_aliases = dim_group_aliases or {}
+        table_names = table_names or {}
         schema = Schema.memory_schema(self)
-        self.catalog().register_schema(table_name, schema)
+        self.catalog().register_schema(name, schema)
 
         for dims, var_names in groups.items():
-            sub_name = dim_group_aliases.get(dims, "_".join(dims))
+            sub_name = table_names.get(dims, "_".join(dims))
             sub_ds = input_table[var_names]
             schema.register_table(sub_name, read_xarray_table(sub_ds, chunks))
             self._maybe_register_cftime_udf(sub_ds)

@@ -404,12 +404,12 @@ class TestFromDatasetMultiDims:
         assert len(surface) == 2 * 3 * 4
         assert len(upper) == 2 * 3 * 4 * 2
 
-    def test_dim_group_aliases(self, mixed_ds):
+    def test_table_names_override(self, mixed_ds):
         ctx = XarrayContext()
         ctx.from_dataset(
             "era5",
             mixed_ds,
-            dim_group_aliases={("time", "lat", "lon"): "surface"},
+            table_names={("time", "lat", "lon"): "surface"},
         )
         result = ctx.sql("SELECT * FROM era5.surface").to_pandas()
         assert "temperature_2m" in result.columns
@@ -425,15 +425,15 @@ class TestFromDatasetMultiDims:
         tables = set(ctx.catalog().schema("era5").table_names())
         assert tables == {"time_lat_lon", "time_lat_lon_level"}
 
-    def test_uniform_dims_uses_table_name_directly(self, mixed_ds):
-        """A single dim group should register under the bare table_name."""
+    def test_uniform_dims_uses_name_directly(self, mixed_ds):
+        """A single dim group should register under the bare name."""
         ds = mixed_ds[["temperature_2m"]]
         ctx = XarrayContext()
         ctx.from_dataset("surface", ds)
         result = ctx.sql("SELECT * FROM surface").to_pandas()
         assert "temperature_2m" in result.columns
 
-    def test_dim_group_aliases_is_keyword_only(self, mixed_ds):
+    def test_table_names_is_keyword_only(self, mixed_ds):
         ctx = XarrayContext()
         with pytest.raises(TypeError):
             ctx.from_dataset("era5", mixed_ds, {("time",): "x"})
