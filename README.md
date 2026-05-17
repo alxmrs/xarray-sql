@@ -19,52 +19,48 @@ This is an experiment to provide a SQL interface for array datasets.
 import xarray as xr
 import xarray_sql as xql
 
-ds = xr.tutorial.open_dataset('air_temperature')
+# Anonymous read from the public GCS bucket — no auth required.
+url = 'gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3'
+full = xr.open_zarr(url, chunks=None, storage_options={'token': 'anon'})
 
-# The same as a dask-sql Context; i.e. an Apache DataFusion Context.
+# A few hours over the NYC area for January 2020, two pressure levels.
+ds = full[['2m_temperature', 'temperature']].sel(
+    time=slice('2020-01-01', '2020-01-01T05'),
+    latitude=slice(40, 39),
+    longitude=slice(286, 287),  # ERA5 uses 0-360 longitudes
+    level=[500, 850],
+).chunk({'time': 3})
+
 ctx = xql.XarrayContext()
-ctx.from_dataset('air', ds, chunks=dict(time=24))  # the dataset needs to be chunked!
-# data is only materialized when we make a query.
+ctx.from_dataset('era5', ds, table_names={
+    ('time', 'latitude', 'longitude'): 'surface',
+    ('time', 'level', 'latitude', 'longitude'): 'atmosphere',
+})
+# Tables in the 'era5' schema: 'surface', 'atmosphere'
 
-result = ctx.sql('''
-  SELECT
-    "lat", "lon", AVG("air") as air_avg
-  FROM
-    "air"
-  GROUP BY
-   "lat", "lon"
-''')
-# DataFrame()
-# +------+-------+--------------------+
-# | lat  | lon   | air_avg            |
-# +------+-------+--------------------+
-# | 75.0 | 205.0 | 259.88662671232834 |
-# | 75.0 | 207.5 | 259.48268150684896 |
-# | 75.0 | 230.0 | 258.9192123287667  |
-# | 75.0 | 275.0 | 257.07574315068456 |
-# | 75.0 | 322.5 | 250.11792123287654 |
-# | 75.0 | 325.0 | 250.81590068493134 |
-# | 72.5 | 205.0 | 262.74933904109537 |
-# | 72.5 | 207.5 | 262.5384315068488  |
-# | 72.5 | 230.0 | 260.82879452054743 |
-# | 72.5 | 275.0 | 257.3063321917804  |
-# +------+-------+--------------------+
-# Data truncated.
+ctx.sql('''
+  SELECT AVG("2m_temperature") - 273.15 AS avg_c
+  FROM era5.surface
+''').to_pandas()
+#       avg_c
+# 0  8.640069
 
-# The full query is only made when we call `collect()`, or, in this case,
-# `to_pandas()`.
-df = result.to_pandas()
-df.head()
-#     lat    lon     air_avg
-# 0  75.0  232.5  258.836188
-# 1  75.0  247.5  257.716171
-# 2  75.0  262.5  257.347959
-# 3  75.0  277.5  257.671308
-# 4  72.5  232.5  260.654401
+ctx.sql('''
+  SELECT level, AVG(temperature) - 273.15 AS avg_c
+  FROM era5.atmosphere
+  GROUP BY level
+  ORDER BY level
+''').to_pandas()
+#    level      avg_c
+# 0    500 -20.215307
+# 1    850  -2.379477
 ```
 
-Succinctly, we "pivot" Xarray Datasets (with consistent dimensions) to treat them like tables so we can run
-SQL queries against them.
+> A runnable version of this example lives at
+> [`perf_tests/era5_nyc_avg_temp.py`](perf_tests/era5_nyc_avg_temp.py).
+
+Succinctly, we "pivot" Xarray Datasets to treat them like tables so we can run
+SQL queries against them. 
 
 ## Why build this?
 
