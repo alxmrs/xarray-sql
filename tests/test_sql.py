@@ -397,8 +397,8 @@ class TestFromDatasetMultiDims:
     def test_registers_multiple_tables(self, mixed_ds):
         ctx = XarrayContext()
         ctx.from_dataset("era5", mixed_ds)
-        surface = ctx.sql('SELECT * FROM "era5_time_lat_lon"').to_pandas()
-        upper = ctx.sql('SELECT * FROM "era5_time_lat_lon_level"').to_pandas()
+        surface = ctx.sql("SELECT * FROM era5.time_lat_lon").to_pandas()
+        upper = ctx.sql("SELECT * FROM era5.time_lat_lon_level").to_pandas()
         assert "temperature_2m" in surface.columns
         assert "pressure" in upper.columns
         assert len(surface) == 2 * 3 * 4
@@ -411,11 +411,19 @@ class TestFromDatasetMultiDims:
             mixed_ds,
             dim_group_aliases={("time", "lat", "lon"): "surface"},
         )
-        result = ctx.sql('SELECT * FROM "era5_surface"').to_pandas()
+        result = ctx.sql("SELECT * FROM era5.surface").to_pandas()
         assert "temperature_2m" in result.columns
-        # Non-aliased group falls back to default suffix.
-        upper = ctx.sql('SELECT * FROM "era5_time_lat_lon_level"').to_pandas()
+        # Non-aliased group falls back to the default joined-dim table name.
+        upper = ctx.sql("SELECT * FROM era5.time_lat_lon_level").to_pandas()
         assert "pressure" in upper.columns
+
+    def test_schema_registered_in_catalog(self, mixed_ds):
+        """Mixed-dim datasets should create a SQL schema under the catalog."""
+        ctx = XarrayContext()
+        ctx.from_dataset("era5", mixed_ds)
+        assert "era5" in ctx.catalog().schema_names()
+        tables = set(ctx.catalog().schema("era5").table_names())
+        assert tables == {"time_lat_lon", "time_lat_lon_level"}
 
     def test_uniform_dims_uses_table_name_directly(self, mixed_ds):
         """A single dim group should register under the bare table_name."""

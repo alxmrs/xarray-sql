@@ -1,5 +1,6 @@
 import xarray as xr
 from datafusion import SessionContext
+from datafusion.catalog import Schema
 from collections import defaultdict
 
 from . import cftime as cft
@@ -23,12 +24,14 @@ class XarrayContext(SessionContext):
         When all data variables share the same dimensions, the dataset is
         registered as a single table named ``table_name``. When variables
         have differing dimensions (e.g. some on a 3D grid and others on a
-        4D grid), the dataset is split into one table per dimension group,
-        each named ``<table_name>_<dim1>_<dim2>_...`` by default::
+        4D grid), the dataset is split into one table per dimension group.
+        The tables are registered under a SQL schema (namespace) named
+        ``table_name`` and named ``<dim1>_<dim2>_...`` by default::
 
             ctx.from_dataset('era5', ds, chunks={'time': 24})
-            # registers: 'era5_time_lat_lon' and 'era5_time_lat_lon_level'
-            ctx.sql('SELECT AVG(temperature_2m) FROM "era5_time_lat_lon"')
+            # registers tables: 'era5.time_lat_lon' and
+            #                   'era5.time_lat_lon_level'
+            ctx.sql('SELECT AVG(temperature_2m) FROM era5.time_lat_lon')
 
         Use ``dim_group_aliases`` to override the suffix for specific
         dimension tuples::
@@ -37,7 +40,7 @@ class XarrayContext(SessionContext):
                 'era5', ds,
                 dim_group_aliases={('time', 'lat', 'lon'): 'surface'},
             )
-            # registers: 'era5_surface' and 'era5_time_lat_lon_level'
+            ctx.sql('SELECT * FROM era5.surface')
 
         For datasets with non-Gregorian cftime coordinates (e.g. 360_day,
         julian), a ``cftime()`` scalar UDF is automatically registered so
@@ -58,12 +61,13 @@ class XarrayContext(SessionContext):
             for each calendar.
 
         Args:
-            table_name: The SQL table name (or table-name prefix, when the
-                dataset has mixed dimensions) to register the dataset under.
+            table_name: The SQL table name. For datasets with mixed
+                dimensions, this becomes the name of a SQL schema
+                (namespace) containing one table per dimension group.
             input_table: An xarray Dataset.
             dim_group_aliases: Optional mapping from dimension tuples to
-                custom table-name suffixes, used when the dataset has
-                variables with differing dimensions.
+                custom table names within the schema, used when the dataset
+                has variables with differing dimensions.
             chunks: Xarray-like chunks specification. If not provided, uses
                 the Dataset's existing chunks.
 
@@ -76,10 +80,14 @@ class XarrayContext(SessionContext):
             return self._from_dataset(table_name, input_table, chunks)
 
         dim_group_aliases = dim_group_aliases or {}
+        schema = Schema.memory_schema(self)
+        self.catalog().register_schema(table_name, schema)
+
         for dims, var_names in groups.items():
-            suffix = dim_group_aliases.get(dims, "_".join(dims))
-            sub_name = f"{table_name}_{suffix}"
-            self._from_dataset(sub_name, input_table[var_names], chunks)
+            sub_name = dim_group_aliases.get(dims, "_".join(dims))
+            sub_ds = input_table[var_names]
+            schema.register_table(sub_name, read_xarray_table(sub_ds, chunks))
+            self._maybe_register_cftime_udf(sub_ds)
 
         return self
 
@@ -93,17 +101,17 @@ class XarrayContext(SessionContext):
 
         table = read_xarray_table(input_table, chunks)
         self.register_table(table_name, table)
+        self._maybe_register_cftime_udf(input_table)
+        return self
 
-        # Auto-register a cftime() UDF for non-Gregorian cftime coordinates
-        # so users can write: WHERE time > cftime('0500-01-01')
-        for coord_name in input_table.dims:
-            if cft.is_cftime_index(input_table, coord_name):
-                units, cal = cft.encoding(input_table, coord_name)
+    def _maybe_register_cftime_udf(self, ds: xr.Dataset) -> None:
+        """Auto-register a cftime() UDF for non-Gregorian cftime coordinates."""
+        for coord_name in ds.dims:
+            if cft.is_cftime_index(ds, coord_name):
+                units, cal = cft.encoding(ds, coord_name)
                 if not cft.is_gregorian_like(cal):
                     self.register_udf(cft.make_cftime_udf(units, cal))
                     break  # One UDF per context is enough.
-
-        return self
 
 
 def _group_vars_by_dims(ds: xr.Dataset) -> dict[tuple[str, ...], list[str]]:
