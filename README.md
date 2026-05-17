@@ -19,45 +19,95 @@ This is an experiment to provide a SQL interface for array datasets.
 import xarray as xr
 import xarray_sql as xql
 
-# Anonymous read from the public GCS bucket — no auth required.
-url = 'gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3'
-full = xr.open_zarr(url, chunks=None, storage_options={'token': 'anon'})
 
-# A few hours over the NYC area for January 2020, two pressure levels.
-ds = full[['2m_temperature', 'temperature']].sel(
-    time=slice('2020-01-01', '2020-01-01T05'),
-    latitude=slice(40, 39),
-    longitude=slice(286, 287),  # ERA5 uses 0-360 longitudes
-    level=[500, 850],
-).chunk({'time': 3})
+# Open a year of ARCO-ERA5 — all 273 variables. Selecting a year up front
+# keeps Dask's partition setup cheap before any chunks are read from GCS.
+ds = (
+  xr.open_zarr('gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3',
+               chunks=None,
+               storage_options={'token': 'anon'})  # Anonymous read from the public GCS bucket — no auth required.
+  .sel(time='2020')
+  .chunk({'time': 1})
+)
 
 ctx = xql.XarrayContext()
 ctx.from_dataset('era5', ds, table_names={
     ('time', 'latitude', 'longitude'): 'surface',
     ('time', 'level', 'latitude', 'longitude'): 'atmosphere',
 })
-# Tables in the 'era5' schema: 'surface', 'atmosphere'
+# Registration: ~0.5s for a full year of hourly ERA5, all variables.
 
+
+# Heads up: ARCO-ERA5 has 262 surface + 11 atmospheric variables. The library
+# pushes column projection down to Zarr, so SELECT only fetches what you ask
+# for — but `SELECT * FROM era5.surface` would try to pull every variable
+# across the year (terabytes from GCS). 
+#  ---> Always SELECT specific columns. <---
+
+# Average 2m-temperature over NYC on the morning of 2020-01-01. The library
+# pushes WHERE clauses on dimension columns down to partition pruning.
 ctx.sql('''
   SELECT AVG("2m_temperature") - 273.15 AS avg_c
   FROM era5.surface
+  WHERE time BETWEEN TIMESTAMP '2020-01-01'
+                 AND TIMESTAMP '2020-01-01 05:00:00'
+    AND latitude  BETWEEN 39 AND 40
+    AND longitude BETWEEN 286 AND 287  -- ERA5 uses 0-360 longitudes
 ''').to_pandas()
 #       avg_c
 # 0  8.640069
 
+# Average temperature per pressure level, globally. 
 ctx.sql('''
   SELECT level, AVG(temperature) - 273.15 AS avg_c
   FROM era5.atmosphere
+  WHERE time BETWEEN TIMESTAMP '2020-01-01'
+                 AND TIMESTAMP '2020-01-01 05:00:00'
   GROUP BY level
-  ORDER BY level
+  ORDER BY level DESC
 ''').to_pandas()
-#    level      avg_c
-# 0    500 -20.215307
-# 1    850  -2.379477
+#     level      avg_c
+# 0    1000   6.621012   ← surface
+# 1     975   5.185638
+# 2     950   4.028429
+# 3     925   3.082812
+# 4     900   2.210917
+# 5     875   1.395018
+# 6     850   0.634267
+# 7     825  -0.210372
+# 8     800  -1.181075
+# 9     775  -2.306465
+# 10    750  -3.535534
+# 11    700  -6.241685
+# 12    650  -9.236364
+# 13    600 -12.580938
+# 14    550 -16.335386
+# 15    500 -20.643604
+# 16    450 -25.573401
+# 17    400 -31.156920
+# 18    350 -37.400552
+# 19    300 -43.852607
+# 20    250 -49.322132
+# 21    225 -51.569113
+# 22    200 -53.693248
+# 23    175 -55.890484
+# 24    150 -58.382290
+# 25    125 -61.091916
+# 26    100 -63.624885   ← tropopause
+# 27     70 -63.182300
+# 28     50 -60.124845
+# 29     30 -55.986327
+# 30     20 -52.433089
+# 31     10 -44.140750
+# 32      7 -38.707350
+# 33      5 -32.621999
+# 34      3 -21.509175
+# 35      2 -13.355764
+# 36      1  -9.020513   ← top of atmosphere
 ```
 
-> A runnable version of this example lives at
-> [`perf_tests/era5_nyc_avg_temp.py`](perf_tests/era5_nyc_avg_temp.py).
+_(A runnable version of this example lives at
+[`perf_tests/era5_temp_profile.py`](perf_tests/era5_temp_profile.py).)_
 
 Succinctly, we "pivot" Xarray Datasets to treat them like tables so we can run
 SQL queries against them. 
