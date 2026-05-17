@@ -6,6 +6,7 @@ import pytest
 import xarray as xr
 
 from xarray_sql import XarrayContext
+from xarray_sql.sql import _group_vars_by_dims
 
 
 def test_sanity(air_dataset_small):
@@ -322,3 +323,117 @@ class TestCftimeNonGregorian:
             ctx.sql(
                 "SELECT COUNT(*) FROM rasm WHERE time >= cftime('1980-01-01')"
             ).collect()
+
+
+class TestGroupVarsByDims:
+    """Unit tests for the private _group_vars_by_dims helper."""
+
+    def test_single_dim_group(self):
+        ds = xr.Dataset(
+            {
+                "a": (["x", "y"], np.zeros((2, 3))),
+                "b": (["x", "y"], np.ones((2, 3))),
+            }
+        )
+        groups = _group_vars_by_dims(ds)
+        assert groups == {("x", "y"): ["a", "b"]}
+
+    def test_multiple_dim_groups(self):
+        ds = xr.Dataset(
+            {
+                "surface": (["time", "lat", "lon"], np.zeros((2, 3, 4))),
+                "upper": (
+                    ["time", "lat", "lon", "level"],
+                    np.zeros((2, 3, 4, 5)),
+                ),
+            }
+        )
+        groups = _group_vars_by_dims(ds)
+        assert set(groups.keys()) == {
+            ("time", "lat", "lon"),
+            ("time", "lat", "lon", "level"),
+        }
+        assert groups[("time", "lat", "lon")] == ["surface"]
+        assert groups[("time", "lat", "lon", "level")] == ["upper"]
+
+    def test_empty_dataset(self):
+        assert _group_vars_by_dims(xr.Dataset()) == {}
+
+    def test_ignores_coords(self):
+        """Coordinate variables shouldn't be returned as groups."""
+        ds = xr.Dataset(
+            {"v": (["x"], np.arange(3))},
+            coords={"x": np.arange(3), "label": ("x", ["a", "b", "c"])},
+        )
+        groups = _group_vars_by_dims(ds)
+        assert groups == {("x",): ["v"]}
+
+
+class TestFromDatasetMultiDims:
+    """from_dataset should split datasets with mixed dims into multiple tables."""
+
+    @pytest.fixture
+    def mixed_ds(self):
+        np.random.seed(0)
+        return xr.Dataset(
+            {
+                "temperature_2m": (
+                    ["time", "lat", "lon"],
+                    np.random.rand(2, 3, 4),
+                ),
+                "pressure": (
+                    ["time", "lat", "lon", "level"],
+                    np.random.rand(2, 3, 4, 2),
+                ),
+            },
+            coords={
+                "time": pd.date_range("2020-01-01", periods=2),
+                "lat": np.linspace(-90, 90, 3),
+                "lon": np.linspace(-180, 180, 4),
+                "level": [500, 1000],
+            },
+        ).chunk({"time": 1})
+
+    def test_registers_multiple_tables(self, mixed_ds):
+        ctx = XarrayContext()
+        ctx.from_dataset("era5", mixed_ds)
+        surface = ctx.sql("SELECT * FROM era5.time_lat_lon").to_pandas()
+        upper = ctx.sql("SELECT * FROM era5.time_lat_lon_level").to_pandas()
+        assert "temperature_2m" in surface.columns
+        assert "pressure" in upper.columns
+        assert len(surface) == 2 * 3 * 4
+        assert len(upper) == 2 * 3 * 4 * 2
+
+    def test_table_names_override(self, mixed_ds):
+        ctx = XarrayContext()
+        ctx.from_dataset(
+            "era5",
+            mixed_ds,
+            table_names={("time", "lat", "lon"): "surface"},
+        )
+        result = ctx.sql("SELECT * FROM era5.surface").to_pandas()
+        assert "temperature_2m" in result.columns
+        # Non-aliased group falls back to the default joined-dim table name.
+        upper = ctx.sql("SELECT * FROM era5.time_lat_lon_level").to_pandas()
+        assert "pressure" in upper.columns
+
+    def test_schema_registered_in_catalog(self, mixed_ds):
+        """Mixed-dim datasets should create a SQL schema under the catalog."""
+        ctx = XarrayContext()
+        ctx.from_dataset("era5", mixed_ds)
+        assert "era5" in ctx.catalog().schema_names()
+        tables = set(ctx.catalog().schema("era5").table_names())
+        assert tables == {"time_lat_lon", "time_lat_lon_level"}
+
+    def test_uniform_dims_uses_name_directly(self, mixed_ds):
+        """A single dim group should register under the bare name."""
+        ds = mixed_ds[["temperature_2m"]]
+        ctx = XarrayContext()
+        ctx.from_dataset("surface", ds)
+        result = ctx.sql("SELECT * FROM surface").to_pandas()
+        assert "temperature_2m" in result.columns
+
+    def test_table_names_is_keyword_only(self, mixed_ds):
+        ctx = XarrayContext()
+        with pytest.raises(TypeError):
+            ctx.from_dataset("era5", mixed_ds, {("time",): "x"})
