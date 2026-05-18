@@ -182,14 +182,14 @@ _2025 update_: Something like this is being built across a few projects! The one
 _2026 update_: A colleague and I are experimenting with native Zarr RDBMS engines. Check out:
 
 - [Zarr-Datafusion](https://lib.rs/crates/zarr-datafusion)
-- [DuckDB-Zarr](https://github.com/hobbes-bot/duckdb-zarr)
+- [DuckDB-Zarr](https://github.com/alxmrs/duckdb-zarr)
 
 ## Roadmap
 
 - [x] ~Lazy evaluation via the pyarrow Dataset interface [#93](https://github.com/alxmrs/xarray-sql/issues/93).~ _Implemented in [#100](https://github.com/alxmrs/xarray-sql/pull/100)_
 - [x] Support proper parallelism via proper partition handling on the rust/datafusion side. [#106](https://github.com/alxmrs/xarray-sql/issues/106)
 - [x] Support core datafusion optimizations to scan less data, like [104](https://github.com/alxmrs/xarray-sql/issues/104), ...
-- [ ] Translate a single Zarr to a collection of tables [#85](https://github.com/alxmrs/xarray-sql/issues/85).
+- [x] Translate a single Zarr to a collection of tables [#85](https://github.com/alxmrs/xarray-sql/issues/85).
 - [ ] Distributed beyond a single node through the DataFusion integration with Ray Datasets [#68](https://github.com/alxmrs/xarray-sql/issues/68) or Apache Ballista [#98](https://github.com/alxmrs/xarray-sql/issues/98).
 - [ ] Demo: calculate Sea Surface Temperature from 1940 - Present in SQL [#36](https://github.com/alxmrs/xarray-sql/issues/36).
 - [ ] Provide an option to integrate DataFusion directly to Zarr via Rust [#4](https://github.com/alxmrs/xarray-sql/issues/4).
