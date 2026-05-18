@@ -24,10 +24,9 @@ import xarray_sql as xql
 # keeps Dask's partition setup cheap before any chunks are read from GCS.
 ds = (
   xr.open_zarr('gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3',
-               chunks=None,
+               chunks=dict(time=1),
                storage_options={'token': 'anon'})  # Anonymous read from the public GCS bucket — no auth required.
   .sel(time='2020')
-  .chunk({'time': 1})
 )
 
 ctx = xql.XarrayContext()
