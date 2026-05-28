@@ -130,8 +130,11 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           rust-toolchain: stable
-          manylinux: auto
           rustup-components: rust-std rustfmt
+          # No `manylinux:` — sdist is platform-independent and runs on the
+          # host runner, which has python3 available. Running this in a
+          # manylinux container fails because maturin verifies the sdist by
+          # building a wheel from it, and the container has no interpreter.
           args: --release --sdist --out dist
 
       - name: Assert sdist build does not generate wheels
