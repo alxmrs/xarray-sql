@@ -5,11 +5,22 @@ from collections import defaultdict
 
 from . import cftime as cft
 from .df import Chunks
+from .ds import XarrayDataFrame, _RegistryView
 from .reader import read_xarray_table
 
 
 class XarrayContext(SessionContext):
     """A datafusion `SessionContext` that also supports `xarray.Dataset`s."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Track registered xarray Datasets so XarrayDataFrame can recover
+        # defaults (dimension_columns) and metadata (var/dataset attrs,
+        # non-dim coords, dim-coord dtype) that the forward pivot drops.
+        # Keys are the fully-qualified table names users will reference
+        # in SQL (e.g. ``"air"`` for a uniform-dim Dataset, or
+        # ``"era5.surface"`` for one entry from a multi-dim-group split).
+        self._registered_datasets: dict[str, xr.Dataset] = {}
 
     def from_dataset(
         self,
@@ -89,6 +100,9 @@ class XarrayContext(SessionContext):
             sub_name = table_names.get(dims, "_".join(dims))
             sub_ds = input_table[var_names]
             schema.register_table(sub_name, read_xarray_table(sub_ds, chunks))
+            # Track the fully-qualified name for XarrayDataFrame metadata
+            # recovery on round-trip.
+            self._registered_datasets[f"{name}.{sub_name}"] = sub_ds
             self._maybe_register_cftime_udf(sub_ds)
 
         return self
@@ -103,6 +117,7 @@ class XarrayContext(SessionContext):
 
         table = read_xarray_table(input_table, chunks)
         self.register_table(table_name, table)
+        self._registered_datasets[table_name] = input_table
         self._maybe_register_cftime_udf(input_table)
         return self
 
@@ -114,6 +129,28 @@ class XarrayContext(SessionContext):
                 if not cft.is_gregorian_like(cal):
                     self.register_udf(cft.make_cftime_udf(units, cal))
                     break  # One UDF per context is enough.
+
+    def sql(self, query: str, *args, **kwargs) -> XarrayDataFrame:
+        """Run a SQL query, returning an :class:`XarrayDataFrame` wrapper.
+
+        Identical to ``datafusion.SessionContext.sql`` except the returned
+        object wraps the DataFusion DataFrame. The wrapper exposes
+        ``.to_pandas()`` (unchanged), forwards every other DataFusion
+        method via ``__getattr__``, and adds
+        ``.to_dataset(dimension_columns=[...])`` for round-tripping the
+        result back to an ``xr.Dataset``.
+
+        Args:
+            query: A SQL query string.
+            *args: Forwarded to ``SessionContext.sql``.
+            **kwargs: Forwarded to ``SessionContext.sql``.
+
+        Returns:
+            An :class:`XarrayDataFrame` wrapping the DataFusion DataFrame.
+        """
+        inner = super().sql(query, *args, **kwargs)
+        registry = _RegistryView(templates=dict(self._registered_datasets))
+        return XarrayDataFrame(inner, registry=registry)
 
 
 def _group_vars_by_dims(ds: xr.Dataset) -> dict[tuple[str, ...], list[str]]:
