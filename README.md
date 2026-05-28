@@ -69,11 +69,13 @@ SQL queries against them.
 ## Round-tripping back to Xarray
 
 `ctx.sql(...)` returns an `XarrayDataFrame` that exposes `.to_pandas()`
-(unchanged) and a new `.to_dataset()` for converting the result back to an
-`xr.Dataset`. The reverse path is **lazy by default**: the returned Dataset
-is backed by a `BackendArray` that translates xarray indexing into SQL
-`WHERE` clauses pushed into a sub-query of the original SQL. Data only
-materializes for the slice actually accessed.
+(unchanged) and a new `.to_dataset()` for converting the result back into
+an `xr.Dataset`. The reverse path is **lazy by default**: the returned
+Dataset is backed by an `xarray.backends.BackendArray` that translates
+xarray indexers into DataFusion `filter` expressions and consumes the
+filtered DataFrame via `execute_stream`. Arrow `RecordBatch` es scatter
+directly into a preallocated numpy buffer with no pandas hop, so only
+the slab actually accessed is materialized.
 
 ```python
 out = ctx.sql('SELECT * FROM "air"').to_dataset()
@@ -86,16 +88,18 @@ out = ctx.sql('SELECT * FROM "air"').to_dataset()
 # Data variables:
 #     air      (time, lat, lon) float32 ...
 
-# Slicing pushes down into SQL; only the requested slab is materialized.
+# Slicing pushes down into DataFusion; only the requested slab is
+# materialized.
 slab = out["air"].isel(time=0).values
 
 # For full eager materialization, call .compute().
 eager = out.compute()
 ```
 
-`dim_cols` defaults to the dims of the registered Dataset referenced by the
-SQL `FROM` clause. Variable attrs, dataset attrs, non-dimension coords, and
-dim-coordinate dtypes are recovered from the registered Dataset
+`dimension_columns` defaults to the dims of the single registered Dataset
+on the context (or the one named via `template_table=` when several are
+registered). Variable attrs, dataset attrs, non-dimension coordinates,
+and dim-coordinate dtype are recovered from the registered Dataset
 automatically.
 
 For filtered queries that return only part of the original extent, pass
@@ -111,8 +115,9 @@ out = ctx.sql(
 
 Aggregation queries (e.g. `AVG(air) AS air_avg ... GROUP BY lat, lon`)
 materialize once because their output does not align with the source dim
-structure. Pass `dim_cols=[...]` explicitly when an aggregation drops a
-dim.
+structure; the aggregation path is also Arrow-native (no pandas
+intermediates). Pass `dimension_columns=[...]` explicitly when an
+aggregation drops a dim.
 
 ## Why build this?
 

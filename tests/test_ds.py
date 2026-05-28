@@ -1,15 +1,18 @@
-"""Tests for the SQL -> xarray reverse path (xarray-sql#58).
+"""Tests for the SQL -> xarray reverse path.
 
-Phase 1 covers the eager round-trip:
+Covers:
 
-* :class:`xarray_sql.XarrayDataFrame` returned by ``ctx.sql``
-* ``.to_dataset()`` with explicit and auto-inferred ``dim_cols``
-* Template-based metadata recovery (var attrs/encoding, dataset attrs,
-  non-dim coords, dim-coord dtype)
-* FROM-clause regex unit tests
-
-Lazy semantics land in Phase 2; sparse extent and edge cases in Phase 3.
+* :class:`xarray_sql.XarrayDataFrame` returned by ``ctx.sql`` -- wrapper
+  behavior and DataFusion-method passthrough.
+* ``.to_dataset()`` round-trips: lazy default, explicit aggregation
+  cases, ``dimension_columns`` auto-inference vs explicit.
+* Template-based metadata recovery (var attrs / encoding, dataset
+  attrs, non-dim coords, dim-coord dtype).
+* Sparse-extent handling and edge cases (null dim rows, fill_value
+  dtype behavior, vectorized indexer fallback).
 """
+
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -33,61 +36,65 @@ def test_ctx_sql_returns_xarray_dataframe(air_dataset_small):
 
 def test_to_pandas_unchanged_behavior(air_dataset_small):
     """Wrapped ``.to_pandas()`` is bit-for-bit equal to the un-wrapped path."""
+    from datafusion import SessionContext
+
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
     wrapped = ctx.sql("SELECT * FROM air LIMIT 7").to_pandas()
-    raw = super(type(ctx), ctx).sql("SELECT * FROM air LIMIT 7").to_pandas()
+    raw = SessionContext.sql(ctx, "SELECT * FROM air LIMIT 7").to_pandas()
     pd.testing.assert_frame_equal(wrapped, raw)
 
 
 def test_passthrough_methods(air_dataset_small):
-    """Methods we did not override forward through ``__getattr__``."""
+    """DataFusion methods we did not override forward via ``__getattr__``."""
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
     result = ctx.sql("SELECT * FROM air LIMIT 5")
     names = [f.name for f in result.schema()]
     assert {"lat", "lon", "time", "air"}.issubset(set(names))
-    assert repr(result) == repr(result._inner)
 
 
 # ---------------------------------------------------------------------------
-# Round-trip via to_dataset (explicit dim_cols)
+# Round-trip via to_dataset (explicit dimension_columns)
 # ---------------------------------------------------------------------------
 
 
-def test_to_dataset_explicit_dims_select_star(air_dataset_small):
+def _clear_encoding(ds: xr.Dataset) -> xr.Dataset:
+    """Strip ``encoding`` from a Dataset and all its variables.
+
+    Round-trip identity tests should not be coupled to encoding choices,
+    since ``_apply_template`` deliberately drops dtype-bound keys.
+    """
+    ds = ds.copy()
+    for v in ds.variables.values():
+        v.encoding.clear()
+    ds.encoding.clear()
+    return ds
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["air_dataset_small", "weather_dataset", "synthetic_dataset"],
+)
+def test_round_trip_identity(request, fixture_name):
+    """``SELECT *`` round-trips to a Dataset that is ``assert_identical``
+    to the source: values, dims, coord values, dtypes, non-dim coords,
+    and attrs all match (modulo coord ordering, which we normalize on
+    both sides). One test covers what was previously eight narrow checks.
+    """
+    source = request.getfixturevalue(fixture_name).copy()
+    source.attrs["round_trip_marker"] = "yes"
+    first_var = next(iter(source.data_vars))
+    source[first_var].attrs["units"] = "test_units"
+
     ctx = XarrayContext()
-    ctx.from_dataset("air", air_dataset_small)
-    out = ctx.sql("SELECT * FROM air").to_dataset(
-        dim_cols=["time", "lat", "lon"]
-    )
-    assert isinstance(out, xr.Dataset)
-    assert set(out.dims) == {"time", "lat", "lon"}
-    assert "air" in out.data_vars
-    assert out.sizes["lat"] == air_dataset_small.sizes["lat"]
-    assert out.sizes["lon"] == air_dataset_small.sizes["lon"]
-    assert out.sizes["time"] == air_dataset_small.sizes["time"]
+    ctx.from_dataset("t", source)
+    out = ctx.sql("SELECT * FROM t").to_dataset().compute()
 
-
-def test_round_trip_select_star_values_match(air_dataset_small):
-    """Values survive the round-trip (modulo ascending coord ordering)."""
-    ctx = XarrayContext()
-    ctx.from_dataset("air", air_dataset_small)
-    out = ctx.sql("SELECT * FROM air").to_dataset(
-        dim_cols=["time", "lat", "lon"]
-    )
-    expected = air_dataset_small.compute().sortby(["time", "lat", "lon"])
-    actual = out.sortby(["time", "lat", "lon"])
-    np.testing.assert_array_equal(actual["air"].values, expected["air"].values)
-
-
-def test_round_trip_preserves_dim_order(air_dataset_small):
-    """Auto-inferred dim_cols match the source data var's dim order."""
-    ctx = XarrayContext()
-    ctx.from_dataset("air", air_dataset_small)
-    out = ctx.sql("SELECT * FROM air").to_dataset()
-    expected_dims = air_dataset_small["air"].dims
-    assert out["air"].dims == expected_dims
+    sort_keys = list(out.dims)
+    actual = _clear_encoding(out.sortby(sort_keys))
+    expected = _clear_encoding(source.compute().sortby(sort_keys))
+    xr.testing.assert_identical(actual, expected)
 
 
 def test_aggregation_drops_dim(air_dataset_small):
@@ -96,7 +103,7 @@ def test_aggregation_drops_dim(air_dataset_small):
     ctx.from_dataset("air", air_dataset_small)
     out = ctx.sql(
         "SELECT lat, lon, AVG(air) AS air_avg FROM air GROUP BY lat, lon"
-    ).to_dataset(dim_cols=["lat", "lon"])
+    ).to_dataset(dimension_columns=["lat", "lon"])
     assert set(out.dims) == {"lat", "lon"}
     assert "air_avg" in out.data_vars
     assert "air" not in out.data_vars
@@ -111,25 +118,19 @@ def test_aggregation_drops_dim(air_dataset_small):
 
 
 # ---------------------------------------------------------------------------
-# dim_cols inference
+# dimension_columns inference
 # ---------------------------------------------------------------------------
 
 
-def test_to_dataset_infers_dim_cols_from_single_registration(
+def test_to_dataset_multi_registered_requires_explicit_template(
     air_dataset_small,
 ):
-    ctx = XarrayContext()
-    ctx.from_dataset("air", air_dataset_small)
-    out = ctx.sql("SELECT * FROM air").to_dataset()
-    assert set(out.dims) == {"time", "lat", "lon"}
-
-
-def test_to_dataset_infer_picks_referenced_table(air_dataset_small):
-    """Two registered Datasets, SQL references one -> use that one's dims."""
+    """With more than one registered Dataset, no SQL parsing means the
+    caller must disambiguate via ``template_table=``."""
     ctx = XarrayContext()
     ctx.from_dataset("air1", air_dataset_small)
     ctx.from_dataset("air2", air_dataset_small)
-    out = ctx.sql("SELECT * FROM air1").to_dataset()
+    out = ctx.sql("SELECT * FROM air1").to_dataset(template_table="air1")
     assert set(out.dims) == {"time", "lat", "lon"}
 
 
@@ -137,7 +138,9 @@ def test_to_dataset_infer_fails_when_no_template_fits(air_dataset_small):
     """If no registered Dataset's dims fit the result -> clear error."""
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
-    with pytest.raises(ValueError, match="dim_cols cannot be inferred"):
+    with pytest.raises(
+        ValueError, match="dimension_columns cannot be inferred"
+    ):
         # GROUP BY drops 'time'; air's dims = {time, lat, lon} are not all
         # present in the result -> cannot infer.
         ctx.sql(
@@ -148,28 +151,6 @@ def test_to_dataset_infer_fails_when_no_template_fits(air_dataset_small):
 # ---------------------------------------------------------------------------
 # Template-based metadata recovery
 # ---------------------------------------------------------------------------
-
-
-def test_template_recovers_dataset_attrs(air_dataset_small):
-    ds = air_dataset_small.copy()
-    ds.attrs = {"source": "test", "version": "1.0"}
-    ctx = XarrayContext()
-    ctx.from_dataset("air", ds)
-    out = ctx.sql("SELECT * FROM air").to_dataset(
-        dim_cols=["time", "lat", "lon"]
-    )
-    assert out.attrs == {"source": "test", "version": "1.0"}
-
-
-def test_template_recovers_var_attrs(air_dataset_small):
-    ds = air_dataset_small.copy()
-    ds["air"].attrs = {"units": "K", "long_name": "Air Temperature"}
-    ctx = XarrayContext()
-    ctx.from_dataset("air", ds)
-    out = ctx.sql("SELECT * FROM air").to_dataset(
-        dim_cols=["time", "lat", "lon"]
-    )
-    assert out["air"].attrs == {"units": "K", "long_name": "Air Temperature"}
 
 
 def test_template_recovers_var_encoding_strips_dtype(air_dataset_small):
@@ -184,25 +165,12 @@ def test_template_recovers_var_encoding_strips_dtype(air_dataset_small):
     ctx = XarrayContext()
     ctx.from_dataset("air", ds)
     out = ctx.sql("SELECT * FROM air").to_dataset(
-        dim_cols=["time", "lat", "lon"]
+        dimension_columns=["time", "lat", "lon"]
     )
     assert out["air"].encoding.get("zlib") is True
     assert "dtype" not in out["air"].encoding
     assert "_FillValue" not in out["air"].encoding
     assert "missing_value" not in out["air"].encoding
-
-
-def test_template_recovers_non_dim_scalar_coord(weather_dataset):
-    """``rand_wx`` attaches a scalar ``reference_time`` non-dim coord."""
-    assert "reference_time" in weather_dataset.coords
-    assert "reference_time" not in weather_dataset.dims
-    ctx = XarrayContext()
-    ctx.from_dataset("weather", weather_dataset)
-    out = ctx.sql("SELECT * FROM weather").to_dataset()
-    assert "reference_time" in out.coords
-    assert (
-        out["reference_time"].values == weather_dataset["reference_time"].values
-    )
 
 
 def test_template_aggregation_alias_no_attrs(air_dataset_small):
@@ -213,20 +181,9 @@ def test_template_aggregation_alias_no_attrs(air_dataset_small):
     ctx.from_dataset("air", ds)
     out = ctx.sql(
         "SELECT lat, lon, AVG(air) AS air_avg FROM air GROUP BY lat, lon"
-    ).to_dataset(dim_cols=["lat", "lon"])
+    ).to_dataset(dimension_columns=["lat", "lon"])
     assert "air_avg" in out.data_vars
     assert out["air_avg"].attrs == {}
-
-
-def test_template_dim_dtype_preserved(air_dataset_small):
-    """Datetime dim round-trips as ``datetime64``."""
-    ctx = XarrayContext()
-    ctx.from_dataset("air", air_dataset_small)
-    out = ctx.sql("SELECT * FROM air").to_dataset(
-        dim_cols=["time", "lat", "lon"]
-    )
-    assert np.issubdtype(out["time"].dtype, np.datetime64)
-    assert out["time"].dtype == air_dataset_small["time"].dtype
 
 
 def test_template_table_explicit_override(air_dataset_small):
@@ -237,7 +194,7 @@ def test_template_table_explicit_override(air_dataset_small):
     ctx.from_dataset("air", air_dataset_small)
     ctx.from_dataset("other", other)
     out = ctx.sql("SELECT * FROM air").to_dataset(
-        dim_cols=["time", "lat", "lon"], template_table="other"
+        dimension_columns=["time", "lat", "lon"], template_table="other"
     )
     assert out.attrs == {"flag": "other"}
 
@@ -247,7 +204,7 @@ def test_template_table_unknown_raises(air_dataset_small):
     ctx.from_dataset("air", air_dataset_small)
     with pytest.raises(ValueError, match="not a registered table"):
         ctx.sql("SELECT * FROM air").to_dataset(
-            dim_cols=["time", "lat", "lon"], template_table="missing"
+            dimension_columns=["time", "lat", "lon"], template_table="missing"
         )
 
 
@@ -256,57 +213,15 @@ def test_template_and_template_table_mutually_exclusive(air_dataset_small):
     ctx.from_dataset("air", air_dataset_small)
     with pytest.raises(ValueError, match="Pass at most one"):
         ctx.sql("SELECT * FROM air").to_dataset(
-            dim_cols=["time", "lat", "lon"],
+            dimension_columns=["time", "lat", "lon"],
             template=air_dataset_small,
             template_table="air",
         )
 
 
 # ---------------------------------------------------------------------------
-# FROM-clause regex unit tests
+# Lazy backend semantics
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "query,expected",
-    [
-        ("SELECT * FROM air", ["air"]),
-        ('SELECT * FROM "air"', ["air"]),
-        ("SELECT * FROM air a", ["air"]),
-        ("SELECT * FROM air AS a", ["air"]),
-        (
-            "SELECT * FROM air a JOIN stations s ON a.lat = s.lat",
-            ["air", "stations"],
-        ),
-        ("SELECT * FROM (SELECT 1)", []),
-        ("WITH cte AS (SELECT 1) SELECT * FROM cte", ["cte"]),
-        ("select * from air", ["air"]),
-    ],
-)
-def test_extract_from_tables(query, expected):
-    from xarray_sql.ds import _extract_from_tables
-
-    assert _extract_from_tables(query) == expected
-
-
-# ---------------------------------------------------------------------------
-# Phase 2: Lazy backend semantics
-# ---------------------------------------------------------------------------
-
-
-def _patch_raw_sql_counter(monkeypatch):
-    """Wrap ds._raw_sql with a counter; return the counter ref."""
-    from xarray_sql import ds as ds_mod
-
-    calls = {"n": 0}
-    original = ds_mod._raw_sql
-
-    def counting(*args, **kwargs):
-        calls["n"] += 1
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(ds_mod, "_raw_sql", counting)
-    return calls
 
 
 def test_lazy_select_star_returns_lazily_indexed_array(air_dataset_small):
@@ -324,46 +239,54 @@ def test_lazy_select_star_returns_lazily_indexed_array(air_dataset_small):
     assert isinstance(underlying, SQLBackendArray)
 
 
-def test_lazy_no_sql_execution_until_access(air_dataset_small, monkeypatch):
-    """Constructing the lazy Dataset must not trigger arbitrary SQL runs.
+def test_lazy_no_slab_access_until_data_read(air_dataset_small, monkeypatch):
+    """Reading metadata (``dims``, ``coords``, ``attrs``) on the lazy
+    Dataset must not trigger ``SQLBackendArray._raw_getitem`` (the slab
+    materialization entry point)."""
+    from xarray_sql import ds as ds_mod
 
-    Some setup queries are allowed (schema introspection, distinct-coord
-    fetch when there's no template) but reading metadata (dims, coords,
-    attrs) on the returned Dataset must not increment beyond that.
-    """
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
-    calls = _patch_raw_sql_counter(monkeypatch)
     out = ctx.sql("SELECT * FROM air").to_dataset()
-    construct_count = calls["n"]
-    # Reading metadata only.
+    calls = {"n": 0}
+    original = ds_mod.SQLBackendArray._raw_getitem
+
+    def counting(self, key):
+        calls["n"] += 1
+        return original(self, key)
+
+    monkeypatch.setattr(ds_mod.SQLBackendArray, "_raw_getitem", counting)
     _ = out.dims
     _ = out.sizes
     _ = out.attrs
     _ = out["air"].attrs
-    _ = out["lat"].values  # coord arrays come from the template, not SQL
-    assert calls["n"] == construct_count, (
-        f"Metadata reads should not trigger SQL; was {construct_count}, "
-        f"now {calls['n']}"
+    _ = out["lat"].values  # coord arrays already in memory from construction
+    assert calls["n"] == 0, (
+        f"Metadata reads should not trigger slab access; got {calls['n']}"
     )
 
 
 def test_lazy_isel_int_pushes_down_equality(air_dataset_small, monkeypatch):
-    """isel(time=0) triggers exactly one wrapped SQL with WHERE = literal."""
+    """``isel(time=0)`` triggers the lazy backend (one ``_raw_getitem`` call)."""
+    from xarray_sql import ds as ds_mod
+
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
-    calls = _patch_raw_sql_counter(monkeypatch)
     out = ctx.sql("SELECT * FROM air").to_dataset()
-    before = calls["n"]
+    calls = {"n": 0}
+    original = ds_mod.SQLBackendArray._raw_getitem
+
+    def counting(self, key):
+        calls["n"] += 1
+        return original(self, key)
+
+    monkeypatch.setattr(ds_mod.SQLBackendArray, "_raw_getitem", counting)
     slab = out["air"].isel(time=0).values
-    after = calls["n"]
-    # Shape: (lat, lon)
     assert slab.shape == (
         air_dataset_small.sizes["lat"],
         air_dataset_small.sizes["lon"],
     )
-    # At least one SQL execution past the schema setup.
-    assert after > before
+    assert calls["n"] >= 1
 
 
 def test_lazy_isel_slice_pushdown(air_dataset_small):
@@ -403,7 +326,7 @@ def test_aggregation_uses_eager_path(air_dataset_small):
     ctx.from_dataset("air", air_dataset_small)
     out = ctx.sql(
         "SELECT lat, lon, AVG(air) AS air_avg FROM air GROUP BY lat, lon"
-    ).to_dataset(dim_cols=["lat", "lon"])
+    ).to_dataset(dimension_columns=["lat", "lon"])
     underlying = out["air_avg"].variable._data
     from xarray_sql.ds import SQLBackendArray
 
@@ -455,7 +378,7 @@ def test_lazy_compute_returns_eager(air_dataset_small):
 
 
 # ---------------------------------------------------------------------------
-# Phase 3: Sparse extent + edge cases
+# Sparse-extent handling and edge cases
 # ---------------------------------------------------------------------------
 
 
@@ -493,7 +416,9 @@ def test_sparse_extent_template_requires_template(air_dataset_small):
 
     df = pd.DataFrame([(0, 0, 1.0), (1, 1, 2.0)], columns=["lat", "lon", "v"])
     with pytest.raises(ValueError, match="requires template= to be supplied"):
-        _eager_to_xarray(df, dim_cols=["lat", "lon"], sparse_extent="template")
+        _eager_to_xarray(
+            df, dimension_columns=["lat", "lon"], sparse_extent="template"
+        )
 
 
 def test_sparse_extent_invalid_value_raises():
@@ -501,11 +426,13 @@ def test_sparse_extent_invalid_value_raises():
 
     df = pd.DataFrame([(0, 0, 1.0)], columns=["lat", "lon", "v"])
     with pytest.raises(ValueError, match="sparse_extent must be"):
-        _eager_to_xarray(df, dim_cols=["lat", "lon"], sparse_extent="bogus")
+        _eager_to_xarray(
+            df, dimension_columns=["lat", "lon"], sparse_extent="bogus"
+        )
 
 
 def test_sparse_extent_template_with_aggregation(air_dataset_small):
-    """sparse_extent='template' on an aggregation respects dim_cols subset."""
+    """sparse_extent='template' on an aggregation respects dimension_columns subset."""
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
     threshold = float(air_dataset_small["lat"].values[5])
@@ -516,7 +443,7 @@ def test_sparse_extent_template_with_aggregation(air_dataset_small):
         WHERE lat > {threshold}
         GROUP BY lat, lon
         """
-    ).to_dataset(dim_cols=["lat", "lon"], sparse_extent="template")
+    ).to_dataset(dimension_columns=["lat", "lon"], sparse_extent="template")
     assert out.sizes["lat"] == air_dataset_small.sizes["lat"]
     assert "time" not in out.dims
     below_mask = out["lat"].values <= threshold
@@ -553,7 +480,7 @@ def test_fill_value_custom_preserves_int():
     )
     out = _eager_to_xarray(
         df,
-        dim_cols=["lat", "lon"],
+        dimension_columns=["lat", "lon"],
         template=template,
         sparse_extent="template",
         fill_value=-1,
@@ -572,13 +499,13 @@ def test_drop_null_dim_rows_warns_once():
         columns=["lat", "lon", "v"],
     )
     with pytest.warns(UserWarning, match="Dropping 1 row"):
-        out = _eager_to_xarray(df, dim_cols=["lat", "lon"])
+        out = _eager_to_xarray(df, dimension_columns=["lat", "lon"])
     assert out.sizes["lat"] == 2
     assert out.sizes["lon"] == 1
 
 
 def test_sparse_extent_template_then_metadata(air_dataset_small):
-    """sparse_extent='template' composes with Phase 1 metadata recovery."""
+    """sparse_extent='template' composes with template metadata recovery."""
     ds = air_dataset_small.copy()
     ds.attrs = {"src": "tmpl"}
     ds["air"].attrs = {"units": "K"}
@@ -602,37 +529,9 @@ def test_to_dataset_explicit_template_overrides_auto_resolve(
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)  # registered, but...
     out = ctx.sql("SELECT * FROM air").to_dataset(
-        dim_cols=["time", "lat", "lon"], template=other
+        dimension_columns=["time", "lat", "lon"], template=other
     )
     assert out.attrs == {"flag": "explicit"}
-
-
-def test_bare_select_star_skips_distinct_scans(air_dataset_small, monkeypatch):
-    """``SELECT * FROM <registered>`` uses template coords; no DISTINCT scans.
-
-    Locks in the optimization that avoids reading the full dataset 3-4
-    times at construction. Filtered queries (with WHERE/JOIN/CTE) still
-    fall back to DISTINCT per dim.
-    """
-    ctx = XarrayContext()
-    ctx.from_dataset("air", air_dataset_small)
-    calls = _patch_raw_sql_counter(monkeypatch)
-    ctx.sql("SELECT * FROM air").to_dataset()
-    bare_count = calls["n"]
-    # 1 query: schema introspection. Zero DISTINCT scans.
-    assert bare_count == 1, (
-        f"bare SELECT * should issue 1 setup query; got {bare_count}"
-    )
-
-    calls["n"] = 0
-    # A query that does not match the bare-select-star regex must fall
-    # back to DISTINCT per dim (one per dim, plus the schema query).
-    ctx.sql("SELECT * FROM air WHERE lat > 50").to_dataset()
-    filtered_count = calls["n"]
-    assert filtered_count > bare_count, (
-        f"filtered query should issue more setup queries; got "
-        f"{filtered_count} vs bare {bare_count}"
-    )
 
 
 def test_vectorized_indexer_falls_back_via_xarray_adapter(
@@ -660,32 +559,43 @@ def test_vectorized_indexer_falls_back_via_xarray_adapter(
     assert lazy_pts.shape == (3, air_dataset_small.sizes["lon"])
 
 
-def test_full_dim_slice_omits_where_clause(air_dataset_small, monkeypatch):
-    """``isel(time=0)`` -- full-extent lat/lon dims drop from the WHERE.
-
-    Prevents emitting huge ``lat IN (all 25 values) AND lon IN (all 53
-    values)`` clauses that would only constant-fold to TRUE.
-    """
+def test_full_dim_slice_omits_filter_for_full_dims(
+    air_dataset_small, monkeypatch
+):
+    """``isel(time=0)`` filters on ``time`` only; full-extent dims contribute
+    no filter predicate (verified by intercepting ``DataFrame.filter``)."""
     from xarray_sql import ds as ds_mod
 
-    seen: list[str] = []
-    original = ds_mod._raw_sql
+    calls: list[Any] = []
+    original_filter = ds_mod.SQLBackendArray._raw_getitem
 
-    def trace(ctx, q):
-        seen.append(q)
-        return original(ctx, q)
+    def trace(self, key):
+        # Intercept by patching the inner DataFrame's filter on each call.
+        captured_inner = self._inner_df
 
-    monkeypatch.setattr(ds_mod, "_raw_sql", trace)
+        def capture_filter(expr):
+            calls.append(expr)
+            return original_inner_filter(expr)
+
+        original_inner_filter = captured_inner.filter
+        captured_inner.filter = capture_filter  # type: ignore[method-assign]
+        try:
+            return original_filter(self, key)
+        finally:
+            captured_inner.filter = original_inner_filter  # restore
+
+    monkeypatch.setattr(ds_mod.SQLBackendArray, "_raw_getitem", trace)
 
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
     out = ctx.sql("SELECT * FROM air").to_dataset()
-    seen.clear()
+    calls.clear()
     _ = out["air"].isel(time=0).values
-    # Exactly one wrapped query; it must filter on time only, not on lat
-    # or lon (which are full-extent).
-    assert len(seen) == 1
-    wrapped = seen[0]
-    assert '"time"' in wrapped
-    assert "lat IN" not in wrapped
-    assert "lon IN" not in wrapped
+    # Exactly one filter call (one slab access); the predicate's repr
+    # should reference "time" but not "lat" or "lon" (they cover the
+    # full extent and get omitted).
+    assert len(calls) == 1
+    predicate_repr = repr(calls[0])
+    assert "time" in predicate_repr
+    assert "lat" not in predicate_repr
+    assert "lon" not in predicate_repr

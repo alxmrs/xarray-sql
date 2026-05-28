@@ -13,7 +13,7 @@ class XarrayContext(SessionContext):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Track registered xarray Datasets so XarrayDataFrame can recover
-        # defaults (dim_cols) and metadata (var/dataset attrs, non-dim
+        # defaults (dimension_columns) and metadata (var/dataset attrs, non-dim
         # coords, dim-coord dtype) the forward pivot strips.
         self._registered_datasets: dict[str, xr.Dataset] = {}
 
@@ -78,7 +78,7 @@ class XarrayContext(SessionContext):
         object wraps the DataFusion DataFrame. The wrapper exposes
         ``.to_pandas()`` (unchanged), forwards every other DataFusion
         method via ``__getattr__``, and adds
-        ``.to_dataset(dim_cols=[...])`` for round-tripping the result
+        ``.to_dataset(dimension_columns=[...])`` for round-tripping the result
         back to an ``xr.Dataset``.
 
         Args:
@@ -90,9 +90,5 @@ class XarrayContext(SessionContext):
             An :class:`XarrayDataFrame` wrapping the DataFusion DataFrame.
         """
         inner = super().sql(query, *args, **kwargs)
-        registry = _RegistryView(
-            templates=dict(self._registered_datasets),
-            query=query,
-            ctx=self,
-        )
+        registry = _RegistryView(templates=dict(self._registered_datasets))
         return XarrayDataFrame(inner, registry=registry)
