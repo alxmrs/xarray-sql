@@ -87,6 +87,11 @@ If you omit `table_names`, each table is named by joining its dimension names
 with underscores, e.g. `era5.time_latitude_longitude` and
 `era5.time_level_latitude_longitude`.
 
+Scalar (0-dimensional) variables, common as metadata in real-world stores such
+as GOES satellite imagery (`goes_imager_projection`, etc.), are grouped together
+into a single one-row table named `scalar` by default. Override it like any
+other group with `table_names={(): 'metadata'}`.
+
 A runnable version of this example lives at
 [`perf_tests/era5_temp_profile.py`](../perf_tests/era5_temp_profile.py).
 

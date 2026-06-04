@@ -86,10 +86,12 @@ class XarrayContext(SessionContext):
         self.catalog().register_schema(name, schema)
 
         for dims, var_names in groups.items():
-            sub_name = table_names.get(dims, "_".join(dims))
-            sub_ds = input_table[var_names]
-            schema.register_table(sub_name, read_xarray_table(sub_ds, chunks))
-            self._maybe_register_cftime_udf(sub_ds)
+            # Scalar variables group under empty dims, where "_".join(()) is
+            # the empty string; fall back to a valid default table name.
+            sub_name = table_names.get(dims, "_".join(dims) or "scalar")
+            self._register_table(
+                schema.register_table, sub_name, input_table[var_names], chunks
+            )
 
         return self
 
@@ -101,10 +103,18 @@ class XarrayContext(SessionContext):
     ):
         """Register a uniform-dimension Dataset as a single SQL table."""
 
-        table = read_xarray_table(input_table, chunks)
-        self.register_table(table_name, table)
-        self._maybe_register_cftime_udf(input_table)
+        self._register_table(self.register_table, table_name, input_table, chunks)
         return self
+
+    def _register_table(self, register, table_name, ds, chunks):
+        """Register one (sub)dataset as a table via ``register``.
+
+        ``register`` is the registration callable for the target namespace:
+        ``self.register_table`` for a top-level table, or
+        ``schema.register_table`` for a table inside a SQL schema.
+        """
+        register(table_name, read_xarray_table(ds, chunks))
+        self._maybe_register_cftime_udf(ds)
 
     def _maybe_register_cftime_udf(self, ds: xr.Dataset) -> None:
         """Auto-register a cftime() UDF for non-Gregorian cftime coordinates."""
