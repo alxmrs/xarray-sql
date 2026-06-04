@@ -103,7 +103,9 @@ class XarrayContext(SessionContext):
     ):
         """Register a uniform-dimension Dataset as a single SQL table."""
 
-        self._register_table(self.register_table, table_name, input_table, chunks)
+        self._register_table(
+            self.register_table, table_name, input_table, chunks
+        )
         return self
 
     def _register_table(self, register, table_name, ds, chunks):

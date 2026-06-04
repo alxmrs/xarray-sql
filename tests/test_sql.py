@@ -450,9 +450,7 @@ class TestFromDatasetMultiDims:
 
     def test_scalar_table_name_override(self, scalar_and_array_ds):
         ctx = XarrayContext()
-        ctx.from_dataset(
-            "goes", scalar_and_array_ds, table_names={(): "meta"}
-        )
+        ctx.from_dataset("goes", scalar_and_array_ds, table_names={(): "meta"})
         result = ctx.sql("SELECT * FROM goes.meta").to_pandas()
         assert "projection" in result.columns
         assert len(result) == 1
