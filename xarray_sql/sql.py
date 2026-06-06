@@ -89,8 +89,8 @@ class XarrayContext(SessionContext):
             # Scalar variables group under empty dims, where "_".join(()) is
             # the empty string; fall back to a valid default table name.
             sub_name = table_names.get(dims, "_".join(dims) or "scalar")
-            self._register_table(
-                schema.register_table, sub_name, input_table[var_names], chunks
+            self._from_dataset(
+                sub_name, input_table[var_names], chunks, schema=schema
             )
 
         return self
@@ -100,23 +100,19 @@ class XarrayContext(SessionContext):
         table_name: str,
         input_table: xr.Dataset,
         chunks: Chunks = None,
+        schema: Schema | None = None,
     ):
-        """Register a uniform-dimension Dataset as a single SQL table."""
+        """Register a Dataset as a single SQL table.
 
-        self._register_table(
-            self.register_table, table_name, input_table, chunks
-        )
-        return self
-
-    def _register_table(self, register, table_name, ds, chunks):
-        """Register one (sub)dataset as a table via ``register``.
-
-        ``register`` is the registration callable for the target namespace:
-        ``self.register_table`` for a top-level table, or
-        ``schema.register_table`` for a table inside a SQL schema.
+        Registers a top-level table by default, or a table inside ``schema``
+        (a SQL namespace) when one is given.
         """
-        register(table_name, read_xarray_table(ds, chunks))
-        self._maybe_register_cftime_udf(ds)
+        register = (
+            self.register_table if schema is None else schema.register_table
+        )
+        register(table_name, read_xarray_table(input_table, chunks))
+        self._maybe_register_cftime_udf(input_table)
+        return self
 
     def _maybe_register_cftime_udf(self, ds: xr.Dataset) -> None:
         """Auto-register a cftime() UDF for non-Gregorian cftime coordinates."""
