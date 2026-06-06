@@ -6,21 +6,21 @@ wrapper around the DataFusion ``DataFrame`` returned by
 :meth:`XarrayContext.sql`, with a :meth:`XarrayDataFrame.to_dataset`
 method that round-trips a query result back to ``xr.Dataset``.
 
-``.to_dataset()`` is lazy by default for ``SELECT *``-style queries:
-data variables are backed by :class:`SQLBackendArray` wrapped in
-``xarray.core.indexing.LazilyIndexedArray``. Slicing and ``.sel`` are
-translated into DataFusion ``filter`` expressions and consumed via
-``execute_stream``, so only the requested slab is materialized as Arrow
-``RecordBatch`` es and scattered directly into numpy. Aggregation
-queries (whose result has columns not in the registered template) fall
-back to an eager Arrow-native materialize-and-scatter path that also
-avoids pandas. ``.compute()`` always returns an in-memory Dataset.
+Every ``.to_dataset()`` result is lazy: data variables are backed by
+:class:`SQLBackendArray` wrapped in
+``xarray.core.indexing.LazilyIndexedArray``. xarray indexing operations
+(``isel``, ``sel``, slicing) translate to DataFusion ``filter``
+expressions and consume the filtered DataFrame via ``execute_stream``,
+so only the requested slab is materialized as Arrow ``RecordBatch`` es
+and scattered into numpy. Pushdown and laziness are orthogonal: queries
+whose filters cannot be pushed down (e.g. aggregations) still stream
+their result lazily on first access. ``.compute()`` materializes the
+whole Dataset in memory.
 """
 
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
 import numpy as np
@@ -29,31 +29,13 @@ import pyarrow as pa
 import xarray as xr
 from datafusion import col, literal
 
-# ``sparse_extent`` selects the dim-coord range of the output for a
+# ``sparsity`` selects the dim-coord range of the output for a
 # filtered query:
 #   - "result"   : keep only the dim values present in the query result
 #                  (sparse output equal to whatever rows came back).
 #   - "template" : reindex to the registered Dataset's full coord ranges,
 #                  filling absent cells with ``fill_value``.
-SparseExtent = Literal["result", "template"]
-
-
-# ---------------------------------------------------------------------------
-# Registry view (shared between XarrayContext and the wrapper)
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _RegistryView:
-    """Snapshot of the registered Datasets handed to a wrapper.
-
-    Maps each ``ctx.from_dataset(name, ds)`` registration to its source
-    ``xr.Dataset``. Held privately by :class:`XarrayDataFrame` so
-    :meth:`XarrayDataFrame.to_dataset` can recover metadata that the
-    forward pivot drops. Not part of the public API.
-    """
-
-    templates: dict[str, xr.Dataset] = field(default_factory=dict)
+Sparsity = Literal["result", "template"]
 
 
 # ---------------------------------------------------------------------------
@@ -75,66 +57,7 @@ def _ds_var_dims(ds: xr.Dataset) -> list[str]:
     return list(ds.dims)
 
 
-def _to_arrow_table(result: Any) -> pa.Table:
-    """Convert any supported tabular result to a ``pyarrow.Table``.
-
-    Accepts ``pa.Table``, ``pd.DataFrame``, ``XarrayDataFrame``, or any
-    duck-typed object exposing ``execute_stream`` (DataFusion DataFrame).
-    The XarrayDataFrame / DataFusion paths consume Arrow ``RecordBatch``
-    es directly via ``execute_stream`` -- no pandas copy.
-    """
-    if isinstance(result, pa.Table):
-        return result
-    if isinstance(result, XarrayDataFrame):
-        batches = [b.to_pyarrow() for b in result._inner.execute_stream()]
-        return pa.Table.from_batches(batches)
-    if isinstance(result, pd.DataFrame):
-        return pa.Table.from_pandas(result, preserve_index=False)
-    if hasattr(result, "execute_stream"):
-        batches = [b.to_pyarrow() for b in result.execute_stream()]
-        return pa.Table.from_batches(batches)
-    if hasattr(result, "to_pandas"):
-        return pa.Table.from_pandas(result.to_pandas(), preserve_index=False)
-    raise TypeError(
-        f"Unsupported result type {type(result).__name__!r}; expected "
-        "pa.Table, pd.DataFrame, datafusion.DataFrame, or XarrayDataFrame"
-    )
-
-
-def _drop_null_dim_rows_arrow(
-    table: pa.Table, dimension_columns: list[str]
-) -> pa.Table:
-    """Drop rows with null dim coords from a ``pa.Table``. Warns once."""
-    import pyarrow.compute as pc
-
-    if table.num_rows == 0:
-        return table
-    # Combine per-dim null masks: keep rows where NO dim column is null.
-    keep = None
-    for d in dimension_columns:
-        col_arr = table.column(d)
-        is_null = pc.is_null(col_arr)
-        not_null = pc.invert(is_null)
-        keep = not_null if keep is None else pc.and_(keep, not_null)
-    if keep is None:
-        return table
-    n_dropped = table.num_rows - int(pc.sum(keep).as_py())
-    if n_dropped == 0:
-        return table
-    null_cols = [
-        d
-        for d in dimension_columns
-        if int(pc.sum(pc.is_null(table.column(d))).as_py()) > 0
-    ]
-    warnings.warn(
-        f"Dropping {n_dropped} row(s) with null dim values in "
-        f"columns {null_cols} before reshape",
-        stacklevel=3,
-    )
-    return table.filter(keep)
-
-
-def _apply_template(ds: xr.Dataset, template: xr.Dataset) -> xr.Dataset:
+def apply_template(ds: xr.Dataset, template: xr.Dataset) -> xr.Dataset:
     """Recover metadata that the forward SQL pivot strips.
 
     Adds back, where unambiguous:
@@ -221,13 +144,18 @@ def _scatter_batches_to_ndarray(
     dtype: np.dtype,
     drop_axes: list[int],
 ) -> np.ndarray:
-    """Scatter Arrow ``RecordBatch`` rows into an N-D numpy buffer.
+    """Convert filtered Arrow ``RecordBatch`` rows into a dense N-D numpy slab.
 
-    Each batch carries dim columns and a single value column for
-    ``var_name``. For every row we look up the position of its dim
-    coordinate values in the caller's requested coord arrays via
-    ``np.searchsorted`` and write the value at that N-D index. NaN-fill
-    initialization handles missing combinations (sparse results).
+    SQL query results arrive as flat rows; xarray expects N-D arrays.
+    This bridges the two: each row carries the dim-coord values that
+    identify its cell in the output cube plus the value to write there.
+    We look up the row's N-D position by binary-searching its coord
+    values within the caller's requested coord arrays
+    (``np.searchsorted``), then scatter-write the value at that index.
+
+    Missing combinations (sparse results from filtered queries) stay as
+    ``NaN`` for floating-point outputs by pre-filling the buffer; integer
+    outputs leave them as ``np.empty``-style undefined values.
     """
     # NaN fill for float outputs; default for int/datetime falls through
     # to ``np.empty``-style undefined values (but every output cell is
@@ -268,15 +196,45 @@ def _scatter_batches_to_ndarray(
 
 
 class SQLBackendArray(xr.backends.BackendArray):
-    """Lazy N-D array backed by DataFusion's native filter pushdown.
+    """Read-only lazy N-D array view over a DataFusion DataFrame.
+
+    Bridges xarray's lazy-indexing interface
+    (:class:`xarray.backends.BackendArray`) to a DataFusion query result,
+    so an xarray ``Dataset`` can present a SQL query as if it were a
+    materialized N-D array without actually loading any data until the
+    caller asks for it. This is the workhorse that lets
+    :meth:`XarrayDataFrame.to_dataset` return a Dataset cheaply.
 
     On each ``__getitem__`` call, the requested xarray indexer is
     translated into a DataFusion filter expression (``df.filter(expr)``)
     and a column projection (``df.select(*cols)``). The filtered
     DataFrame is consumed via ``execute_stream`` as a sequence of Arrow
     ``RecordBatch`` es and scattered into a preallocated numpy buffer,
-    so only the requested slab is materialized. No pandas hop and no
-    SQL string synthesis.
+    so only the requested slab is materialized.
+
+    Constraints and caveats:
+
+    - Read-only: there is no write path; the backend exists to surface
+      query results, not to round-trip writes into a SQL store.
+    - The underlying DataFusion ``DataFrame`` holds a reference to its
+      originating ``SessionContext``, which is not picklable. The class
+      therefore overrides ``__copy__`` and ``__deepcopy__`` to return
+      ``self`` -- this is safe because the backend is read-only.
+    - ``IndexingSupport.OUTER``: ``BasicIndexer`` and ``OuterIndexer``
+      are translated to filter predicates directly; ``VectorizedIndexer``
+      paths through xarray's adapter to outer-then-gather and so still
+      works, just less efficiently.
+
+    Raises:
+        ValueError, datafusion exceptions: propagated from the
+            underlying ``df.filter().select().execute_stream()`` chain
+            if a predicate refers to a missing column, the dtype of a
+            literal is incompatible, or the execution itself fails.
+        AssertionError: from ``np.searchsorted`` mis-alignment, which
+            indicates the result contains coordinate values not present
+            in the wrapper's pre-computed coord arrays -- usually a
+            symptom of a filtered query whose coord discovery missed a
+            value.
 
     Constructed by :func:`_lazy_to_xarray`; users should not instantiate
     this class directly.
@@ -332,7 +290,9 @@ class SQLBackendArray(xr.backends.BackendArray):
         # so DataFusion doesn't have to evaluate a tautology.
         full_dims: set[str] = set()
         drop_axes: list[int] = []
-        for axis, (dim, k) in enumerate(zip(self._dimension_columns, key)):
+        for axis, (dim, k) in enumerate(
+            zip(self._dimension_columns, key, strict=True)
+        ):
             coord = self._coord_arrays[dim]
             if isinstance(k, slice):
                 start = 0 if k.start is None else k.start
@@ -404,50 +364,27 @@ class SQLBackendArray(xr.backends.BackendArray):
         )
 
 
-def _is_pushdownable(
-    template: xr.Dataset | None,
-    dimension_columns: list[str],
-    result_cols: list[str],
-) -> bool:
-    """Decide whether a query can be lazily pushed down.
-
-    True when there is a registered template, every requested ``dimension_columns``
-    appears in the result, and the result has no columns beyond the
-    template's dim coords and data vars (i.e. no aggregation aliases).
-    """
-    if template is None:
-        return False
-    allowed = set(template.dims) | set(template.data_vars)
-    rcols = set(result_cols)
-    if not rcols <= allowed:
-        return False
-    if not set(dimension_columns) <= rcols:
-        return False
-    return True
-
-
 def _lazy_to_xarray(
     inner_df: Any,
     dimension_columns: list[str],
     template: xr.Dataset | None,
-    sparse_extent: SparseExtent,
+    sparsity: Sparsity,
     fill_value: Any,
 ) -> xr.Dataset:
     """Build a lazy ``xr.Dataset`` whose data vars are :class:`SQLBackendArray`.
 
     Coord arrays are discovered per-dim via ``inner_df.select(col(d))
     .distinct().sort(...).execute_stream()`` (one Arrow-native DataFrame
-    chain per dim). No SQL strings, no regexes; coord discovery cost is
-    bounded by N single-column scans where N is the number of dims.
+    chain per dim). Coord discovery cost is bounded by N single-column
+    scans where N is the number of dims.
     """
-    if sparse_extent not in ("result", "template"):
+    if sparsity not in ("result", "template"):
         raise ValueError(
-            "sparse_extent must be 'result' or 'template', got "
-            f"{sparse_extent!r}"
+            f"sparsity must be 'result' or 'template', got {sparsity!r}"
         )
-    if sparse_extent == "template" and template is None:
+    if sparsity == "template" and template is None:
         raise ValueError(
-            "sparse_extent='template' requires template= to be supplied"
+            "sparsity='template' requires template= to be supplied"
         )
 
     schema = inner_df.schema()
@@ -487,7 +424,7 @@ def _lazy_to_xarray(
     coords_arg = {d: coord_arrays[d] for d in dimension_columns}
     ds = xr.Dataset(data_vars=data_vars, coords=coords_arg)
 
-    if sparse_extent == "template":
+    if sparsity == "template":
         assert template is not None
         indexers = {
             d: template.coords[d].values
@@ -498,121 +435,7 @@ def _lazy_to_xarray(
             ds = ds.reindex(indexers, fill_value=fill_value)
 
     if template is not None:
-        ds = _apply_template(ds, template)
-    return ds
-
-
-def _eager_to_xarray(
-    result: Any,
-    dimension_columns: list[str],
-    template: xr.Dataset | None = None,
-    sparse_extent: SparseExtent = "result",
-    fill_value: Any = np.nan,
-) -> xr.Dataset:
-    """Convert a tabular result to an ``xr.Dataset`` eagerly.
-
-    Used by :meth:`XarrayDataFrame.to_dataset` for queries that cannot be
-    lazily pushed down (aggregations where the result has columns not in
-    the registered template). The data path is Arrow-native: input is
-    materialized as a single ``pa.Table`` and each data variable is
-    scattered into a numpy buffer via :func:`_scatter_batches_to_ndarray`.
-    No pandas hop in the common case (the XarrayDataFrame input goes
-    straight through ``execute_stream`` to Arrow).
-    """
-    import pyarrow.compute as pc
-
-    if not dimension_columns:
-        raise ValueError("dimension_columns must be non-empty")
-    if sparse_extent not in ("result", "template"):
-        raise ValueError(
-            "sparse_extent must be 'result' or 'template', got "
-            f"{sparse_extent!r}"
-        )
-    if sparse_extent == "template" and template is None:
-        raise ValueError(
-            "sparse_extent='template' requires template= to be supplied"
-        )
-
-    table = _to_arrow_table(result)
-    missing = [c for c in dimension_columns if c not in table.schema.names]
-    if missing:
-        raise ValueError(
-            f"dimension_columns not found in result columns: {missing}; "
-            f"available columns: {table.schema.names}"
-        )
-
-    table = _drop_null_dim_rows_arrow(table, dimension_columns)
-
-    # Duplicate detection. ``pyarrow.compute.unique`` lacks a struct
-    # kernel in pyarrow 23, so we scan once with a Python set over dim
-    # tuples. The cost is O(N) on the aggregation result (typically
-    # small) and only triggers a second pass on the error path.
-    if table.num_rows > 0:
-        dim_np = {
-            d: table.column(d).to_numpy(zero_copy_only=False)
-            for d in dimension_columns
-        }
-        seen: set[tuple] = set()
-        first: dict[str, Any] | None = None
-        for i in range(table.num_rows):
-            tup = tuple(dim_np[d][i] for d in dimension_columns)
-            if tup in seen:
-                first = dict(zip(dimension_columns, tup))
-                break
-            seen.add(tup)
-        if first is not None:
-            raise ValueError(
-                f"Result has duplicate dim tuples (e.g. {first}); cannot "
-                "uniquely reshape into an xr.Dataset. Aggregate or de-dup "
-                "the result first."
-            )
-
-    # Discover per-dim coord arrays from the result (sorted unique values).
-    coord_arrays: dict[str, np.ndarray] = {}
-    for d in dimension_columns:
-        unique = pc.unique(table.column(d))
-        sorted_unique = pc.array_sort_indices(unique)
-        coord_arrays[d] = unique.take(sorted_unique).to_numpy(
-            zero_copy_only=False
-        )
-    out_shape = tuple(len(coord_arrays[d]) for d in dimension_columns)
-    requested = coord_arrays  # caller's order == sorted coord order
-
-    # Scatter each non-dim column into its own ndarray, then assemble a
-    # Dataset.
-    data_vars: dict[str, xr.Variable] = {}
-    for name in table.schema.names:
-        if name in dimension_columns:
-            continue
-        np_dtype = table.schema.field(name).type.to_pandas_dtype()
-        # ``_scatter_batches_to_ndarray`` accepts a list of RecordBatches,
-        # so feed it the Table's batches directly.
-        arr = _scatter_batches_to_ndarray(
-            batches=table.to_batches(),
-            dimension_columns=dimension_columns,
-            requested=requested,
-            var_name=name,
-            out_shape=out_shape,
-            dtype=np_dtype,
-            drop_axes=[],
-        )
-        data_vars[name] = xr.Variable(dimension_columns, arr)
-
-    coords_arg = {d: coord_arrays[d] for d in dimension_columns}
-    ds = xr.Dataset(data_vars=data_vars, coords=coords_arg)
-
-    if sparse_extent == "template":
-        assert template is not None  # validated above
-        indexers = {
-            d: template.coords[d].values
-            for d in dimension_columns
-            if d in template.coords and d in template.dims
-        }
-        if indexers:
-            ds = ds.reindex(indexers, fill_value=fill_value)
-
-    if template is not None:
-        ds = _apply_template(ds, template)
+        ds = apply_template(ds, template)
     return ds
 
 
@@ -640,10 +463,22 @@ class XarrayDataFrame:
     def __init__(
         self,
         inner: Any,
-        registry: _RegistryView | None = None,
+        templates: dict[str, xr.Dataset] | None = None,
     ) -> None:
+        """Construct a wrapper.
+
+        Args:
+            inner: The underlying ``datafusion.DataFrame`` returned by
+                :meth:`XarrayContext.sql`.
+            templates: Snapshot of the registered Datasets on the producing
+                context, keyed by the SQL identifier each was registered
+                under. Used by :meth:`to_dataset` to recover metadata that
+                the forward pivot strips. ``None`` means no metadata
+                recovery is possible from registrations alone; callers may
+                still pass ``template=`` to :meth:`to_dataset` explicitly.
+        """
         object.__setattr__(self, "_inner", inner)
-        object.__setattr__(self, "_registry", registry or _RegistryView())
+        object.__setattr__(self, "_templates", dict(templates or {}))
 
     def to_pandas(self) -> pd.DataFrame:
         """Materialize the result as a ``pd.DataFrame`` (DataFusion API)."""
@@ -654,7 +489,7 @@ class XarrayDataFrame:
         dimension_columns: list[str] | None = None,
         template: xr.Dataset | None = None,
         template_table: str | None = None,
-        sparse_extent: SparseExtent = "result",
+        sparsity: Sparsity = "result",
         fill_value: Any = np.nan,
     ) -> xr.Dataset:
         """Convert the result to an ``xr.Dataset``.
@@ -669,11 +504,11 @@ class XarrayDataFrame:
                 Overrides any auto-resolved template.
             template_table: Name of a registered table to use as the
                 template. Mutually exclusive with ``template``.
-            sparse_extent: ``"result"`` (default) keeps only dim values
+            sparsity: ``"result"`` (default) keeps only dim values
                 present in the result. ``"template"`` reindexes to the
                 template's full coord ranges, filling absent cells with
                 ``fill_value``; requires a template.
-            fill_value: Used when ``sparse_extent="template"`` reindexes
+            fill_value: Used when ``sparsity="template"`` reindexes
                 to a wider extent. Defaults to ``np.nan``.
 
         Returns:
@@ -685,7 +520,7 @@ class XarrayDataFrame:
                 column, or the result has duplicate dim tuples;
                 ``template_table`` is unknown; both ``template`` and
                 ``template_table`` are passed; or
-                ``sparse_extent="template"`` is requested without a
+                ``sparsity="template"`` is requested without a
                 resolvable template.
         """
         if template is not None and template_table is not None:
@@ -696,21 +531,15 @@ class XarrayDataFrame:
             dimension_columns = self._infer_dimension_columns(
                 preferred_template=template
             )
-        if _is_pushdownable(
-            template, dimension_columns, self._result_columns()
-        ):
-            return _lazy_to_xarray(
-                inner_df=self._inner,
-                dimension_columns=dimension_columns,
-                template=template,
-                sparse_extent=sparse_extent,
-                fill_value=fill_value,
-            )
-        return _eager_to_xarray(
-            self,
+        # Always go through the lazy path: pushdown is an optimization
+        # for queries whose result columns map cleanly onto the template's
+        # dim+var set, but laziness itself is orthogonal -- aggregation
+        # results still benefit from streaming via execute_stream.
+        return _lazy_to_xarray(
+            inner_df=self._inner,
             dimension_columns=dimension_columns,
             template=template,
-            sparse_extent=sparse_extent,
+            sparsity=sparsity,
             fill_value=fill_value,
         )
 
@@ -727,12 +556,8 @@ class XarrayDataFrame:
           1. Explicit ``template_table`` argument.
           2. If exactly one Dataset is registered on the context, use it.
           3. None.
-
-        No SQL parsing is involved: option 2 reads only the registry's
-        contents. If multiple Datasets are registered, the caller must
-        pass ``template=`` or ``template_table=`` explicitly.
         """
-        templates = self._registry.templates
+        templates = self._templates
         if template_table is not None:
             if template_table not in templates:
                 raise ValueError(
@@ -759,23 +584,24 @@ class XarrayDataFrame:
             and set(preferred_template.dims) <= result_cols
         ):
             return _ds_var_dims(preferred_template)
-        if not self._registry.templates:
+        if not self._templates:
             raise ValueError(
-                "dimension_columns cannot be inferred (no registered Dataset on "
-                "this result); pass dimension_columns=[...] explicitly."
+                "dimension_columns cannot be inferred (no registered "
+                "Dataset on this result); pass dimension_columns=[...] "
+                "explicitly."
             )
         candidates = [
             _ds_var_dims(t)
-            for t in self._registry.templates.values()
+            for t in self._templates.values()
             if set(t.dims) <= result_cols
         ]
         if len(candidates) == 1:
             return candidates[0]
         if not candidates:
             raise ValueError(
-                "dimension_columns cannot be inferred: no registered Dataset has "
-                "all of its dims present in the result columns. Pass "
-                "dimension_columns=[...] explicitly."
+                "dimension_columns cannot be inferred: no registered "
+                "Dataset has all of its dims present in the result "
+                "columns. Pass dimension_columns=[...] explicitly."
             )
         raise ValueError(
             "dimension_columns cannot be inferred unambiguously: multiple "
@@ -785,11 +611,7 @@ class XarrayDataFrame:
 
     def _result_columns(self) -> list[str]:
         """Return the result's column names without materializing rows."""
-        try:
-            schema = self._inner.schema()
-        except Exception:
-            return list(self._inner.to_pandas().columns)
-        return [field.name for field in schema]
+        return [field.name for field in self._inner.schema()]
 
     def __getattr__(self, name: str) -> Any:
         # Runs only when ``name`` is not found via normal lookup, so this

@@ -5,7 +5,7 @@ from collections import defaultdict
 
 from . import cftime as cft
 from .df import Chunks
-from .ds import XarrayDataFrame, _RegistryView
+from .ds import XarrayDataFrame
 from .reader import read_xarray_table
 
 
@@ -149,8 +149,7 @@ class XarrayContext(SessionContext):
             An :class:`XarrayDataFrame` wrapping the DataFusion DataFrame.
         """
         inner = super().sql(query, *args, **kwargs)
-        registry = _RegistryView(templates=dict(self._registered_datasets))
-        return XarrayDataFrame(inner, registry=registry)
+        return XarrayDataFrame(inner, templates=self._registered_datasets)
 
 
 def _group_vars_by_dims(ds: xr.Dataset) -> dict[tuple[str, ...], list[str]]:

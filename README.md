@@ -148,13 +148,13 @@ and dim-coordinate dtype are recovered from the registered Dataset
 automatically.
 
 For filtered queries that return only part of the original extent, pass
-`sparse_extent="template"` to reindex back to the full grid with NaN
+`sparsity="template"` to reindex back to the full grid with NaN
 fills:
 
 ```python
 out = ctx.sql(
     'SELECT * FROM "air" WHERE lat > 50'
-).to_dataset(sparse_extent="template")
+).to_dataset(sparsity="template")
 # Full lat range restored; cells with lat <= 50 are NaN.
 ```
 

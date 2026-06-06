@@ -8,7 +8,7 @@ Covers:
   cases, ``dimension_columns`` auto-inference vs explicit.
 * Template-based metadata recovery (var attrs / encoding, dataset
   attrs, non-dim coords, dim-coord dtype).
-* Sparse-extent handling and edge cases (null dim rows, fill_value
+* Sparsity handling and edge cases (null dim rows, fill_value
   dtype behavior, vectorized indexer fallback).
 """
 
@@ -63,7 +63,7 @@ def _clear_encoding(ds: xr.Dataset) -> xr.Dataset:
     """Strip ``encoding`` from a Dataset and all its variables.
 
     Round-trip identity tests should not be coupled to encoding choices,
-    since ``_apply_template`` deliberately drops dtype-bound keys.
+    since ``apply_template`` deliberately drops dtype-bound keys.
     """
     ds = ds.copy()
     for v in ds.variables.values():
@@ -315,26 +315,32 @@ def test_lazy_select_star_round_trip_equality(air_dataset_small):
     np.testing.assert_array_equal(actual["air"].values, expected["air"].values)
 
 
-def test_aggregation_uses_eager_path(air_dataset_small):
-    """Aggregation queries materialize once via the eager path.
+def test_aggregation_uses_lazy_backend(air_dataset_small):
+    """Aggregation queries return a lazy Dataset just like SELECT *.
 
-    No assertion on the data type of variable._data here; xarray may
-    wrap eager numpy arrays in NumpyIndexingAdapter. The contract is:
-    values match the source and slicing afterwards is local.
+    Pushdown and laziness are orthogonal: an aggregation can't push the
+    request indexer into a useful filter, but the result is still
+    streamed via execute_stream on first access. The user-visible
+    contract is values match the source's ``mean(dim="time")``.
     """
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
     out = ctx.sql(
         "SELECT lat, lon, AVG(air) AS air_avg FROM air GROUP BY lat, lon"
     ).to_dataset(dimension_columns=["lat", "lon"])
-    underlying = out["air_avg"].variable._data
     from xarray_sql.ds import SQLBackendArray
 
-    # Aggregation -> not a SQLBackendArray.
-    if hasattr(underlying, "array"):
-        assert not isinstance(underlying.array, SQLBackendArray)
-    else:
-        assert not isinstance(underlying, SQLBackendArray)
+    inner = out["air_avg"].variable._data
+    underlying = inner.array if hasattr(inner, "array") else inner
+    assert isinstance(underlying, SQLBackendArray)
+    expected = (
+        air_dataset_small.compute()
+        .sortby(["lat", "lon"])
+        .mean(dim="time")["air"]
+        .values
+    )
+    actual = out.sortby(["lat", "lon"])["air_avg"].values
+    np.testing.assert_allclose(actual, expected)
 
 
 def test_lazy_outer_indexer_array(air_dataset_small):
@@ -378,12 +384,12 @@ def test_lazy_compute_returns_eager(air_dataset_small):
 
 
 # ---------------------------------------------------------------------------
-# Sparse-extent handling and edge cases
+# Sparsity handling and edge cases
 # ---------------------------------------------------------------------------
 
 
-def test_sparse_extent_result_default_filters_lazy(air_dataset_small):
-    """Default sparse_extent='result' keeps only filtered coords (lazy path)."""
+def test_sparsity_result_default_filters_lazy(air_dataset_small):
+    """Default sparsity='result' keeps only filtered coords (lazy path)."""
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
     threshold = float(air_dataset_small["lat"].values[5])
@@ -392,13 +398,13 @@ def test_sparse_extent_result_default_filters_lazy(air_dataset_small):
     assert out.sizes["lat"] < air_dataset_small.sizes["lat"]
 
 
-def test_sparse_extent_template_full_grid(air_dataset_small):
-    """sparse_extent='template' reindexes to the full grid with NaN fills."""
+def test_sparsity_template_full_grid(air_dataset_small):
+    """sparsity='template' reindexes to the full grid with NaN fills."""
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
     threshold = float(air_dataset_small["lat"].values[5])
     out = ctx.sql(f"SELECT * FROM air WHERE lat > {threshold}").to_dataset(
-        sparse_extent="template"
+        sparsity="template"
     )
     assert out.sizes["lat"] == air_dataset_small.sizes["lat"]
     lat_vals = out["lat"].values
@@ -410,29 +416,32 @@ def test_sparse_extent_template_full_grid(air_dataset_small):
     assert not np.isnan(above.values).any()
 
 
-def test_sparse_extent_template_requires_template(air_dataset_small):
-    """No resolvable template -> sparse_extent='template' raises."""
-    from xarray_sql.ds import _eager_to_xarray
-
-    df = pd.DataFrame([(0, 0, 1.0), (1, 1, 2.0)], columns=["lat", "lon", "v"])
+def test_sparsity_template_requires_template(air_dataset_small):
+    """No resolvable template -> sparsity='template' raises."""
+    other = air_dataset_small.copy()
+    ctx = XarrayContext()
+    # Two registrations so auto-resolve returns None.
+    ctx.from_dataset("a", air_dataset_small)
+    ctx.from_dataset("b", other)
     with pytest.raises(ValueError, match="requires template= to be supplied"):
-        _eager_to_xarray(
-            df, dimension_columns=["lat", "lon"], sparse_extent="template"
+        ctx.sql("SELECT * FROM a").to_dataset(
+            dimension_columns=["time", "lat", "lon"],
+            sparsity="template",
         )
 
 
-def test_sparse_extent_invalid_value_raises():
-    from xarray_sql.ds import _eager_to_xarray
-
-    df = pd.DataFrame([(0, 0, 1.0)], columns=["lat", "lon", "v"])
-    with pytest.raises(ValueError, match="sparse_extent must be"):
-        _eager_to_xarray(
-            df, dimension_columns=["lat", "lon"], sparse_extent="bogus"
+def test_sparsity_invalid_value_raises(air_dataset_small):
+    ctx = XarrayContext()
+    ctx.from_dataset("air", air_dataset_small)
+    with pytest.raises(ValueError, match="sparsity must be"):
+        ctx.sql("SELECT * FROM air").to_dataset(
+            dimension_columns=["time", "lat", "lon"],
+            sparsity="bogus",  # type: ignore[arg-type]
         )
 
 
-def test_sparse_extent_template_with_aggregation(air_dataset_small):
-    """sparse_extent='template' on an aggregation respects dimension_columns subset."""
+def test_sparsity_template_with_aggregation(air_dataset_small):
+    """sparsity='template' on an aggregation respects dimension_columns subset."""
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
     threshold = float(air_dataset_small["lat"].values[5])
@@ -443,7 +452,7 @@ def test_sparse_extent_template_with_aggregation(air_dataset_small):
         WHERE lat > {threshold}
         GROUP BY lat, lon
         """
-    ).to_dataset(dimension_columns=["lat", "lon"], sparse_extent="template")
+    ).to_dataset(dimension_columns=["lat", "lon"], sparsity="template")
     assert out.sizes["lat"] == air_dataset_small.sizes["lat"]
     assert "time" not in out.dims
     below_mask = out["lat"].values <= threshold
@@ -460,52 +469,37 @@ def test_fill_value_int_upcasts_to_float():
     ctx = XarrayContext()
     ctx.from_dataset("t", ds)
     out = ctx.sql("SELECT * FROM t WHERE lat > 0").to_dataset(
-        sparse_extent="template"
+        sparsity="template"
     )
     assert np.issubdtype(out["v"].dtype, np.floating)
     assert np.isnan(out["v"].sel(lat=0).values).all()
 
 
-def test_fill_value_custom_preserves_int():
+def test_fill_value_custom_preserves_int(air_dataset_small):
     """Passing a typed sentinel preserves the data var's int dtype."""
-    from xarray_sql.ds import _eager_to_xarray
-
-    df = pd.DataFrame(
-        [(1, 10, 100), (1, 11, 101), (2, 10, 200), (2, 11, 201)],
-        columns=["lat", "lon", "v"],
-    )
-    template = xr.Dataset(
-        {"v": (("lat", "lon"), np.zeros((3, 2), dtype=np.int64))},
+    # Build a small int-valued Dataset, register, filter out part of the
+    # extent, and reindex back with an int fill_value via sparsity.
+    source = xr.Dataset(
+        {
+            "v": (
+                ("lat", "lon"),
+                np.arange(6, dtype=np.int64).reshape(3, 2) + 1,
+            ),
+        },
         coords={"lat": [0, 1, 2], "lon": [10, 11]},
-    )
-    out = _eager_to_xarray(
-        df,
-        dimension_columns=["lat", "lon"],
-        template=template,
-        sparse_extent="template",
-        fill_value=-1,
+    ).chunk({"lat": 3})
+    ctx = XarrayContext()
+    ctx.from_dataset("t", source)
+    out = ctx.sql("SELECT * FROM t WHERE lat > 0").to_dataset(
+        sparsity="template", fill_value=-1
     )
     assert np.issubdtype(out["v"].dtype, np.integer)
-    assert out["v"].sel(lat=0, lon=10).item() == -1
-    assert out["v"].sel(lat=2, lon=11).item() == 201
+    assert (out["v"].sel(lat=0).values == -1).all()
+    assert out["v"].sel(lat=2, lon=11).item() == 6
 
 
-def test_drop_null_dim_rows_warns_once():
-    """Rows with NaN dim values are dropped with exactly one warning."""
-    from xarray_sql.ds import _eager_to_xarray
-
-    df = pd.DataFrame(
-        [(0, 0, 1.0), (np.nan, 0, 2.0), (1, 0, 3.0)],
-        columns=["lat", "lon", "v"],
-    )
-    with pytest.warns(UserWarning, match="Dropping 1 row"):
-        out = _eager_to_xarray(df, dimension_columns=["lat", "lon"])
-    assert out.sizes["lat"] == 2
-    assert out.sizes["lon"] == 1
-
-
-def test_sparse_extent_template_then_metadata(air_dataset_small):
-    """sparse_extent='template' composes with template metadata recovery."""
+def test_sparsity_template_then_metadata(air_dataset_small):
+    """sparsity='template' composes with template metadata recovery."""
     ds = air_dataset_small.copy()
     ds.attrs = {"src": "tmpl"}
     ds["air"].attrs = {"units": "K"}
@@ -513,7 +507,7 @@ def test_sparse_extent_template_then_metadata(air_dataset_small):
     ctx.from_dataset("air", ds)
     threshold = float(ds["lat"].values[5])
     out = ctx.sql(f"SELECT * FROM air WHERE lat > {threshold}").to_dataset(
-        sparse_extent="template"
+        sparsity="template"
     )
     assert out.attrs == {"src": "tmpl"}
     assert out["air"].attrs == {"units": "K"}
