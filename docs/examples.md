@@ -95,8 +95,7 @@ scalar variables such as `goes_imager_projection`. `from_dataset` groups all the
 scalars into a single one-row table named `scalar`:
 
 ```python
-import urllib.request
-
+import fsspec
 import xarray as xr
 from xarray_sql import XarrayContext
 
@@ -106,8 +105,9 @@ url = (
     'https://noaa-goes16.s3.amazonaws.com/ABI-L2-MCMIPM/2024/001/00/'
     'OR_ABI-L2-MCMIPM1-M6_G16_s20240010000281_e20240010000350_c20240010000426.nc'
 )
-urllib.request.urlretrieve(url, 'goes.nc')
-ds = xr.open_dataset('goes.nc').chunk({'y': 250, 'x': 250})
+ds = xr.open_dataset(fsspec.open_local(f'simplecache::{url}')).chunk(
+    {'y': 250, 'x': 250}
+)
 
 ctx = XarrayContext()
 ctx.from_dataset('goes', ds)
