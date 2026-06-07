@@ -95,17 +95,26 @@ scalar variables such as `goes_imager_projection`. `from_dataset` groups all the
 scalars into a single one-row table named `scalar`:
 
 ```python
+import urllib.request
+
 import xarray as xr
 from xarray_sql import XarrayContext
 
-# A GOES-16 ABI cloud-and-moisture file: (y, x) bands + scalar metadata.
-ds = xr.open_dataset('OR_ABI-L2-MCMIPM1-M6_G16_....nc').chunk({'y': 250, 'x': 250})
+# A real GOES-16 ABI cloud-and-moisture file from NOAA's public bucket:
+# (y, x) image bands alongside dozens of scalar metadata variables.
+url = (
+    'https://noaa-goes16.s3.amazonaws.com/ABI-L2-MCMIPM/2024/001/00/'
+    'OR_ABI-L2-MCMIPM1-M6_G16_s20240010000281_e20240010000350_c20240010000426.nc'
+)
+urllib.request.urlretrieve(url, 'goes.nc')
+ds = xr.open_dataset('goes.nc').chunk({'y': 250, 'x': 250})
 
 ctx = XarrayContext()
 ctx.from_dataset('goes', ds)
 
-ctx.sql('SELECT COUNT(*) FROM goes.y_x')   # the gridded bands
-ctx.sql('SELECT * FROM goes.scalar')       # one row of metadata
+# The gridded bands and the scalar metadata are separate tables.
+ctx.sql('SELECT COUNT(*) AS n FROM goes.y_x').to_pandas()['n'][0]  # -> 250000
+ctx.sql('SELECT * FROM goes.scalar').to_pandas().shape            # -> (1, 89)
 ```
 
 Override the default name like any other group with `table_names={(): 'metadata'}`.
