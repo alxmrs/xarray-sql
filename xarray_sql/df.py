@@ -30,13 +30,26 @@ def _get_chunk_slicer(
 def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> Iterator[Block]:
     """Compute block slices for a chunked Dataset."""
     if chunks is not None:
+        # Only chunk dimensions this dataset actually has. A sub-dataset
+        # (e.g. one dimension group of a heterogeneous Dataset) need not
+        # contain every dimension named in the chunks spec.
+        chunks = {dim: size for dim, size in chunks.items() if dim in ds.sizes}
+    if chunks:
         for_chunking = ds.copy(data=None, deep=False).chunk(chunks)
         chunks = for_chunking.chunks
         del for_chunking
     else:
         chunks = ds.chunks
 
-    assert chunks, "Dataset `ds` must be chunked or `chunks` must be provided."
+    if not chunks:
+        # No chunkable dimensions. A dimensionless dataset (e.g. scalar
+        # metadata variables) is a single block; a dataset that has
+        # dimensions but no chunking is a user error.
+        assert not ds.sizes, (
+            "Dataset `ds` must be chunked or `chunks` must be provided."
+        )
+        yield {}
+        return
 
     # chunks is Dict[str, Tuple[int, ...]] from xarray
     chunk_bounds = {

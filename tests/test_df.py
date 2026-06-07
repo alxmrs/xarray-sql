@@ -3,6 +3,7 @@ import tracemalloc
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pytest
 import xarray as xr
 
 from xarray_sql.df import (
@@ -56,6 +57,37 @@ def test_explode_data_equal_one_last(air):
         iselection[dim] = slice(start, end)
 
     assert air.isel(iselection).equals(ds)
+
+
+def test_block_slices_scalar_dataset_yields_single_block():
+    # A dimensionless dataset (e.g. scalar metadata variables) has exactly
+    # one block: the whole, empty selection.
+    ds = xr.Dataset({"projection": ((), 0)})
+    assert list(block_slices(ds)) == [{}]
+
+
+def test_block_slices_scalar_ignores_irrelevant_chunks():
+    ds = xr.Dataset({"projection": ((), 0)})
+    assert list(block_slices(ds, chunks={"time": 4})) == [{}]
+
+
+def test_block_slices_filters_chunk_keys_to_dataset_dims(air_small):
+    # A chunk key for a dimension the dataset doesn't have is ignored,
+    # rather than raising.
+    base = list(block_slices(air_small, chunks={"time": 4, "lat": 3, "lon": 4}))
+    extra = list(
+        block_slices(
+            air_small, chunks={"time": 4, "lat": 3, "lon": 4, "absent": 2}
+        )
+    )
+    assert len(extra) == len(base)
+
+
+def test_block_slices_dimensional_unchunked_raises():
+    # A dataset with dimensions but no chunking is still a user error.
+    ds = xr.Dataset({"v": (["x"], np.arange(3))}, coords={"x": np.arange(3)})
+    with pytest.raises(AssertionError):
+        list(block_slices(ds))
 
 
 def test_from_map_basic():

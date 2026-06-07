@@ -359,6 +359,14 @@ class TestGroupVarsByDims:
     def test_empty_dataset(self):
         assert _group_vars_by_dims(xr.Dataset()) == {}
 
+    def test_includes_scalar_group(self):
+        """Scalar (0-dim) variables group under the empty dims tuple."""
+        ds = xr.Dataset(
+            {"band": (["y", "x"], np.zeros((2, 3))), "projection": ((), 0)}
+        )
+        groups = _group_vars_by_dims(ds)
+        assert groups == {("y", "x"): ["band"], (): ["projection"]}
+
     def test_ignores_coords(self):
         """Coordinate variables shouldn't be returned as groups."""
         ds = xr.Dataset(
@@ -403,6 +411,49 @@ class TestFromDatasetMultiDims:
         assert "pressure" in upper.columns
         assert len(surface) == 2 * 3 * 4
         assert len(upper) == 2 * 3 * 4 * 2
+
+    @pytest.fixture
+    def scalar_and_array_ds(self):
+        """A gridded variable plus a scalar metadata variable (GOES-like)."""
+        np.random.seed(0)
+        return xr.Dataset(
+            {
+                "temperature_2m": (
+                    ["time", "lat", "lon"],
+                    np.random.rand(2, 3, 4),
+                ),
+                "projection": ((), 0),
+            },
+            coords={
+                "time": pd.date_range("2020-01-01", periods=2),
+                "lat": np.linspace(-90, 90, 3),
+                "lon": np.linspace(-180, 180, 4),
+            },
+        ).chunk({"time": 1})
+
+    def test_registers_scalar_var_as_single_row_table(
+        self, scalar_and_array_ds
+    ):
+        ctx = XarrayContext()
+        ctx.from_dataset("goes", scalar_and_array_ds)
+        surface = ctx.sql("SELECT * FROM goes.time_lat_lon").to_pandas()
+        scalar = ctx.sql("SELECT * FROM goes.scalar").to_pandas()
+        assert "temperature_2m" in surface.columns
+        assert "projection" in scalar.columns
+        assert len(scalar) == 1
+
+    def test_scalar_group_in_catalog(self, scalar_and_array_ds):
+        ctx = XarrayContext()
+        ctx.from_dataset("goes", scalar_and_array_ds)
+        tables = set(ctx.catalog().schema("goes").table_names())
+        assert tables == {"time_lat_lon", "scalar"}
+
+    def test_scalar_table_name_override(self, scalar_and_array_ds):
+        ctx = XarrayContext()
+        ctx.from_dataset("goes", scalar_and_array_ds, table_names={(): "meta"})
+        result = ctx.sql("SELECT * FROM goes.meta").to_pandas()
+        assert "projection" in result.columns
+        assert len(result) == 1
 
     def test_table_names_override(self, mixed_ds):
         ctx = XarrayContext()

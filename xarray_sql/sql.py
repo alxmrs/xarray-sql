@@ -86,10 +86,12 @@ class XarrayContext(SessionContext):
         self.catalog().register_schema(name, schema)
 
         for dims, var_names in groups.items():
-            sub_name = table_names.get(dims, "_".join(dims))
-            sub_ds = input_table[var_names]
-            schema.register_table(sub_name, read_xarray_table(sub_ds, chunks))
-            self._maybe_register_cftime_udf(sub_ds)
+            # Scalar variables group under empty dims, where "_".join(()) is
+            # the empty string; fall back to a valid default table name.
+            sub_name = table_names.get(dims, "_".join(dims) or "scalar")
+            self._from_dataset(
+                sub_name, input_table[var_names], chunks, schema=schema
+            )
 
         return self
 
@@ -98,11 +100,17 @@ class XarrayContext(SessionContext):
         table_name: str,
         input_table: xr.Dataset,
         chunks: Chunks = None,
+        schema: Schema | None = None,
     ):
-        """Register a uniform-dimension Dataset as a single SQL table."""
+        """Register a Dataset as a single SQL table.
 
-        table = read_xarray_table(input_table, chunks)
-        self.register_table(table_name, table)
+        Registers a top-level table by default, or a table inside ``schema``
+        (a SQL namespace) when one is given.
+        """
+        register = (
+            self.register_table if schema is None else schema.register_table
+        )
+        register(table_name, read_xarray_table(input_table, chunks))
         self._maybe_register_cftime_udf(input_table)
         return self
 
