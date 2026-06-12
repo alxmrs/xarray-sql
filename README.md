@@ -120,7 +120,7 @@ Dataset is backed by an `xarray.backends.BackendArray` that translates
 xarray indexers into DataFusion `filter` expressions and consumes the
 filtered DataFrame via `execute_stream`. Arrow `RecordBatch` es scatter
 directly into a preallocated numpy buffer with no pandas hop, so only
-the slab actually accessed is materialized.
+the region actually accessed is materialized.
 
 ```python
 out = ctx.sql('SELECT * FROM "air"').to_dataset()
@@ -133,9 +133,9 @@ out = ctx.sql('SELECT * FROM "air"').to_dataset()
 # Data variables:
 #     air      (time, lat, lon) float32 ...
 
-# Slicing pushes down into DataFusion; only the requested slab is
+# Slicing pushes down into DataFusion; only the requested region is
 # materialized.
-slab = out["air"].isel(time=0).values
+region = out["air"].isel(time=0).values
 
 # For full eager materialization, call .compute().
 eager = out.compute()

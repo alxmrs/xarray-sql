@@ -1,7 +1,7 @@
 """Reconstruct xarray Datasets from SQL query results.
 
 The inverse of the forward Dataset-to-table pivot done by
-:func:`xarray_sql.df.pivot`. Exposes :class:`XarrayDataFrame`, a thin
+:func:`xarray_sql.df.pivot`. Internally defines an :class:`XarrayDataFrame`
 wrapper around the DataFusion ``DataFrame`` returned by
 :meth:`XarrayContext.sql`, with a :meth:`XarrayDataFrame.to_dataset`
 method that round-trips a query result back to ``xr.Dataset``.
@@ -11,7 +11,7 @@ Every ``.to_dataset()`` result is lazy: data variables are backed by
 ``xarray.core.indexing.LazilyIndexedArray``. xarray indexing operations
 (``isel``, ``sel``, slicing) translate to DataFusion ``filter``
 expressions and consume the filtered DataFrame via ``execute_stream``,
-so only the requested slab is materialized as Arrow ``RecordBatch`` es
+so only the requested data is materialized as Arrow ``RecordBatch`` es
 and scattered into numpy. Pushdown and laziness are orthogonal: queries
 whose filters cannot be pushed down (e.g. aggregations) still stream
 their result lazily on first access. ``.compute()`` materializes the
@@ -29,13 +29,14 @@ import pyarrow as pa
 import xarray as xr
 from datafusion import col, literal
 
-# ``sparsity`` selects the dim-coord range of the output for a
-# filtered query:
-#   - "result"   : keep only the dim values present in the query result
-#                  (sparse output equal to whatever rows came back).
-#   - "template" : reindex to the registered Dataset's full coord ranges,
-#                  filling absent cells with ``fill_value``.
 Sparsity = Literal["result", "template"]
+"""Output coordinate extent for a filtered round-trip.
+
+* ``"result"`` keeps only the dim values present in the query result, so
+  the output is sparse and equal to whatever rows came back.
+* ``"template"`` reindexes to the registered Dataset's full coord ranges
+  and fills absent cells with ``fill_value``.
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +58,7 @@ def _ds_var_dims(ds: xr.Dataset) -> list[str]:
     return list(ds.dims)
 
 
-def apply_template(ds: xr.Dataset, template: xr.Dataset) -> xr.Dataset:
+def _apply_template(ds: xr.Dataset, template: xr.Dataset) -> xr.Dataset:
     """Recover metadata that the forward SQL pivot strips.
 
     Adds back, where unambiguous:
@@ -144,7 +145,7 @@ def _scatter_batches_to_ndarray(
     dtype: np.dtype,
     drop_axes: list[int],
 ) -> np.ndarray:
-    """Convert filtered Arrow ``RecordBatch`` rows into a dense N-D numpy slab.
+    """Convert filtered Arrow ``RecordBatch`` rows into a dense N-D numpy array.
 
     SQL query results arrive as flat rows; xarray expects N-D arrays.
     This bridges the two: each row carries the dim-coord values that
@@ -210,7 +211,7 @@ class SQLBackendArray(xr.backends.BackendArray):
     and a column projection (``df.select(*cols)``). The filtered
     DataFrame is consumed via ``execute_stream`` as a sequence of Arrow
     ``RecordBatch`` es and scattered into a preallocated numpy buffer,
-    so only the requested slab is materialized.
+    so only the requested data is materialized.
 
     Constraints and caveats:
 
@@ -279,7 +280,7 @@ class SQLBackendArray(xr.backends.BackendArray):
     # ------------------------------------------------------------------
 
     def _raw_getitem(self, key: tuple) -> np.ndarray:
-        """Materialize the slab described by *key* via DataFusion + Arrow.
+        """Materialize the indexed region described by *key* via DataFusion + Arrow.
 
         ``key`` is a tuple of ``int``/``slice``/1-D integer-array, one per
         dim, in :attr:`_dimension_columns` order.
@@ -435,7 +436,7 @@ def _lazy_to_xarray(
             ds = ds.reindex(indexers, fill_value=fill_value)
 
     if template is not None:
-        ds = apply_template(ds, template)
+        ds = _apply_template(ds, template)
     return ds
 
 
