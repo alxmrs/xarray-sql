@@ -87,7 +87,39 @@ If you omit `table_names`, each table is named by joining its dimension names
 with underscores, e.g. `era5.time_latitude_longitude` and
 `era5.time_level_latitude_longitude`.
 
-A runnable version of this example lives at
+## GOES satellite imagery (scalar variables)
+
+Real-world stores often mix gridded data with scalar (0-dimensional) metadata.
+GOES satellite imagery, for example, pairs `(y, x)` image bands with dozens of
+scalar variables such as `goes_imager_projection`. `from_dataset` groups all the
+scalars into a single one-row table named `scalar`:
+
+```python
+import fsspec
+import xarray as xr
+from xarray_sql import XarrayContext
+
+# A real GOES-16 ABI cloud-and-moisture file from NOAA's public bucket:
+# (y, x) image bands alongside dozens of scalar metadata variables.
+url = (
+    'https://noaa-goes16.s3.amazonaws.com/ABI-L2-MCMIPM/2024/001/00/'
+    'OR_ABI-L2-MCMIPM1-M6_G16_s20240010000281_e20240010000350_c20240010000426.nc'
+)
+ds = xr.open_dataset(fsspec.open_local(f'simplecache::{url}')).chunk(
+    {'y': 250, 'x': 250}
+)
+
+ctx = XarrayContext()
+ctx.from_dataset('goes', ds)
+
+# The gridded bands and the scalar metadata are separate tables.
+ctx.sql('SELECT COUNT(*) AS n FROM goes.y_x').to_pandas()['n'][0]  # -> 250000
+ctx.sql('SELECT * FROM goes.scalar').to_pandas().shape            # -> (1, 89)
+```
+
+Override the default name like any other group with `table_names={(): 'metadata'}`.
+
+A runnable version of the ERA5 example lives at
 [`perf_tests/era5_temp_profile.py`](../perf_tests/era5_temp_profile.py).
 
 [arco-era5]: https://github.com/google-research/arco-era5

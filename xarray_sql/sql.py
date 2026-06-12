@@ -90,6 +90,7 @@ class XarrayContext(SessionContext):
         groups = _group_vars_by_dims(input_table)
 
         if len(groups) <= 1:
+            self._registered_datasets[name] = input_table
             return self._from_dataset(name, input_table, chunks)
 
         table_names = table_names or {}
@@ -97,13 +98,14 @@ class XarrayContext(SessionContext):
         self.catalog().register_schema(name, schema)
 
         for dims, var_names in groups.items():
-            sub_name = table_names.get(dims, "_".join(dims))
+            # Scalar variables group under empty dims, where "_".join(()) is
+            # the empty string; fall back to a valid default table name.
+            sub_name = table_names.get(dims, "_".join(dims) or "scalar")
             sub_ds = input_table[var_names]
-            schema.register_table(sub_name, read_xarray_table(sub_ds, chunks))
-            # Track the fully-qualified name for XarrayDataFrame metadata
-            # recovery on round-trip.
+            self._from_dataset(sub_name, sub_ds, chunks, schema=schema)
+            # Track the fully-qualified name so XarrayDataFrame metadata
+            # recovery can find this Dataset on round-trip.
             self._registered_datasets[f"{name}.{sub_name}"] = sub_ds
-            self._maybe_register_cftime_udf(sub_ds)
 
         return self
 
@@ -112,12 +114,17 @@ class XarrayContext(SessionContext):
         table_name: str,
         input_table: xr.Dataset,
         chunks: Chunks = None,
+        schema: Schema | None = None,
     ):
-        """Register a uniform-dimension Dataset as a single SQL table."""
+        """Register a Dataset as a single SQL table.
 
-        table = read_xarray_table(input_table, chunks)
-        self.register_table(table_name, table)
-        self._registered_datasets[table_name] = input_table
+        Registers a top-level table by default, or a table inside ``schema``
+        (a SQL namespace) when one is given.
+        """
+        register = (
+            self.register_table if schema is None else schema.register_table
+        )
+        register(table_name, read_xarray_table(input_table, chunks))
         self._maybe_register_cftime_udf(input_table)
         return self
 
