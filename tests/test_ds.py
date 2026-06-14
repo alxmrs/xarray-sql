@@ -125,7 +125,7 @@ def test_aggregation_drops_dim(air_dataset_small):
     ctx.from_dataset("air", air_dataset_small)
     out = ctx.sql(
         "SELECT lat, lon, AVG(air) AS air_avg FROM air GROUP BY lat, lon"
-    ).to_dataset(dimension_columns=["lat", "lon"])
+    ).to_dataset(dims=["lat", "lon"])
     assert set(out.dims) == {"lat", "lon"}
     assert "air_avg" in out.data_vars
     assert "air" not in out.data_vars
@@ -166,7 +166,7 @@ def test_barrier_query_scans_source_once(air_dataset_small):
 
     out = ctx.sql(
         "SELECT lat, lon, AVG(air) AS air_avg FROM air GROUP BY lat, lon"
-    ).to_dataset(dimension_columns=["lat", "lon"])
+    ).to_dataset(dims=["lat", "lon"])
     reads_after_construct = len(reads)
     out.compute()
     reads_after_compute = len(reads)
@@ -188,7 +188,7 @@ def test_order_by_direction_sets_dim_order(air_dataset_small):
     ctx.from_dataset("air", air_dataset_small)
     out = ctx.sql(
         "SELECT lat, AVG(air) AS air_avg FROM air GROUP BY lat ORDER BY lat DESC"
-    ).to_dataset(dimension_columns=["lat"])
+    ).to_dataset(dims=["lat"])
 
     lat = out["lat"].values
     assert (np.diff(lat) < 0).all(), f"expected descending lat, got {lat}"
@@ -253,7 +253,7 @@ def test_to_dataset_infer_fails_when_no_template_fits(air_dataset_small):
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
     with pytest.raises(
-        ValueError, match="dimension_columns cannot be inferred"
+        ValueError, match="dims cannot be inferred"
     ):
         ctx.sql(
             "SELECT lat, lon, AVG(air) AS air_avg FROM air GROUP BY lat, lon"
@@ -268,7 +268,7 @@ def test_template_table_explicit_override(air_dataset_small):
     ctx.from_dataset("air", air_dataset_small)
     ctx.from_dataset("other", other)
     out = ctx.sql("SELECT * FROM air").to_dataset(
-        dimension_columns=["time", "lat", "lon"], template_table="other"
+        dims=["time", "lat", "lon"], template_table="other"
     )
     assert out.attrs == {"flag": "other"}
 
@@ -278,7 +278,7 @@ def test_template_table_unknown_raises(air_dataset_small):
     ctx.from_dataset("air", air_dataset_small)
     with pytest.raises(ValueError, match="not a registered table"):
         ctx.sql("SELECT * FROM air").to_dataset(
-            dimension_columns=["time", "lat", "lon"], template_table="missing"
+            dims=["time", "lat", "lon"], template_table="missing"
         )
 
 
@@ -287,7 +287,7 @@ def test_template_and_template_table_mutually_exclusive(air_dataset_small):
     ctx.from_dataset("air", air_dataset_small)
     with pytest.raises(ValueError, match="Pass at most one"):
         ctx.sql("SELECT * FROM air").to_dataset(
-            dimension_columns=["time", "lat", "lon"],
+            dims=["time", "lat", "lon"],
             template=air_dataset_small,
             template_table="air",
         )
@@ -305,7 +305,7 @@ def test_template_recovers_var_encoding_strips_dtype(air_dataset_small):
     ctx = XarrayContext()
     ctx.from_dataset("air", ds)
     out = ctx.sql("SELECT * FROM air").to_dataset(
-        dimension_columns=["time", "lat", "lon"]
+        dims=["time", "lat", "lon"]
     )
     assert out["air"].encoding.get("zlib") is True
     assert "dtype" not in out["air"].encoding
@@ -321,7 +321,7 @@ def test_template_aggregation_alias_no_attrs(air_dataset_small):
     ctx.from_dataset("air", ds)
     out = ctx.sql(
         "SELECT lat, lon, AVG(air) AS air_avg FROM air GROUP BY lat, lon"
-    ).to_dataset(dimension_columns=["lat", "lon"])
+    ).to_dataset(dims=["lat", "lon"])
     assert "air_avg" in out.data_vars
     assert out["air_avg"].attrs == {}
 
@@ -335,7 +335,7 @@ def test_to_dataset_explicit_template_overrides_auto_resolve(
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
     out = ctx.sql("SELECT * FROM air").to_dataset(
-        dimension_columns=["time", "lat", "lon"], template=other
+        dims=["time", "lat", "lon"], template=other
     )
     assert out.attrs == {"flag": "explicit"}
 
@@ -462,7 +462,7 @@ def test_sparsity_template_requires_template(air_dataset_small):
     ctx.from_dataset("b", other)
     with pytest.raises(ValueError, match="requires template= to be supplied"):
         ctx.sql("SELECT * FROM a").to_dataset(
-            dimension_columns=["time", "lat", "lon"],
+            dims=["time", "lat", "lon"],
             sparsity="template",
         )
 
@@ -472,7 +472,7 @@ def test_sparsity_invalid_value_raises(air_dataset_small):
     ctx.from_dataset("air", air_dataset_small)
     with pytest.raises(ValueError, match="sparsity must be"):
         ctx.sql("SELECT * FROM air").to_dataset(
-            dimension_columns=["time", "lat", "lon"],
+            dims=["time", "lat", "lon"],
             sparsity="bogus",  # type: ignore[arg-type]
         )
 
@@ -489,7 +489,7 @@ def test_sparsity_template_with_aggregation(air_dataset_small):
         WHERE lat > {threshold}
         GROUP BY lat, lon
         """
-    ).to_dataset(dimension_columns=["lat", "lon"], sparsity="template")
+    ).to_dataset(dims=["lat", "lon"], sparsity="template")
     assert out.sizes["lat"] == air_dataset_small.sizes["lat"]
     assert "time" not in out.dims
     below_mask = out["lat"].values <= threshold

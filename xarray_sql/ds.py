@@ -560,7 +560,7 @@ class XarrayDataFrame:
     unchanged.
 
     Carries a private snapshot of the context's registered Datasets so
-    :meth:`to_dataset` can default ``dimension_columns`` and recover metadata
+    :meth:`to_dataset` can default ``dims`` and recover metadata
     dropped by the forward pivot.
 
     Users should not construct this class directly; let
@@ -593,7 +593,7 @@ class XarrayDataFrame:
 
     def to_dataset(
         self,
-        dimension_columns: list[str] | None = None,
+        dims: list[str] | None = None,
         template: xr.Dataset | None = None,
         template_table: str | None = None,
         sparsity: Sparsity = "result",
@@ -603,7 +603,7 @@ class XarrayDataFrame:
         """Convert the result to an ``xr.Dataset``.
 
         Args:
-            dimension_columns: Result columns to use as Dataset dimensions. When
+            dims: Result columns to use as Dataset dimensions. When
                 ``None``, defaults to the dims of the registered Dataset
                 referenced by the SQL ``FROM`` clause (if exactly one
                 matches), or any single registered Dataset whose dims are
@@ -635,11 +635,11 @@ class XarrayDataFrame:
                   manager (dask, cubed, ...).
 
         Returns:
-            An ``xr.Dataset`` with ``dimension_columns`` as dimensions and the
+            An ``xr.Dataset`` with ``dims`` as dimensions and the
             remaining result columns as data variables.
 
         Raises:
-            ValueError: ``dimension_columns`` cannot be inferred, names a missing
+            ValueError: ``dims`` cannot be inferred, names a missing
                 column, or the result has duplicate dim tuples;
                 ``template_table`` is unknown; both ``template`` and
                 ``template_table`` are passed; or
@@ -650,16 +650,12 @@ class XarrayDataFrame:
             raise ValueError("Pass at most one of template= or template_table=")
         if template is None:
             template = self._resolve_template(template_table)
-        if dimension_columns is None:
-            dimension_columns = self._infer_dimension_columns(
-                preferred_template=template
-            )
-        resolved_chunks = self._resolve_chunks(
-            chunks, template, dimension_columns
-        )
+        if dims is None:
+            dims = self._infer_dimension_columns(preferred_template=template)
+        resolved_chunks = self._resolve_chunks(chunks, template, dims)
         return _result_to_xarray(
             inner_df=self._inner,
-            dimension_columns=dimension_columns,
+            dimension_columns=dims,
             template=template,
             sparsity=sparsity,
             fill_value=fill_value,
@@ -738,8 +734,8 @@ class XarrayDataFrame:
             return _ds_var_dims(preferred_template)
         if not self._templates:
             raise ValueError(
-                "dimension_columns cannot be inferred (no registered "
-                "Dataset on this result); pass dimension_columns=[...] "
+                "dims cannot be inferred (no registered "
+                "Dataset on this result); pass dims=[...] "
                 "explicitly."
             )
         candidates = [
@@ -751,14 +747,14 @@ class XarrayDataFrame:
             return candidates[0]
         if not candidates:
             raise ValueError(
-                "dimension_columns cannot be inferred: no registered "
+                "dims cannot be inferred: no registered "
                 "Dataset has all of its dims present in the result "
-                "columns. Pass dimension_columns=[...] explicitly."
+                "columns. Pass dims=[...] explicitly."
             )
         raise ValueError(
-            "dimension_columns cannot be inferred unambiguously: multiple "
+            "dims cannot be inferred unambiguously: multiple "
             "registered Datasets are compatible with the result. Pass "
-            "dimension_columns=[...] explicitly."
+            "dims=[...] explicitly."
         )
 
     def _result_columns(self) -> list[str]:

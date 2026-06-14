@@ -81,7 +81,7 @@ result = ctx.sql('''
 # | 775   | -2.3064649711534457  |
 # +-------+----------------------+
 
-avg_temp_ds = result.to_dataset(dimension_columns=["level"])
+avg_temp_ds = result.to_dataset(dims=["level"])
 # <xarray.Dataset> Size: 592B
 # Dimensions:  (level: 37)
 # Coordinates:
@@ -126,7 +126,7 @@ region = out["air"].isel(time=0).values
 eager = out.compute()
 ```
 
-`dimension_columns` defaults to the dims of the single registered Dataset
+`dims` defaults to the dims of the single registered Dataset
 on the context (or the one named via `template_table=` when several are
 registered). Variable attrs, dataset attrs, non-dimension coordinates,
 and dim-coordinate dtype are recovered from the registered Dataset
@@ -146,7 +146,7 @@ out = ctx.sql(
 Aggregation queries (e.g. `AVG(air) AS air_avg ... GROUP BY lat, lon`)
 materialize once because their output does not align with the source dim
 structure; the aggregation path is also Arrow-native (no pandas
-intermediates). Pass `dimension_columns=[...]` explicitly when an
+intermediates). Pass `dims=[...]` explicitly when an
 aggregation drops a dim.
 
 ## Why build this?
