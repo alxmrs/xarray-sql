@@ -90,7 +90,6 @@ class XarrayContext(SessionContext):
         groups = _group_vars_by_dims(input_table)
 
         if len(groups) <= 1:
-            self._registered_datasets[name] = input_table
             return self._from_dataset(name, input_table, chunks)
 
         table_names = table_names or {}
@@ -101,11 +100,9 @@ class XarrayContext(SessionContext):
             # Scalar variables group under empty dims, where "_".join(()) is
             # the empty string; fall back to a valid default table name.
             sub_name = table_names.get(dims, "_".join(dims) or "scalar")
-            sub_ds = input_table[var_names]
-            self._from_dataset(sub_name, sub_ds, chunks, schema=schema)
-            # Track the fully-qualified name so XarrayDataFrame metadata
-            # recovery can find this Dataset on round-trip.
-            self._registered_datasets[f"{name}.{sub_name}"] = sub_ds
+            self._from_dataset(
+                sub_name, input_table[var_names], chunks, schema=schema
+            )
 
         return self
 
@@ -121,6 +118,7 @@ class XarrayContext(SessionContext):
         Registers a top-level table by default, or a table inside ``schema``
         (a SQL namespace) when one is given.
         """
+        self._registered_datasets[table_name] = input_table
         register = (
             self.register_table if schema is None else schema.register_table
         )
