@@ -20,21 +20,19 @@ import xarray as xr
 import xarray_sql as xql
 
 
-# Open a year of ARCO-ERA5 — all 273 variables. Selecting a year up front
-# keeps Dask's partition setup cheap before any chunks are read from GCS.
-ds = (
-  xr.open_zarr('gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3',
-               chunks=dict(time=1),
-               storage_options={'token': 'anon'})  # Anonymous read from the public GCS bucket — no auth required.
-  .sel(time='2020')
-)
+# Open ARCO-ERA5 (273 variables) and turn off Dask.
+ds = xr.open_zarr(
+  'gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3',
+  chunks=None, # no dask graph 
+  storage_options={'token': 'anon'}, # Anonymous read from the public GCS bucket — no auth required.
+)  
 
+# Register the dataset to a SQL context -- `chunks` are required.
 ctx = xql.XarrayContext()
-ctx.from_dataset('era5', ds, table_names={
+ctx.from_dataset('era5', ds, chunks=dict(time=1), table_names={
     ('time', 'latitude', 'longitude'): 'surface',
     ('time', 'level', 'latitude', 'longitude'): 'atmosphere',
 })
-# Registration: ~0.5s for a full year of hourly ERA5, all variables.
 
 
 # Heads up: ARCO-ERA5 has 262 surface + 11 atmospheric variables. The library
@@ -57,7 +55,7 @@ ctx.sql('''
 # 0  8.640069
 
 # Average temperature per pressure level, globally. 
-result = ctx.sql('''
+ctx.sql('''
   SELECT level, AVG(temperature) - 273.15 AS avg_c
   FROM era5.atmosphere
   WHERE time BETWEEN TIMESTAMP '2020-01-01'
@@ -81,13 +79,19 @@ result = ctx.sql('''
 # | 775   | -2.3064649711534457  |
 # +-------+----------------------+
 
-avg_temp_ds = result.to_dataset(dims=["level"])
-# <xarray.Dataset> Size: 592B
-# Dimensions:  (level: 37)
-# Coordinates:
-#   * level    (level) int64 296B 1000 975 950 925 900 875 850 ... 20 10 7 5 3 2 1
-# Data variables:
-#     avg_c    (level) float64 296B 6.621 5.186 4.028 ... -21.51 -13.36 -9.021
+# Average temperature global 2m temperature around the morning of 2020-01-01. 
+(
+  ctx.sql('''
+    SELECT latitude, longitude, AVG("2m_temperature") - 273.15 AS avg_c
+    FROM era5.surface
+    WHERE time BETWEEN TIMESTAMP '2020-01-01'
+                   AND TIMESTAMP '2020-01-01 05:00:00'
+    GROUP BY latitude, longitude
+    ORDER BY latitude DESC, longitude
+  ''')
+  .to_dataset(dims=["latitude", "longitude"], template=ds)
+)
+# ...
 ```
 
 _(A runnable version of this example lives at
