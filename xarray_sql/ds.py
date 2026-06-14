@@ -543,9 +543,9 @@ def _auto_chunks(
     }
 
 
-def _result_to_xarray(
-    inner_df: Any,
-    dimension_columns: list[str],
+def _to_dataset(
+    inner_df: "XarrayDataFrame",
+    dims: list[str],
     template: xr.Dataset | None,
     sparsity: Sparsity,
     fill_value: Any,
@@ -553,8 +553,8 @@ def _result_to_xarray(
 ) -> xr.Dataset:
     """Reconstruct an ``xr.Dataset`` from a SQL result.
 
-    ``chunks`` (already resolved by :meth:`XarrayDataFrame._resolve_chunks`)
-    selects the execution strategy:
+    ``chunks`` (resolved by :func:`_resolve_chunks`) selects the execution
+    strategy:
 
     * ``None`` -> eager: execute once and materialize a dense Dataset
       (:func:`_materialize`). Correct for any query and the right default for
@@ -566,6 +566,8 @@ def _result_to_xarray(
       through xarray's configured chunk manager (dask, cubed, ...), so no
       chunked-array backend is imported directly here.
     """
+    chunks = _resolve_chunks(chunks, template, dims)
+
     if sparsity not in ("result", "template"):
         raise ValueError(
             f"sparsity must be 'result' or 'template', got {sparsity!r}"
@@ -581,18 +583,18 @@ def _result_to_xarray(
 
     if chunks is None:
         ds = _materialize(
-            inner_df, dimension_columns, field_names, field_types
+            inner_df, dims, field_names, field_types
         )
     else:
         ds = _build_lazy_scan(
-            inner_df, dimension_columns, field_names, field_types
+            inner_df, dims, field_names, field_types
         )
 
     if sparsity == "template":
         assert template is not None
         indexers = {
             d: template.coords[d].values
-            for d in dimension_columns
+            for d in dims
             if d in template.coords and d in template.dims
         }
         if indexers:
@@ -607,12 +609,42 @@ def _result_to_xarray(
             # boundaries; fall back to the chunk manager's own "auto" when there
             # is no source grid to align to.
             chunks = (
-                _auto_chunks(template, dimension_columns, field_types) or "auto"
+                _auto_chunks(template, dims, field_types) or "auto"
             )
         # Wrap the lazy data variables in the configured chunk manager (dask by
         # default). Each chunk reads its coordinate range via pushdown on access.
         ds = ds.chunk(chunks)
     return ds
+
+
+def _resolve_chunks(
+    chunks: Mapping[str, int] | str | None,
+    template: xr.Dataset | None,
+    dimension_columns: list[str],
+) -> Mapping[str, int] | str | None:
+    """Resolve the ``chunks`` argument to a concrete spec or ``None``.
+
+    ``None`` selects the eager path; anything else selects the lazy/chunked
+    path. ``"inherit"`` reuses the source Dataset's chunk sizes -- but only
+    for dimensions actually split into more than one chunk in the input
+    (a single full chunk is not "chunked"), so reductions that drop the
+    chunked dimension resolve to ``None`` (eager) automatically. Mappings
+    pass through unchanged; ``"auto"`` passes through here and is snapped to
+    source partition boundaries later (see :func:`_auto_chunks`).
+    """
+    if chunks is None:
+        return None
+    if chunks == "inherit":
+        if template is None:
+            return None
+        sizes = template.chunksizes  # dim -> tuple of chunk lengths
+        inherited = {
+            d: sizes[d][0]
+            for d in dimension_columns
+            if d in sizes and len(sizes[d]) > 1
+        }
+        return inherited or None
+    return chunks
 
 
 # ---------------------------------------------------------------------------
@@ -711,54 +743,24 @@ class XarrayDataFrame(DataFrame):
                 resolvable template.
         """
         template = self._resolve_template(template)
-        if dims is None:
-            dims = self._infer_dimension_columns(preferred_template=template)
-        resolved_chunks = self._resolve_chunks(chunks, template, dims)
-        return _result_to_xarray(
+        dims = dims or self._infer_dims(preferred_template=template)
+        return _to_dataset(
             inner_df=self,
-            dimension_columns=dims,
+            dims=dims,
             template=template,
             sparsity=sparsity,
             fill_value=fill_value,
-            chunks=resolved_chunks,
+            chunks=chunks,
         )
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _resolve_chunks(
-        chunks: Mapping[str, int] | str | None,
-        template: xr.Dataset | None,
-        dimension_columns: list[str],
-    ) -> Mapping[str, int] | str | None:
-        """Resolve the ``chunks`` argument to a concrete spec or ``None``.
-
-        ``None`` selects the eager path; anything else selects the lazy/chunked
-        path. ``"inherit"`` reuses the source Dataset's chunk sizes -- but only
-        for dimensions actually split into more than one chunk in the input
-        (a single full chunk is not "chunked"), so reductions that drop the
-        chunked dimension resolve to ``None`` (eager) automatically. Mappings
-        pass through unchanged; ``"auto"`` passes through here and is snapped to
-        source partition boundaries later (see :func:`_auto_chunks`).
-        """
-        if chunks is None:
-            return None
-        if chunks == "inherit":
-            if template is None:
-                return None
-            sizes = template.chunksizes  # dim -> tuple of chunk lengths
-            inherited = {
-                d: sizes[d][0]
-                for d in dimension_columns
-                if d in sizes and len(sizes[d]) > 1
-            }
-            return inherited or None
-        return chunks
-
-    def _resolve_template(self, candidate: xr.Dataset | str | None) -> xr.Dataset | None:
-        """Pick a template Dataset for metadata recovery (e.g. by registered name)."""
+    def _resolve_template(
+        self, candidate: xr.Dataset | str | None
+    ) -> xr.Dataset | None:
+        """Pick a template Dataset for metadata recovery (e.g. by name)."""
         if isinstance(candidate, xr.Dataset):
             return candidate
 
@@ -777,15 +779,15 @@ class XarrayDataFrame(DataFrame):
 
         return None
 
-    def _infer_dimension_columns(
+    def _infer_dims(
         self, preferred_template: xr.Dataset | None = None
     ) -> list[str]:
-        """Pick a default ``dimension_columns`` from the registry, or raise.
+        """Pick a default ``dims`` from the registry, or raise.
 
         Uses the data variable's dim order (via :func:`_ds_var_dims`) so
         the round-trip preserves the original axis order.
         """
-        result_cols = set(self._result_columns())
+        result_cols = {field.name for field in self.schema()}
         if (
             preferred_template is not None
             and set(preferred_template.dims) <= result_cols
@@ -815,8 +817,4 @@ class XarrayDataFrame(DataFrame):
             "registered Datasets are compatible with the result. Pass "
             "dims=[...] explicitly."
         )
-
-    def _result_columns(self) -> list[str]:
-        """Return the result's column names without materializing rows."""
-        return [field.name for field in self.schema()]
 

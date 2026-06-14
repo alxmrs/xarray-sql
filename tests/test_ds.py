@@ -52,6 +52,30 @@ def test_to_pandas_unchanged_behavior(air_dataset_small):
     pd.testing.assert_frame_equal(wrapped, raw)
 
 
+def test_xarray_dataframe_satisfies_datafusion_contract(air_dataset_small):
+    """``XarrayDataFrame`` must expose the full DataFusion ``DataFrame`` API it
+    stands in for -- public methods *and* the functional dunders (``df[col]``,
+    the Arrow C-stream export) that Python resolves on the type, so a wrapper
+    cannot silently drop them. Subclassing inherits all of it; this guards
+    against regressing to a composition wrapper (where ``__getattr__`` cannot
+    forward special methods invoked via syntax).
+    """
+    from datafusion import DataFrame
+
+    ctx = XarrayContext()
+    ctx.from_dataset("air", air_dataset_small)
+    wrapped = ctx.sql("SELECT * FROM air LIMIT 2")
+
+    # Every public attribute of DataFusion's DataFrame is present.
+    expected = {n for n in dir(DataFrame) if not n.startswith("_")}
+    missing = sorted(n for n in expected if not hasattr(wrapped, n))
+    assert not missing, f"missing DataFusion API: {missing}"
+
+    # Functional dunders resolve via syntax (not attribute forwarding) and work.
+    assert wrapped["air"].to_pandas() is not None  # df[col] selection
+    assert wrapped.__arrow_c_stream__() is not None  # zero-copy Arrow export
+
+
 # ---------------------------------------------------------------------------
 # Round-trip identity (parametrized over local + tutorial datasets)
 # ---------------------------------------------------------------------------
