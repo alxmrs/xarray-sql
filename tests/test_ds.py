@@ -113,11 +113,14 @@ def test_round_trip_identity(request, fixture_name):
 
     ctx = XarrayContext()
     ctx.from_dataset("t", source)
-    out = ctx.sql("SELECT * FROM t").to_dataset().compute()
+    out = ctx.sql("SELECT * FROM t ORDER BY lat DESC, lon").to_dataset().compute()
 
+    # The chunked path discovers coordinates ascending, so normalize both
+    # sides for the cross-fixture comparison (some sources, e.g. weather's
+    # level, are natively descending).
     sort_keys = list(out.dims)
-    actual = _clear_encoding(out.sortby(sort_keys))
-    expected = _clear_encoding(source.compute().sortby(sort_keys))
+    actual = _clear_encoding(out)
+    expected = _clear_encoding(source.compute())
     xr.testing.assert_identical(actual, expected)
 
 
@@ -126,18 +129,20 @@ def test_aggregation_drops_dim(air_dataset_small):
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
     out = ctx.sql(
-        "SELECT lat, lon, AVG(air) AS air_avg FROM air GROUP BY lat, lon"
+        """SELECT lat, lon, AVG(air) AS air_avg 
+           FROM air 
+           GROUP BY lat, lon 
+           ORDER BY lat DESC, lon"""
     ).to_dataset(dims=["lat", "lon"])
     assert set(out.dims) == {"lat", "lon"}
     assert "air_avg" in out.data_vars
     assert "air" not in out.data_vars
     expected = (
         air_dataset_small.compute()
-        .sortby(["lat", "lon"])
         .mean(dim="time")["air"]
         .values
     )
-    actual = out.sortby(["lat", "lon"])["air_avg"].values
+    actual = out["air_avg"].values
     np.testing.assert_allclose(actual, expected)
 
 
@@ -167,7 +172,12 @@ def test_barrier_query_scans_source_once(air_dataset_small):
     ctx._registered_datasets["air"] = air_dataset_small
 
     out = ctx.sql(
-        "SELECT lat, lon, AVG(air) AS air_avg FROM air GROUP BY lat, lon"
+        """
+        SELECT lat, lon, AVG(air) AS air_avg 
+        FROM air
+        GROUP BY lat, lon 
+        ORDER BY lat DESC, lon
+        """
     ).to_dataset(dims=["lat", "lon"])
     reads_after_construct = len(reads)
     out.compute()
@@ -195,12 +205,9 @@ def test_order_by_direction_sets_dim_order(air_dataset_small):
     lat = out["lat"].values
     assert (np.diff(lat) < 0).all(), f"expected descending lat, got {lat}"
 
-    # Values stay aligned to the descending coordinate (scatter handles order).
-    expected = (
-        air_dataset_small.compute().mean(dim=["time", "lon"])["air"].sortby(
-            "lat", ascending=False
-        )
-    )
+    # air's native latitude is already descending, matching ORDER BY lat
+    # DESC, so the result aligns with the source mean without re-sorting.
+    expected = air_dataset_small.compute().mean(dim=["time", "lon"])["air"]
     np.testing.assert_allclose(out["air_avg"].values, expected.values)
 
 
@@ -228,8 +235,7 @@ def test_chunks_argument_controls_partitioning(synthetic_dataset):
     assert not isinstance(eager[var].data, da.Array)
 
     xr.testing.assert_allclose(
-        inherited.compute().sortby(["time", "lat", "lon"]),
-        synthetic_dataset.compute().sortby(["time", "lat", "lon"]),
+        inherited.compute(), synthetic_dataset.compute()
     )
 
 
@@ -255,10 +261,7 @@ def test_chunks_auto_snaps_to_source_partitions():
     assert time_chunks[0] > 2  # genuinely coarsened
     assert len(time_chunks) < 12  # fewer chunks than source partitions
 
-    xr.testing.assert_allclose(
-        out.compute().sortby(["time", "x"]),
-        ds.compute().sortby(["time", "x"]),
-    )
+    xr.testing.assert_allclose(out.compute(), ds.compute())
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +277,12 @@ def test_to_dataset_infer_fails_when_no_template_fits(air_dataset_small):
         ValueError, match="dims cannot be inferred"
     ):
         ctx.sql(
-            "SELECT lat, lon, AVG(air) AS air_avg FROM air GROUP BY lat, lon"
+            """
+            SELECT lat, lon, AVG(air) AS air_avg 
+            FROM air 
+            GROUP BY lat, lon 
+            ORDER BY lat DESC, lon
+            """
         ).to_dataset()
 
 
@@ -333,7 +341,12 @@ def test_template_aggregation_alias_no_attrs(air_dataset_small):
     ctx = XarrayContext()
     ctx.from_dataset("air", ds)
     out = ctx.sql(
-        "SELECT lat, lon, AVG(air) AS air_avg FROM air GROUP BY lat, lon"
+        """
+        SELECT lat, lon, AVG(air) AS air_avg 
+        FROM air 
+        GROUP BY lat, lon 
+        ORDER BY lat DESC, lon
+        """
     ).to_dataset(dims=["lat", "lon"])
     assert "air_avg" in out.data_vars
     assert out["air_avg"].attrs == {}
@@ -357,23 +370,20 @@ def test_chunked_backend_indexing_matches_eager(air_dataset_small):
 
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
-    chunked = ctx.sql("SELECT * FROM air").to_dataset(chunks={"time": 4})
+    chunked = ctx.sql("SELECT * FROM air ORDER BY lat DESC, lon").to_dataset(chunks={"time": 4})
     assert isinstance(chunked["air"].data, da.Array)  # genuinely lazy/chunked
     # Compare lazy indexing against computing-then-indexing the SAME Dataset, so
     # both sides share one coordinate order (positional indexers stay aligned).
     eager = chunked.compute()
 
-    def s(da_):  # normalize coord order before comparing values
-        return da_.sortby(["lat", "lon"]).values
-
     # int indexer
     np.testing.assert_array_equal(
-        s(chunked["air"].isel(time=0)), s(eager["air"].isel(time=0))
+        chunked["air"].isel(time=0), eager["air"].isel(time=0)
     )
     # slice indexer
     np.testing.assert_array_equal(
-        s(chunked["air"].isel(time=slice(0, 3))),
-        s(eager["air"].isel(time=slice(0, 3))),
+        chunked["air"].isel(time=slice(0, 3)),
+        eager["air"].isel(time=slice(0, 3)),
     )
     # outer (fancy) array indexer
     np.testing.assert_array_equal(
