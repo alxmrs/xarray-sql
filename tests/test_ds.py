@@ -10,7 +10,7 @@ Covers the user-facing contract of ``ctx.sql(...).to_dataset(...)``:
   direction, and the ``chunks`` argument (eager / inherit / ``"auto"``).
 * ``dims`` inference and ``template`` resolution (name or Dataset), with error
   paths and metadata recovery.
-* Indexing the chunked backend, sparsity handling, and ``fill_value`` dtype.
+* Indexing the chunked backend and filtered-query coordinate handling.
 
 The tests favor the user-visible contract (values, dims, attrs) over the
 implementation path, so the suite stays useful as the backend evolves.
@@ -390,92 +390,17 @@ def test_chunked_backend_indexing_matches_eager(air_dataset_small):
 
 
 # ---------------------------------------------------------------------------
-# Sparsity handling and fill_value
+# Filtered queries
 # ---------------------------------------------------------------------------
 
 
-def test_sparsity_result_default_filters_lazy(air_dataset_small):
-    """Default sparsity='result' keeps only filtered coords (lazy path)."""
+def test_filtered_query_keeps_present_coords(air_dataset_small):
+    """A filtered query yields a Dataset whose coordinates are exactly the
+    values present in the result (a smaller grid than the source). Users who
+    want the full grid back reindex the result themselves."""
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
     threshold = float(air_dataset_small["lat"].values[5])
     out = ctx.sql(f"SELECT * FROM air WHERE lat > {threshold}").to_dataset()
     assert (out["lat"].values > threshold).all()
     assert out.sizes["lat"] < air_dataset_small.sizes["lat"]
-
-
-def test_sparsity_template_full_grid(air_dataset_small):
-    """sparsity='template' reindexes to the full grid with NaN fills."""
-    ctx = XarrayContext()
-    ctx.from_dataset("air", air_dataset_small)
-    threshold = float(air_dataset_small["lat"].values[5])
-    out = ctx.sql(f"SELECT * FROM air WHERE lat > {threshold}").to_dataset(
-        sparsity="template"
-    )
-    assert out.sizes["lat"] == air_dataset_small.sizes["lat"]
-    lat_vals = out["lat"].values
-    below_mask = lat_vals <= threshold
-    above_mask = lat_vals > threshold
-    below = out["air"].isel(lat=np.where(below_mask)[0])
-    above = out["air"].isel(lat=np.where(above_mask)[0])
-    assert np.isnan(below.values).all()
-    assert not np.isnan(above.values).any()
-
-
-def test_sparsity_template_requires_template(air_dataset_small):
-    """No resolvable template -> sparsity='template' raises."""
-    other = air_dataset_small.copy()
-    ctx = XarrayContext()
-    ctx.from_dataset("a", air_dataset_small)
-    ctx.from_dataset("b", other)
-    with pytest.raises(ValueError, match="requires template= to be supplied"):
-        ctx.sql("SELECT * FROM a").to_dataset(
-            dims=["time", "lat", "lon"],
-            sparsity="template",
-        )
-
-
-def test_sparsity_invalid_value_raises(air_dataset_small):
-    ctx = XarrayContext()
-    ctx.from_dataset("air", air_dataset_small)
-    with pytest.raises(ValueError, match="sparsity must be"):
-        ctx.sql("SELECT * FROM air").to_dataset(
-            dims=["time", "lat", "lon"],
-            sparsity="bogus",  # type: ignore[arg-type]
-        )
-
-
-def test_fill_value_int_upcasts_to_float():
-    """fill_value=NaN forces float upcast on int columns -- documented."""
-    ds = xr.Dataset(
-        {"v": (("lat", "lon"), np.arange(6, dtype=np.int64).reshape(3, 2))},
-        coords={"lat": [0, 1, 2], "lon": [10, 11]},
-    ).chunk({"lat": 3})
-    ctx = XarrayContext()
-    ctx.from_dataset("t", ds)
-    out = ctx.sql("SELECT * FROM t WHERE lat > 0").to_dataset(
-        sparsity="template"
-    )
-    assert np.issubdtype(out["v"].dtype, np.floating)
-    assert np.isnan(out["v"].sel(lat=0).values).all()
-
-
-def test_fill_value_custom_preserves_int(air_dataset_small):
-    """Passing a typed sentinel preserves the data var's int dtype."""
-    source = xr.Dataset(
-        {
-            "v": (
-                ("lat", "lon"),
-                np.arange(6, dtype=np.int64).reshape(3, 2) + 1,
-            ),
-        },
-        coords={"lat": [0, 1, 2], "lon": [10, 11]},
-    ).chunk({"lat": 3})
-    ctx = XarrayContext()
-    ctx.from_dataset("t", source)
-    out = ctx.sql("SELECT * FROM t WHERE lat > 0").to_dataset(
-        sparsity="template", fill_value=-1
-    )
-    assert np.issubdtype(out["v"].dtype, np.integer)
-    assert (out["v"].sel(lat=0).values == -1).all()
-    assert out["v"].sel(lat=2, lon=11).item() == 6
