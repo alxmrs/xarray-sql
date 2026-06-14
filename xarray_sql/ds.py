@@ -38,7 +38,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import xarray as xr
-from datafusion import col, literal
+from datafusion import DataFrame, col, literal
 
 Sparsity = Literal["result", "template"]
 """Output coordinate extent for a filtered round-trip.
@@ -620,13 +620,8 @@ def _result_to_xarray(
 # ---------------------------------------------------------------------------
 
 
-class XarrayDataFrame:
-    """Wrapper around a DataFusion ``DataFrame`` with xarray-aware helpers.
-
-    Returned by :meth:`xarray_sql.XarrayContext.sql`. Forwards every
-    attribute it does not define itself to the wrapped DataFrame, so
-    ``.collect()``, ``.schema()``, ``.show()``, ``.count()`` all work
-    unchanged.
+class XarrayDataFrame(DataFrame):
+    """A DataFusion ``DataFrame`` with xarray-aware helpers.
 
     Carries a private snapshot of the context's registered Datasets so
     :meth:`to_dataset` can default ``dims`` and recover metadata
@@ -653,12 +648,8 @@ class XarrayDataFrame:
                 recovery is possible from registrations alone; callers may
                 still pass ``template=`` to :meth:`to_dataset` explicitly.
         """
-        object.__setattr__(self, "_inner", inner)
-        object.__setattr__(self, "_templates", dict(templates or {}))
-
-    def to_pandas(self) -> pd.DataFrame:
-        """Materialize the result as a ``pd.DataFrame`` (DataFusion API)."""
-        return self._inner.to_pandas()
+        super().__init__(inner.df)
+        self._templates = dict(templates or {})
 
     def to_dataset(
         self,
@@ -724,7 +715,7 @@ class XarrayDataFrame:
             dims = self._infer_dimension_columns(preferred_template=template)
         resolved_chunks = self._resolve_chunks(chunks, template, dims)
         return _result_to_xarray(
-            inner_df=self._inner,
+            inner_df=self,
             dimension_columns=dims,
             template=template,
             sparsity=sparsity,
@@ -827,12 +818,5 @@ class XarrayDataFrame:
 
     def _result_columns(self) -> list[str]:
         """Return the result's column names without materializing rows."""
-        return [field.name for field in self._inner.schema()]
+        return [field.name for field in self.schema()]
 
-    def __getattr__(self, name: str) -> Any:
-        # Runs only when ``name`` is not found via normal lookup, so this
-        # safely forwards anything we have not overridden.
-        return getattr(self._inner, name)
-
-    def __repr__(self) -> str:
-        return repr(self._inner)
