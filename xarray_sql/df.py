@@ -26,6 +26,34 @@ def _get_chunk_slicer(
     return slice(None)
 
 
+def _chunk_tuples(
+    sizes: Mapping[Hashable, int], spec: dict[str, int]
+) -> dict[Hashable, tuple[int, ...]]:
+    """Per-dimension chunk-size tuples for ``spec`` over ``sizes``.
+
+    The dask-free equivalent of ``Dataset.chunk(spec).chunks``, computed
+    arithmetically. A dimension absent from ``spec`` (or whose requested size is
+    non-positive or at least its length) becomes a single full-length chunk;
+    otherwise it splits into ``size``-length chunks with a short final chunk for
+    any remainder.
+
+    Why not just call ``.chunk()``: that constructs a transient dask graph (one
+    task per chunk, per variable) purely to read these tuples back -- the
+    dominant cost when registering a finely chunked store (e.g. ERA5 at
+    ``time=1`` over a full year is ~8.8k chunks/var; over the whole archive,
+    hundreds of thousands). This keeps the forward path dask-free.
+    """
+    out: dict[Hashable, tuple[int, ...]] = {}
+    for dim, length in sizes.items():
+        size = spec.get(str(dim))
+        if size is None or size <= 0 or size >= length:
+            out[dim] = (length,)
+        else:
+            n_full, rem = divmod(length, size)
+            out[dim] = (size,) * n_full + ((rem,) if rem else ())
+    return out
+
+
 # Adapted from Xarray `map_blocks` implementation.
 def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> Iterator[Block]:
     """Compute block slices for a chunked Dataset."""
@@ -35,9 +63,9 @@ def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> Iterator[Block]:
         # contain every dimension named in the chunks spec.
         chunks = {dim: size for dim, size in chunks.items() if dim in ds.sizes}
     if chunks:
-        for_chunking = ds.copy(data=None, deep=False).chunk(chunks)
-        chunks = for_chunking.chunks
-        del for_chunking
+        # Arithmetic, dask-free. A dask-backed input is not required, and no
+        # transient dask graph is built just to recover chunk boundaries.
+        chunks = _chunk_tuples(ds.sizes, chunks)
     else:
         chunks = ds.chunks
 

@@ -90,6 +90,27 @@ def test_block_slices_dimensional_unchunked_raises():
         list(block_slices(ds))
 
 
+def test_block_slices_dask_free_on_eager_dataset():
+    # The chunk spec alone partitions an eager (non-dask) Dataset -- no dask
+    # backing required and no transient dask graph built -- tiling each
+    # dimension exactly, with a short final chunk for an uneven split.
+    ds = xr.Dataset(
+        {"v": (("time", "x"), np.arange(10 * 3).reshape(10, 3))},
+        coords={"time": np.arange(10), "x": np.arange(3)},
+    )
+    assert not ds.chunks  # genuinely not dask-backed
+
+    blocks = list(block_slices(ds, chunks={"time": 4}))
+    # 10 / 4 -> partitions of length (4, 4, 2).
+    assert [(b["time"].start, b["time"].stop) for b in blocks] == [
+        (0, 4),
+        (4, 8),
+        (8, 10),
+    ]
+    # The unchunked dimension spans its full extent in every block.
+    assert all(b["x"] == slice(0, 3) for b in blocks)
+
+
 def test_from_map_basic():
     def make_df(x):
         return pd.DataFrame({"value": [x, x * 2], "index": [0, 1]})
