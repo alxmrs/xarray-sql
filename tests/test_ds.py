@@ -177,6 +177,60 @@ def test_barrier_query_scans_source_once(air_dataset_small):
     assert reads_after_compute == reads_after_construct
 
 
+def test_order_by_direction_sets_dim_order(air_dataset_small):
+    """A barrier query's ORDER BY direction carries through to the Dataset
+    dimension order, rather than being force-sorted ascending.
+
+    ``ORDER BY lat DESC`` must yield a strictly descending ``lat`` dimension,
+    with data still correctly aligned to those (descending) coordinates.
+    """
+    ctx = XarrayContext()
+    ctx.from_dataset("air", air_dataset_small)
+    out = ctx.sql(
+        "SELECT lat, AVG(air) AS air_avg FROM air GROUP BY lat ORDER BY lat DESC"
+    ).to_dataset(dimension_columns=["lat"])
+
+    lat = out["lat"].values
+    assert (np.diff(lat) < 0).all(), f"expected descending lat, got {lat}"
+
+    # Values stay aligned to the descending coordinate (scatter handles order).
+    expected = (
+        air_dataset_small.compute().mean(dim=["time", "lon"])["air"].sortby(
+            "lat", ascending=False
+        )
+    )
+    np.testing.assert_allclose(out["air_avg"].values, expected.values)
+
+
+def test_chunks_argument_controls_partitioning(synthetic_dataset):
+    """``chunks`` controls eager-vs-chunked and inherits the source grid.
+
+    The default ``"inherit"`` reuses the source's genuinely multi-chunk
+    dimensions, so the output chunk grid maps onto the source partitions;
+    ``chunks=None`` forces an eager, in-memory result. Both reproduce the source.
+    """
+    import dask.array as da
+
+    ctx = XarrayContext()
+    ctx.from_dataset("t", synthetic_dataset)
+    var = next(iter(synthetic_dataset.data_vars))
+
+    inherited = ctx.sql("SELECT * FROM t").to_dataset()
+    assert isinstance(inherited[var].data, da.Array)
+    # Output time chunks align to the source's time partitions.
+    assert (
+        inherited.chunksizes["time"] == synthetic_dataset.chunksizes["time"]
+    )
+
+    eager = ctx.sql("SELECT * FROM t").to_dataset(chunks=None)
+    assert not isinstance(eager[var].data, da.Array)
+
+    xr.testing.assert_allclose(
+        inherited.compute().sortby(["time", "lat", "lon"]),
+        synthetic_dataset.compute().sortby(["time", "lat", "lon"]),
+    )
+
+
 # ---------------------------------------------------------------------------
 # dimension_columns / template resolution rules
 # ---------------------------------------------------------------------------

@@ -6,22 +6,24 @@ wrapper around the DataFusion ``DataFrame`` returned by
 :meth:`XarrayContext.sql`, with a :meth:`XarrayDataFrame.to_dataset`
 method that round-trips a query result back to ``xr.Dataset``.
 
-Reconstruction dispatches on the SQL result's physical-plan shape
-(:func:`_classify_plan`):
+Reconstruction is controlled by the ``chunks`` argument to
+:meth:`XarrayDataFrame.to_dataset` -- the xarray idiom for tuning how a
+result is partitioned -- rather than by reflecting on the query plan:
 
-* **Partition-preserving scans** (``SELECT cols FROM t WHERE <dim
-  predicate>``) stay lazy: data variables are backed by
-  :class:`SQLBackendArray` wrapped in
-  ``xarray.core.indexing.LazilyIndexedArray``. xarray indexing
-  operations (``isel``, ``sel``, slicing) translate to DataFusion
-  ``filter`` expressions and consume the filtered DataFrame via
-  ``execute_stream``, so only the requested data is materialized as
-  Arrow ``RecordBatch`` es and scattered into numpy.
-* **Partition-collapsing barriers** (aggregations, sorts, joins) execute
-  the plan exactly once and materialize a dense Dataset. Re-executing
-  such a plan per coordinate and per variable -- as the lazy path would
-  -- re-runs the whole upstream scan each time, so a single streamed pass
-  is both faster and correct.
+* **Eager** (``chunks=None``, or the default ``"inherit"`` when the
+  result keeps no multi-chunk source dimension): the plan executes
+  exactly once via ``execute_stream`` and the result is scattered into a
+  dense in-memory Dataset. This is the right default for reductions
+  (aggregations), whose results are small, and it never re-executes.
+* **Lazy / chunked** (``chunks`` is a mapping, ``"auto"``, or
+  ``"inherit"`` over a multi-chunk source dimension): data variables are
+  backed by :class:`SQLBackendArray` wrapped in
+  ``xarray.core.indexing.LazilyIndexedArray`` and chunked via xarray's
+  configured chunk manager (dask, cubed, ...). Each chunk maps onto the
+  source partitions and reads its coordinate range on access by
+  translating the indexer into a DataFusion ``filter`` expression, so only
+  the requested partitions are materialized as Arrow ``RecordBatch`` es
+  and scattered into numpy.
 
 ``.compute()`` materializes the whole Dataset in memory.
 """
@@ -29,6 +31,7 @@ Reconstruction dispatches on the SQL result's physical-plan shape
 from __future__ import annotations
 
 import warnings
+from collections.abc import Mapping
 from typing import Any, Literal, cast
 
 import numpy as np
@@ -245,7 +248,7 @@ class SQLBackendArray(xr.backends.BackendArray):
             symptom of a filtered query whose coord discovery missed a
             value.
 
-    Constructed by :func:`_lazy_to_xarray`; users should not instantiate
+    Constructed by :func:`_build_lazy_scan`; users should not instantiate
     this class directly.
     """
 
@@ -373,69 +376,20 @@ class SQLBackendArray(xr.backends.BackendArray):
         )
 
 
-# Physical-plan operator names that preserve the source partitioning, so each
-# output partition maps to exactly one source partition (xarray chunk) and
-# indexer filters push down to partition pruning. The Rust xarray table
-# provider surfaces as ``CooperativeExec`` / ``FFI_ExecutionPlan``; in-memory
-# tables surface as ``DataSourceExec``. Anything else (aggregate, sort, join,
-# hash-repartition, window) reshuffles or collapses partitions.
-_PARTITION_PRESERVING_OPS = frozenset(
-    {
-        "DataSourceExec",
-        "FFI_ExecutionPlan",
-        "CooperativeExec",
-        "ProjectionExec",
-        "FilterExec",
-        "CoalesceBatchesExec",
-    }
-)
-
-
-def _classify_plan(inner_df: Any) -> Literal["scan", "barrier"]:
-    """Classify a DataFusion plan as a ``"scan"`` or a ``"barrier"``.
-
-    A ``"scan"`` (e.g. ``SELECT cols FROM t WHERE <dim predicate>``) preserves
-    the source partitioning, so lazy per-partition reads push filters down to
-    partition pruning and stay cheap -- the lazy :class:`SQLBackendArray` path
-    is the right tool. A ``"barrier"`` (aggregation, sort, join) must execute
-    the whole plan to produce any row, so the lazy path's per-coordinate and
-    per-variable re-execution would re-run the entire upstream scan each time;
-    such plans are materialized once instead (see :func:`_materialize_barrier`).
-
-    Conservative by construction: returns ``"scan"`` only when *every* node is
-    known to preserve partitioning; any unrecognized operator yields
-    ``"barrier"`` (execute-once), which is never incorrect, only less lazy.
-    """
-    try:
-        plan = inner_df.execution_plan()
-    except Exception:
-        return "barrier"
-    stack = [plan]
-    while stack:
-        node = stack.pop()
-        display = node.display() or ""
-        op = display.split(":", 1)[0].strip()
-        if op not in _PARTITION_PRESERVING_OPS:
-            return "barrier"
-        stack.extend(node.children())
-    return "scan"
-
-
-def _materialize_barrier(
+def _materialize(
     inner_df: Any,
     dimension_columns: list[str],
     field_names: list[str],
     field_types: dict[str, Any],
 ) -> xr.Dataset:
-    """Execute a barrier plan once and build a dense in-memory Dataset.
+    """Execute the query once and build a dense in-memory Dataset.
 
-    Barrier plans (aggregations, sorts, joins) collapse the source partitioning,
-    so the whole plan must run to produce any output. We run it exactly once via
-    ``execute_stream()`` -- streaming the result as Arrow ``RecordBatch`` es
-    (``datafusion.RecordBatch.to_pyarrow()``) -- then derive both the
-    coordinates and every data variable from that single pass. No per-coordinate
-    or per-variable re-execution, so an aggregation over a remote Zarr scan
-    costs one scan instead of one-per-dim plus one-per-variable.
+    Runs the plan exactly once via ``execute_stream()`` -- streaming the result
+    as Arrow ``RecordBatch`` es (``datafusion.RecordBatch.to_pyarrow()``) -- then
+    derives both the coordinates and every data variable from that single pass.
+    This is the eager path, used when no output chunking is requested. It never
+    re-executes, so an aggregation over a remote Zarr scan costs exactly one
+    scan, regardless of how many dimensions or variables the result has.
     """
     batches = [b.to_pyarrow() for b in inner_df.execute_stream()]
 
@@ -450,9 +404,12 @@ def _materialize_barrier(
                 for b in batches
             ]
         )
-        # np.unique returns sorted, de-duplicated values -- the same ascending
-        # coordinate order the lazy scan path produces via SQL ``.sort()``.
-        coord_arrays[d] = np.unique(vals)
+        # Preserve the order coordinate values first appear in the result so an
+        # ORDER BY direction (e.g. ``ORDER BY level DESC``) carries through to
+        # the Dataset dimension instead of being force-sorted ascending.
+        # pd.unique keeps first-appearance order; the scatter below argsorts
+        # internally, so arbitrarily-ordered coordinates are placed correctly.
+        coord_arrays[d] = np.asarray(pd.unique(vals))
     shape = tuple(len(coord_arrays[d]) for d in dimension_columns)
 
     data_vars: dict[str, xr.Variable] = {}
@@ -483,12 +440,12 @@ def _build_lazy_scan(
 ) -> xr.Dataset:
     """Build a lazy Dataset whose data vars are :class:`SQLBackendArray`.
 
-    For partition-preserving (``"scan"``) plans only. Coord arrays are
-    discovered per-dim via ``inner_df.select(col(d)).distinct().sort(...)
-    .execute_stream()``; the table provider projects to that single coordinate
-    column and skips data variables, so each discovery reads coordinate values
-    only (no remote data-variable I/O). Data variables stay lazy: indexer
-    filters push down to partition pruning on first access.
+    Used when output chunking is requested: each data variable stays lazy and,
+    once wrapped by ``Dataset.chunk``, every chunk reads its coordinate range via
+    a pushdown filter on first access. Coordinates are discovered per dim via
+    ``inner_df.select(col(d)).distinct().sort(...).execute_stream()``; the table
+    provider projects to that single coordinate column and skips data variables,
+    so discovery reads coordinate values only (no data-variable I/O).
     """
     coord_arrays: dict[str, np.ndarray] = {}
     for d in dimension_columns:
@@ -524,21 +481,28 @@ def _build_lazy_scan(
     return xr.Dataset(data_vars=data_vars, coords=coords_arg)
 
 
-def _lazy_to_xarray(
+def _result_to_xarray(
     inner_df: Any,
     dimension_columns: list[str],
     template: xr.Dataset | None,
     sparsity: Sparsity,
     fill_value: Any,
+    chunks: Mapping[str, int] | str | None,
 ) -> xr.Dataset:
-    """Reconstruct an ``xr.Dataset`` from a SQL result, lazily where possible.
+    """Reconstruct an ``xr.Dataset`` from a SQL result.
 
-    Dispatches on the plan shape (:func:`_classify_plan`): partition-preserving
-    ``"scan"`` plans keep the lazy :class:`SQLBackendArray` path
-    (:func:`_build_lazy_scan`); partition-collapsing ``"barrier"`` plans
-    (aggregations, sorts, joins) execute once and materialize
-    (:func:`_materialize_barrier`), since re-executing them per coordinate and
-    per variable would re-run the whole upstream scan repeatedly.
+    ``chunks`` (already resolved by :meth:`XarrayDataFrame._resolve_chunks`)
+    selects the execution strategy:
+
+    * ``None`` -> eager: execute once and materialize a dense Dataset
+      (:func:`_materialize`). Correct for any query and the right default for
+      reductions, whose results are small.
+    * a mapping (or ``"auto"``) -> lazy/chunked: build :class:`SQLBackendArray`
+      data variables (:func:`_build_lazy_scan`) and wrap them with
+      ``Dataset.chunk`` so each chunk reads its coordinate range via filter
+      pushdown. The chunk grid maps onto the source partitions. Chunking goes
+      through xarray's configured chunk manager (dask, cubed, ...), so no
+      chunked-array backend is imported directly here.
     """
     if sparsity not in ("result", "template"):
         raise ValueError(
@@ -553,8 +517,8 @@ def _lazy_to_xarray(
     field_names = [f.name for f in schema]
     field_types = {f.name: f.type for f in schema}
 
-    if _classify_plan(inner_df) == "barrier":
-        ds = _materialize_barrier(
+    if chunks is None:
+        ds = _materialize(
             inner_df, dimension_columns, field_names, field_types
         )
     else:
@@ -574,6 +538,11 @@ def _lazy_to_xarray(
 
     if template is not None:
         ds = _apply_template(ds, template)
+
+    if chunks is not None:
+        # Wrap the lazy data variables in the configured chunk manager (dask by
+        # default). Each chunk reads its coordinate range via pushdown on access.
+        ds = ds.chunk(chunks)
     return ds
 
 
@@ -629,6 +598,7 @@ class XarrayDataFrame:
         template_table: str | None = None,
         sparsity: Sparsity = "result",
         fill_value: Any = np.nan,
+        chunks: Mapping[str, int] | str | None = "inherit",
     ) -> xr.Dataset:
         """Convert the result to an ``xr.Dataset``.
 
@@ -648,6 +618,21 @@ class XarrayDataFrame:
                 ``fill_value``; requires a template.
             fill_value: Used when ``sparsity="template"`` reindexes
                 to a wider extent. Defaults to ``np.nan``.
+            chunks: Output chunking, controlling laziness (an xarray idiom).
+
+                * ``"inherit"`` (default): reuse the source Dataset's chunk
+                  sizes, but only for dimensions that were genuinely split into
+                  multiple chunks in the input -- so the output chunk grid maps
+                  onto the source partitions. A reduction that drops the chunked
+                  dimension (e.g. a global aggregation) inherits nothing and so
+                  is materialized eagerly. Falls back to eager when no source
+                  Dataset is resolvable.
+                * ``None``: eager. Execute the query once and return a dense
+                  in-memory Dataset. Best for reductions (small results).
+                * a mapping (e.g. ``{"time": 100}``) or ``"auto"``: chunk
+                  explicitly. Each chunk reads its coordinate range lazily via
+                  filter pushdown on access, through xarray's configured chunk
+                  manager (dask, cubed, ...).
 
         Returns:
             An ``xr.Dataset`` with ``dimension_columns`` as dimensions and the
@@ -669,21 +654,50 @@ class XarrayDataFrame:
             dimension_columns = self._infer_dimension_columns(
                 preferred_template=template
             )
-        # Dispatch on plan shape: partition-preserving scans stay lazy with
-        # filter pushdown; partition-collapsing barriers (aggregations, sorts,
-        # joins) execute once and materialize, since re-executing them per
-        # coordinate and per variable would re-run the whole upstream scan.
-        return _lazy_to_xarray(
+        resolved_chunks = self._resolve_chunks(
+            chunks, template, dimension_columns
+        )
+        return _result_to_xarray(
             inner_df=self._inner,
             dimension_columns=dimension_columns,
             template=template,
             sparsity=sparsity,
             fill_value=fill_value,
+            chunks=resolved_chunks,
         )
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_chunks(
+        chunks: Mapping[str, int] | str | None,
+        template: xr.Dataset | None,
+        dimension_columns: list[str],
+    ) -> Mapping[str, int] | str | None:
+        """Resolve the ``chunks`` argument to a concrete spec or ``None``.
+
+        ``None`` selects the eager path; anything else selects the lazy/chunked
+        path. ``"inherit"`` reuses the source Dataset's chunk sizes -- but only
+        for dimensions actually split into more than one chunk in the input
+        (a single full chunk is not "chunked"), so reductions that drop the
+        chunked dimension resolve to ``None`` (eager) automatically. Mappings
+        and ``"auto"`` pass through to ``Dataset.chunk`` unchanged.
+        """
+        if chunks is None:
+            return None
+        if chunks == "inherit":
+            if template is None:
+                return None
+            sizes = template.chunksizes  # dim -> tuple of chunk lengths
+            inherited = {
+                d: sizes[d][0]
+                for d in dimension_columns
+                if d in sizes and len(sizes[d]) > 1
+            }
+            return inherited or None
+        return chunks
 
     def _resolve_template(
         self, template_table: str | None
