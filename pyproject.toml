@@ -30,7 +30,6 @@ classifiers = [
   "Topic :: Database :: Front-Ends",
 ]
 dependencies = [
-    "dask>=2024.8.0",
     "datafusion==52.0.0", # This needs to match the cargo datafusion version!!
     "xarray>=2024.7.0",
 ]
@@ -41,6 +40,7 @@ test = [
   "pytest",
   "xarray[io]",
   "gcsfs",
+  "dask",
 ]
 docs = [
     "zensical",
