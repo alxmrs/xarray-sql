@@ -81,13 +81,13 @@ result = ctx.sql('''
 # | 775   | -2.3064649711534457  |
 # +-------+----------------------+
 
-agg_ds = result.to_dataset(dimension_columns=["level"])
+avg_temp_ds = result.to_dataset(dimension_columns=["level"])
 # <xarray.Dataset> Size: 592B
 # Dimensions:  (level: 37)
 # Coordinates:
-#   * level    (level) int64 296B 1 2 3 5 7 10 20 ... 850 875 900 925 950 975 1000
+#   * level    (level) int64 296B 1000 975 950 925 900 875 850 ... 20 10 7 5 3 2 1
 # Data variables:
-#     avg_c    (level) float64 296B ...
+#     avg_c    (level) float64 296B 6.621 5.186 4.028 ... -21.51 -13.36 -9.021
 ```
 
 _(A runnable version of this example lives at
