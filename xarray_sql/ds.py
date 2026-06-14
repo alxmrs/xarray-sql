@@ -32,22 +32,13 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Mapping
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import xarray as xr
 from datafusion import DataFrame, col, literal
-
-Sparsity = Literal["result", "template"]
-"""Output coordinate extent for a filtered round-trip.
-
-* ``"result"`` keeps only the dim values present in the query result, so
-  the output is sparse and equal to whatever rows came back.
-* ``"template"`` reindexes to the registered Dataset's full coord ranges
-  and fills absent cells with ``fill_value``.
-"""
 
 
 # ---------------------------------------------------------------------------
@@ -547,8 +538,6 @@ def _to_dataset(
     inner_df: "XarrayDataFrame",
     dims: list[str],
     template: xr.Dataset | None,
-    sparsity: Sparsity,
-    fill_value: Any,
     chunks: Mapping[str, int] | str | None,
 ) -> xr.Dataset:
     """Reconstruct an ``xr.Dataset`` from a SQL result.
@@ -568,15 +557,6 @@ def _to_dataset(
     """
     chunks = _resolve_chunks(chunks, template, dims)
 
-    if sparsity not in ("result", "template"):
-        raise ValueError(
-            f"sparsity must be 'result' or 'template', got {sparsity!r}"
-        )
-    if sparsity == "template" and template is None:
-        raise ValueError(
-            "sparsity='template' requires template= to be supplied"
-        )
-
     schema = inner_df.schema()
     field_names = [f.name for f in schema]
     field_types = {f.name: f.type for f in schema}
@@ -589,16 +569,6 @@ def _to_dataset(
         ds = _build_lazy_scan(
             inner_df, dims, field_names, field_types
         )
-
-    if sparsity == "template":
-        assert template is not None
-        indexers = {
-            d: template.coords[d].values
-            for d in dims
-            if d in template.coords and d in template.dims
-        }
-        if indexers:
-            ds = ds.reindex(indexers, fill_value=fill_value)
 
     if template is not None:
         ds = _apply_template(ds, template)
@@ -687,8 +657,6 @@ class XarrayDataFrame(DataFrame):
         self,
         dims: list[str] | None = None,
         template: xr.Dataset | str | None = None,
-        sparsity: Sparsity = "result",
-        fill_value: Any = np.nan,
         chunks: Mapping[str, int] | str | None = "inherit",
     ) -> xr.Dataset:
         """Convert the result to an ``xr.Dataset``.
@@ -704,12 +672,6 @@ class XarrayDataFrame(DataFrame):
                 used directly, or the name of a registered table (e.g.
                 ``"era5.surface"``) whose Dataset is looked up. When ``None``
                 and exactly one Dataset is registered, that one is used.
-            sparsity: ``"result"`` (default) keeps only dim values
-                present in the result. ``"template"`` reindexes to the
-                template's full coord ranges, filling absent cells with
-                ``fill_value``; requires a template.
-            fill_value: Used when ``sparsity="template"`` reindexes
-                to a wider extent. Defaults to ``np.nan``.
             chunks: Output chunking, controlling laziness (an xarray idiom).
 
                 * ``"inherit"`` (default): reuse the source Dataset's chunk
@@ -737,10 +699,8 @@ class XarrayDataFrame(DataFrame):
 
         Raises:
             ValueError: ``dims`` cannot be inferred, names a missing
-                column, or the result has duplicate dim tuples;
-                ``template`` names an unknown registered table; or
-                ``sparsity="template"`` is requested without a
-                resolvable template.
+                column, or the result has duplicate dim tuples; or
+                ``template`` names an unknown registered table.
         """
         template = self._resolve_template(template)
         dims = dims or self._infer_dims(preferred_template=template)
@@ -748,8 +708,6 @@ class XarrayDataFrame(DataFrame):
             inner_df=self,
             dims=dims,
             template=template,
-            sparsity=sparsity,
-            fill_value=fill_value,
             chunks=chunks,
         )
 
