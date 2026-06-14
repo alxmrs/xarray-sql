@@ -96,59 +96,6 @@ _(A runnable version of this example lives at
 Succinctly, we "pivot" Xarray Datasets to treat them like tables so we can run
 SQL queries against them. 
 
-## Round-tripping back to Xarray
-
-`ctx.sql(...)` returns an `XarrayDataFrame` that exposes `.to_pandas()`
-(unchanged) and a new `.to_dataset()` for converting the result back into
-an `xr.Dataset`. The reverse path is **lazy by default**: the returned
-Dataset is backed by an `xarray.backends.BackendArray` that translates
-xarray indexers into DataFusion `filter` expressions and consumes the
-filtered DataFrame via `execute_stream`. Arrow `RecordBatch` es scatter
-directly into a preallocated numpy buffer with no pandas hop, so only
-the region actually accessed is materialized.
-
-```python
-out = ctx.sql('SELECT * FROM "air"').to_dataset()
-# <xarray.Dataset>
-# Dimensions:  (time: 2920, lat: 25, lon: 53)
-# Coordinates:
-#   * time     (time) datetime64[ns] ...
-#   * lat      (lat) float32 ...
-#   * lon      (lon) float32 ...
-# Data variables:
-#     air      (time, lat, lon) float32 ...
-
-# Slicing pushes down into DataFusion; only the requested region is
-# materialized.
-region = out["air"].isel(time=0).values
-
-# For full eager materialization, call .compute().
-eager = out.compute()
-```
-
-`dims` defaults to the dims of the single registered Dataset
-on the context (or the one named via `template_table=` when several are
-registered). Variable attrs, dataset attrs, non-dimension coordinates,
-and dim-coordinate dtype are recovered from the registered Dataset
-automatically.
-
-For filtered queries that return only part of the original extent, pass
-`sparsity="template"` to reindex back to the full grid with NaN
-fills:
-
-```python
-out = ctx.sql(
-    'SELECT * FROM "air" WHERE lat > 50'
-).to_dataset(sparsity="template")
-# Full lat range restored; cells with lat <= 50 are NaN.
-```
-
-Aggregation queries (e.g. `AVG(air) AS air_avg ... GROUP BY lat, lon`)
-materialize once because their output does not align with the source dim
-structure; the aggregation path is also Arrow-native (no pandas
-intermediates). Pass `dims=[...]` explicitly when an
-aggregation drops a dim.
-
 ## Why build this?
 
 A few reasons:
