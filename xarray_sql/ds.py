@@ -719,9 +719,7 @@ class XarrayDataFrame:
                 ``sparsity="template"`` is requested without a
                 resolvable template.
         """
-        if not isinstance(template, xr.Dataset):
-            # ``template`` is a registered-table name or None; look it up.
-            template = self._resolve_template(template)
+        template = self._resolve_template(template)
         if dims is None:
             dims = self._infer_dimension_columns(preferred_template=template)
         resolved_chunks = self._resolve_chunks(chunks, template, dims)
@@ -768,24 +766,24 @@ class XarrayDataFrame:
             return inherited or None
         return chunks
 
-    def _resolve_template(self, name: str | None) -> xr.Dataset | None:
-        """Pick a template Dataset for metadata recovery by registered name.
+    def _resolve_template(self, candidate: xr.Dataset | str | None) -> xr.Dataset | None:
+        """Pick a template Dataset for metadata recovery (e.g. by registered name)."""
+        if isinstance(candidate, xr.Dataset):
+            return candidate
 
-        Priority:
-          1. The named registered table (``name``).
-          2. If exactly one Dataset is registered on the context, use it.
-          3. None.
-        """
+        # ``template`` is a registered-table name or None; look it up.
         templates = self._templates
-        if name is not None:
-            if name not in templates:
+        if candidate is not None:
+            if candidate not in templates:
                 raise ValueError(
-                    f"template={name!r} is not a registered table on this "
+                    f"template={candidate!r} is not a registered table on this "
                     f"context. Registered: {list(templates)}"
                 )
-            return templates[name]
+            return templates[candidate]
+
         if len(templates) == 1:
             return next(iter(templates.values()))
+
         return None
 
     def _infer_dimension_columns(
