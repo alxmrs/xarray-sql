@@ -7,7 +7,7 @@ Covers the user-facing contract of ``ctx.sql(...).to_dataset(...)``:
 * Round-trip identity across varied source Datasets (one parametrized
   ``assert_identical`` test, not eight per-aspect checks).
 * Aggregation, ``dimension_columns`` inference, and the template /
-  ``template_table`` resolution rules with their error paths.
+  ``template`` resolution rules (name or Dataset) with their error paths.
 * Sparsity handling and ``fill_value`` dtype behavior.
 * The vectorized-indexer fallback through xarray's adapter.
 
@@ -267,12 +267,12 @@ def test_chunks_auto_snaps_to_source_partitions():
 def test_to_dataset_multi_registered_requires_explicit_template(
     air_dataset_small,
 ):
-    """With more than one registered Dataset, the caller must
-    disambiguate via ``template_table=``."""
+    """With more than one registered Dataset, the caller disambiguates by
+    passing a registered table name as ``template=``."""
     ctx = XarrayContext()
     ctx.from_dataset("air1", air_dataset_small)
     ctx.from_dataset("air2", air_dataset_small)
-    out = ctx.sql("SELECT * FROM air1").to_dataset(template_table="air1")
+    out = ctx.sql("SELECT * FROM air1").to_dataset(template="air1")
     assert set(out.dims) == {"time", "lat", "lon"}
 
 
@@ -288,36 +288,31 @@ def test_to_dataset_infer_fails_when_no_template_fits(air_dataset_small):
         ).to_dataset()
 
 
-def test_template_table_explicit_override(air_dataset_small):
-    """``template_table=`` picks a registered Dataset deterministically."""
+def test_template_accepts_name_or_dataset(air_dataset_small):
+    """``template=`` accepts either a registered table name or a Dataset
+    object, with equivalent metadata recovery."""
     other = air_dataset_small.copy()
     other.attrs = {"flag": "other"}
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
     ctx.from_dataset("other", other)
-    out = ctx.sql("SELECT * FROM air").to_dataset(
-        dims=["time", "lat", "lon"], template_table="other"
+
+    by_name = ctx.sql("SELECT * FROM air").to_dataset(
+        dims=["time", "lat", "lon"], template="other"
     )
-    assert out.attrs == {"flag": "other"}
+    by_object = ctx.sql("SELECT * FROM air").to_dataset(
+        dims=["time", "lat", "lon"], template=other
+    )
+    assert by_name.attrs == {"flag": "other"}
+    assert by_object.attrs == {"flag": "other"}
 
 
-def test_template_table_unknown_raises(air_dataset_small):
+def test_template_unknown_name_raises(air_dataset_small):
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
     with pytest.raises(ValueError, match="not a registered table"):
         ctx.sql("SELECT * FROM air").to_dataset(
-            dims=["time", "lat", "lon"], template_table="missing"
-        )
-
-
-def test_template_and_template_table_mutually_exclusive(air_dataset_small):
-    ctx = XarrayContext()
-    ctx.from_dataset("air", air_dataset_small)
-    with pytest.raises(ValueError, match="Pass at most one"):
-        ctx.sql("SELECT * FROM air").to_dataset(
-            dims=["time", "lat", "lon"],
-            template=air_dataset_small,
-            template_table="air",
+            dims=["time", "lat", "lon"], template="missing"
         )
 
 

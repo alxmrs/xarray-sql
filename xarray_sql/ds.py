@@ -663,8 +663,7 @@ class XarrayDataFrame:
     def to_dataset(
         self,
         dims: list[str] | None = None,
-        template: xr.Dataset | None = None,
-        template_table: str | None = None,
+        template: xr.Dataset | str | None = None,
         sparsity: Sparsity = "result",
         fill_value: Any = np.nan,
         chunks: Mapping[str, int] | str | None = "inherit",
@@ -677,10 +676,11 @@ class XarrayDataFrame:
                 referenced by the SQL ``FROM`` clause (if exactly one
                 matches), or any single registered Dataset whose dims are
                 all present in the result columns.
-            template: Source ``xr.Dataset`` to recover metadata from.
-                Overrides any auto-resolved template.
-            template_table: Name of a registered table to use as the
-                template. Mutually exclusive with ``template``.
+            template: Source to recover metadata (attrs, encoding, non-dim
+                coordinates, dim-coord dtype) from. Either an ``xr.Dataset``
+                used directly, or the name of a registered table (e.g.
+                ``"era5.surface"``) whose Dataset is looked up. When ``None``
+                and exactly one Dataset is registered, that one is used.
             sparsity: ``"result"`` (default) keeps only dim values
                 present in the result. ``"template"`` reindexes to the
                 template's full coord ranges, filling absent cells with
@@ -715,15 +715,13 @@ class XarrayDataFrame:
         Raises:
             ValueError: ``dims`` cannot be inferred, names a missing
                 column, or the result has duplicate dim tuples;
-                ``template_table`` is unknown; both ``template`` and
-                ``template_table`` are passed; or
+                ``template`` names an unknown registered table; or
                 ``sparsity="template"`` is requested without a
                 resolvable template.
         """
-        if template is not None and template_table is not None:
-            raise ValueError("Pass at most one of template= or template_table=")
-        if template is None:
-            template = self._resolve_template(template_table)
+        if not isinstance(template, xr.Dataset):
+            # ``template`` is a registered-table name or None; look it up.
+            template = self._resolve_template(template)
         if dims is None:
             dims = self._infer_dimension_columns(preferred_template=template)
         resolved_chunks = self._resolve_chunks(chunks, template, dims)
@@ -770,25 +768,22 @@ class XarrayDataFrame:
             return inherited or None
         return chunks
 
-    def _resolve_template(
-        self, template_table: str | None
-    ) -> xr.Dataset | None:
-        """Pick a template Dataset for metadata recovery.
+    def _resolve_template(self, name: str | None) -> xr.Dataset | None:
+        """Pick a template Dataset for metadata recovery by registered name.
 
         Priority:
-          1. Explicit ``template_table`` argument.
+          1. The named registered table (``name``).
           2. If exactly one Dataset is registered on the context, use it.
           3. None.
         """
         templates = self._templates
-        if template_table is not None:
-            if template_table not in templates:
+        if name is not None:
+            if name not in templates:
                 raise ValueError(
-                    f"template_table={template_table!r} is not a "
-                    "registered table on this context. Registered: "
-                    f"{list(templates)}"
+                    f"template={name!r} is not a registered table on this "
+                    f"context. Registered: {list(templates)}"
                 )
-            return templates[template_table]
+            return templates[name]
         if len(templates) == 1:
             return next(iter(templates.values()))
         return None
