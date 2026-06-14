@@ -37,11 +37,9 @@ def _chunk_tuples(
     otherwise it splits into ``size``-length chunks with a short final chunk for
     any remainder.
 
-    Why not just call ``.chunk()``: that constructs a transient dask graph (one
-    task per chunk, per variable) purely to read these tuples back -- the
-    dominant cost when registering a finely chunked store (e.g. ERA5 at
-    ``time=1`` over a full year is ~8.8k chunks/var; over the whole archive,
-    hundreds of thousands). This keeps the forward path dask-free.
+    Why not just call ``.chunk()``? -- that constructs a transient dask graph (one
+    task per chunk, per variable) purely to read these tuples back. This keeps the
+    forward path dask-free.
     """
     out: dict[Hashable, tuple[int, ...]] = {}
     for dim, length in sizes.items():
