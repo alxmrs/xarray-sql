@@ -6,16 +6,24 @@ wrapper around the DataFusion ``DataFrame`` returned by
 :meth:`XarrayContext.sql`, with a :meth:`XarrayDataFrame.to_dataset`
 method that round-trips a query result back to ``xr.Dataset``.
 
-Every ``.to_dataset()`` result is lazy: data variables are backed by
-:class:`SQLBackendArray` wrapped in
-``xarray.core.indexing.LazilyIndexedArray``. xarray indexing operations
-(``isel``, ``sel``, slicing) translate to DataFusion ``filter``
-expressions and consume the filtered DataFrame via ``execute_stream``,
-so only the requested data is materialized as Arrow ``RecordBatch`` es
-and scattered into numpy. Pushdown and laziness are orthogonal: queries
-whose filters cannot be pushed down (e.g. aggregations) still stream
-their result lazily on first access. ``.compute()`` materializes the
-whole Dataset in memory.
+Reconstruction dispatches on the SQL result's physical-plan shape
+(:func:`_classify_plan`):
+
+* **Partition-preserving scans** (``SELECT cols FROM t WHERE <dim
+  predicate>``) stay lazy: data variables are backed by
+  :class:`SQLBackendArray` wrapped in
+  ``xarray.core.indexing.LazilyIndexedArray``. xarray indexing
+  operations (``isel``, ``sel``, slicing) translate to DataFusion
+  ``filter`` expressions and consume the filtered DataFrame via
+  ``execute_stream``, so only the requested data is materialized as
+  Arrow ``RecordBatch`` es and scattered into numpy.
+* **Partition-collapsing barriers** (aggregations, sorts, joins) execute
+  the plan exactly once and materialize a dense Dataset. Re-executing
+  such a plan per coordinate and per variable -- as the lazy path would
+  -- re-runs the whole upstream scan each time, so a single streamed pass
+  is both faster and correct.
+
+``.compute()`` materializes the whole Dataset in memory.
 """
 
 from __future__ import annotations
@@ -365,33 +373,123 @@ class SQLBackendArray(xr.backends.BackendArray):
         )
 
 
-def _lazy_to_xarray(
+# Physical-plan operator names that preserve the source partitioning, so each
+# output partition maps to exactly one source partition (xarray chunk) and
+# indexer filters push down to partition pruning. The Rust xarray table
+# provider surfaces as ``CooperativeExec`` / ``FFI_ExecutionPlan``; in-memory
+# tables surface as ``DataSourceExec``. Anything else (aggregate, sort, join,
+# hash-repartition, window) reshuffles or collapses partitions.
+_PARTITION_PRESERVING_OPS = frozenset(
+    {
+        "DataSourceExec",
+        "FFI_ExecutionPlan",
+        "CooperativeExec",
+        "ProjectionExec",
+        "FilterExec",
+        "CoalesceBatchesExec",
+    }
+)
+
+
+def _classify_plan(inner_df: Any) -> Literal["scan", "barrier"]:
+    """Classify a DataFusion plan as a ``"scan"`` or a ``"barrier"``.
+
+    A ``"scan"`` (e.g. ``SELECT cols FROM t WHERE <dim predicate>``) preserves
+    the source partitioning, so lazy per-partition reads push filters down to
+    partition pruning and stay cheap -- the lazy :class:`SQLBackendArray` path
+    is the right tool. A ``"barrier"`` (aggregation, sort, join) must execute
+    the whole plan to produce any row, so the lazy path's per-coordinate and
+    per-variable re-execution would re-run the entire upstream scan each time;
+    such plans are materialized once instead (see :func:`_materialize_barrier`).
+
+    Conservative by construction: returns ``"scan"`` only when *every* node is
+    known to preserve partitioning; any unrecognized operator yields
+    ``"barrier"`` (execute-once), which is never incorrect, only less lazy.
+    """
+    try:
+        plan = inner_df.execution_plan()
+    except Exception:
+        return "barrier"
+    stack = [plan]
+    while stack:
+        node = stack.pop()
+        display = node.display() or ""
+        op = display.split(":", 1)[0].strip()
+        if op not in _PARTITION_PRESERVING_OPS:
+            return "barrier"
+        stack.extend(node.children())
+    return "scan"
+
+
+def _materialize_barrier(
     inner_df: Any,
     dimension_columns: list[str],
-    template: xr.Dataset | None,
-    sparsity: Sparsity,
-    fill_value: Any,
+    field_names: list[str],
+    field_types: dict[str, Any],
 ) -> xr.Dataset:
-    """Build a lazy ``xr.Dataset`` whose data vars are :class:`SQLBackendArray`.
+    """Execute a barrier plan once and build a dense in-memory Dataset.
 
-    Coord arrays are discovered per-dim via ``inner_df.select(col(d))
-    .distinct().sort(...).execute_stream()`` (one Arrow-native DataFrame
-    chain per dim). Coord discovery cost is bounded by N single-column
-    scans where N is the number of dims.
+    Barrier plans (aggregations, sorts, joins) collapse the source partitioning,
+    so the whole plan must run to produce any output. We run it exactly once via
+    ``execute_stream()`` -- streaming the result as Arrow ``RecordBatch`` es
+    (``datafusion.RecordBatch.to_pyarrow()``) -- then derive both the
+    coordinates and every data variable from that single pass. No per-coordinate
+    or per-variable re-execution, so an aggregation over a remote Zarr scan
+    costs one scan instead of one-per-dim plus one-per-variable.
     """
-    if sparsity not in ("result", "template"):
-        raise ValueError(
-            f"sparsity must be 'result' or 'template', got {sparsity!r}"
-        )
-    if sparsity == "template" and template is None:
-        raise ValueError(
-            "sparsity='template' requires template= to be supplied"
-        )
+    batches = [b.to_pyarrow() for b in inner_df.execute_stream()]
 
-    schema = inner_df.schema()
-    field_names = [f.name for f in schema]
-    field_types = {f.name: f.type for f in schema}
+    coord_arrays: dict[str, np.ndarray] = {}
+    for d in dimension_columns:
+        if not batches:
+            coord_arrays[d] = np.asarray([])
+            continue
+        vals = np.concatenate(
+            [
+                b.column(b.schema.names.index(d)).to_numpy(zero_copy_only=False)
+                for b in batches
+            ]
+        )
+        # np.unique returns sorted, de-duplicated values -- the same ascending
+        # coordinate order the lazy scan path produces via SQL ``.sort()``.
+        coord_arrays[d] = np.unique(vals)
+    shape = tuple(len(coord_arrays[d]) for d in dimension_columns)
 
+    data_vars: dict[str, xr.Variable] = {}
+    for name in field_names:
+        if name in dimension_columns:
+            continue
+        np_dtype = np.dtype(field_types[name].to_pandas_dtype())
+        dense = _scatter_batches_to_ndarray(
+            batches=batches,
+            dimension_columns=dimension_columns,
+            requested=coord_arrays,
+            var_name=name,
+            out_shape=shape,
+            dtype=np_dtype,
+            drop_axes=[],
+        )
+        data_vars[name] = xr.Variable(dimension_columns, dense)
+
+    coords_arg = {d: coord_arrays[d] for d in dimension_columns}
+    return xr.Dataset(data_vars=data_vars, coords=coords_arg)
+
+
+def _build_lazy_scan(
+    inner_df: Any,
+    dimension_columns: list[str],
+    field_names: list[str],
+    field_types: dict[str, Any],
+) -> xr.Dataset:
+    """Build a lazy Dataset whose data vars are :class:`SQLBackendArray`.
+
+    For partition-preserving (``"scan"``) plans only. Coord arrays are
+    discovered per-dim via ``inner_df.select(col(d)).distinct().sort(...)
+    .execute_stream()``; the table provider projects to that single coordinate
+    column and skips data variables, so each discovery reads coordinate values
+    only (no remote data-variable I/O). Data variables stay lazy: indexer
+    filters push down to partition pruning on first access.
+    """
     coord_arrays: dict[str, np.ndarray] = {}
     for d in dimension_columns:
         dim_only = (
@@ -423,7 +521,46 @@ def _lazy_to_xarray(
         data_vars[name] = xr.Variable(dimension_columns, lazy)
 
     coords_arg = {d: coord_arrays[d] for d in dimension_columns}
-    ds = xr.Dataset(data_vars=data_vars, coords=coords_arg)
+    return xr.Dataset(data_vars=data_vars, coords=coords_arg)
+
+
+def _lazy_to_xarray(
+    inner_df: Any,
+    dimension_columns: list[str],
+    template: xr.Dataset | None,
+    sparsity: Sparsity,
+    fill_value: Any,
+) -> xr.Dataset:
+    """Reconstruct an ``xr.Dataset`` from a SQL result, lazily where possible.
+
+    Dispatches on the plan shape (:func:`_classify_plan`): partition-preserving
+    ``"scan"`` plans keep the lazy :class:`SQLBackendArray` path
+    (:func:`_build_lazy_scan`); partition-collapsing ``"barrier"`` plans
+    (aggregations, sorts, joins) execute once and materialize
+    (:func:`_materialize_barrier`), since re-executing them per coordinate and
+    per variable would re-run the whole upstream scan repeatedly.
+    """
+    if sparsity not in ("result", "template"):
+        raise ValueError(
+            f"sparsity must be 'result' or 'template', got {sparsity!r}"
+        )
+    if sparsity == "template" and template is None:
+        raise ValueError(
+            "sparsity='template' requires template= to be supplied"
+        )
+
+    schema = inner_df.schema()
+    field_names = [f.name for f in schema]
+    field_types = {f.name: f.type for f in schema}
+
+    if _classify_plan(inner_df) == "barrier":
+        ds = _materialize_barrier(
+            inner_df, dimension_columns, field_names, field_types
+        )
+    else:
+        ds = _build_lazy_scan(
+            inner_df, dimension_columns, field_names, field_types
+        )
 
     if sparsity == "template":
         assert template is not None
@@ -532,10 +669,10 @@ class XarrayDataFrame:
             dimension_columns = self._infer_dimension_columns(
                 preferred_template=template
             )
-        # Always go through the lazy path: pushdown is an optimization
-        # for queries whose result columns map cleanly onto the template's
-        # dim+var set, but laziness itself is orthogonal -- aggregation
-        # results still benefit from streaming via execute_stream.
+        # Dispatch on plan shape: partition-preserving scans stay lazy with
+        # filter pushdown; partition-collapsing barriers (aggregations, sorts,
+        # joins) execute once and materialize, since re-executing them per
+        # coordinate and per variable would re-run the whole upstream scan.
         return _lazy_to_xarray(
             inner_df=self._inner,
             dimension_columns=dimension_columns,

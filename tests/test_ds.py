@@ -139,6 +139,44 @@ def test_aggregation_drops_dim(air_dataset_small):
     np.testing.assert_allclose(actual, expected)
 
 
+def test_barrier_query_scans_source_once(air_dataset_small):
+    """A barrier plan (aggregation) executes the source exactly once.
+
+    The lazy scan path re-runs the whole upstream plan for every coordinate
+    discovery and every variable access; for an aggregation -- which cannot push
+    an indexer filter below the GROUP BY -- that is pure re-computation of an
+    expensive scan. ``to_dataset()`` on a barrier plan must instead make a
+    single streamed pass over the source, and ``.compute()`` must trigger no
+    further reads.
+    """
+    from xarray_sql.df import block_slices
+    from xarray_sql.reader import read_xarray_table
+
+    reads: list = []
+    table = read_xarray_table(
+        air_dataset_small,
+        chunks={"time": 6},
+        _iteration_callback=lambda block, proj: reads.append(block),
+    )
+    n_partitions = len(list(block_slices(air_dataset_small, {"time": 6})))
+
+    ctx = XarrayContext()
+    ctx.register_table("air", table)
+    ctx._registered_datasets["air"] = air_dataset_small
+
+    out = ctx.sql(
+        "SELECT lat, lon, AVG(air) AS air_avg FROM air GROUP BY lat, lon"
+    ).to_dataset(dimension_columns=["lat", "lon"])
+    reads_after_construct = len(reads)
+    out.compute()
+    reads_after_compute = len(reads)
+
+    # Exactly one pass over the source (each partition read once) ...
+    assert reads_after_construct == n_partitions
+    # ... and computing the materialized result re-reads nothing.
+    assert reads_after_compute == reads_after_construct
+
+
 # ---------------------------------------------------------------------------
 # dimension_columns / template resolution rules
 # ---------------------------------------------------------------------------
