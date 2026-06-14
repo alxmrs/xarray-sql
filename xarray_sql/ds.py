@@ -481,6 +481,68 @@ def _build_lazy_scan(
     return xr.Dataset(data_vars=data_vars, coords=coords_arg)
 
 
+def _auto_chunk_target_bytes() -> int:
+    """Byte target for ``chunks="auto"`` (the chunk manager's, else 128 MiB)."""
+    try:
+        import dask
+        from dask.utils import parse_bytes
+
+        return int(parse_bytes(dask.config.get("array.chunk-size")))
+    except Exception:
+        return 128 * 1024 * 1024
+
+
+def _auto_chunks(
+    template: xr.Dataset | None,
+    dimension_columns: list[str],
+    field_types: dict[str, Any],
+) -> dict[str, int] | None:
+    """Resolve ``chunks="auto"`` to a source-partition-aligned chunk spec.
+
+    Sizes chunks to roughly the chunk manager's byte target (dask's
+    ``array.chunk-size``, default 128 MiB) but snaps boundaries to whole source
+    partitions, so every chunk is a union of source partitions -- no chunk splits
+    a partition (which would make adjacent chunks re-read it). This is what makes
+    ``"auto"`` useful for finely partitioned sources (e.g. ERA5
+    ``chunks={"time": 1}``): it coarsens many tiny partitions into memory-sized,
+    aligned chunks. Returns ``None`` when there is no resolvable source grid to
+    align to, so the caller falls back to the chunk manager's own ``"auto"``.
+    """
+    if template is None:
+        return None
+    part = template.chunksizes  # dim -> tuple of source chunk lengths
+    chunked_dims = [
+        d for d in dimension_columns if d in part and len(part[d]) > 1
+    ]
+    if not chunked_dims:
+        return None
+
+    itemsizes = [
+        np.dtype(t.to_pandas_dtype()).itemsize
+        for name, t in field_types.items()
+        if name not in dimension_columns
+    ]
+    itemsize = max(itemsizes) if itemsizes else 8
+
+    # Bytes in one source-partition block: the nominal source chunk length per
+    # dimension (``part[d][0]``) multiplied across all dims, times itemsize.
+    block_bytes = itemsize
+    for d in dimension_columns:
+        if d in part:
+            block_bytes *= int(part[d][0])
+    # Number of source partitions to merge per chunk to approach the target.
+    merge = max(1, _auto_chunk_target_bytes() // max(block_bytes, 1))
+
+    # Absorb the coarsening into the most finely partitioned dimension; the rest
+    # keep their source chunk length. xarray caps an oversize chunk at the dim
+    # length, so an over-large merge simply yields a single chunk on that dim.
+    primary = max(chunked_dims, key=lambda d: len(part[d]))
+    return {
+        d: int(part[d][0]) * (merge if d == primary else 1)
+        for d in chunked_dims
+    }
+
+
 def _result_to_xarray(
     inner_df: Any,
     dimension_columns: list[str],
@@ -540,6 +602,13 @@ def _result_to_xarray(
         ds = _apply_template(ds, template)
 
     if chunks is not None:
+        if chunks == "auto":
+            # Snap the byte-budgeted "auto" sizing to source partition
+            # boundaries; fall back to the chunk manager's own "auto" when there
+            # is no source grid to align to.
+            chunks = (
+                _auto_chunks(template, dimension_columns, field_types) or "auto"
+            )
         # Wrap the lazy data variables in the configured chunk manager (dask by
         # default). Each chunk reads its coordinate range via pushdown on access.
         ds = ds.chunk(chunks)
@@ -629,10 +698,15 @@ class XarrayDataFrame:
                   Dataset is resolvable.
                 * ``None``: eager. Execute the query once and return a dense
                   in-memory Dataset. Best for reductions (small results).
-                * a mapping (e.g. ``{"time": 100}``) or ``"auto"``: chunk
-                  explicitly. Each chunk reads its coordinate range lazily via
-                  filter pushdown on access, through xarray's configured chunk
-                  manager (dask, cubed, ...).
+                * a mapping (e.g. ``{"time": 100}``): chunk explicitly. Each
+                  chunk reads its coordinate range lazily via filter pushdown on
+                  access, through xarray's configured chunk manager (dask,
+                  cubed, ...).
+                * ``"auto"``: size chunks to the chunk manager's byte target but
+                  snap boundaries to whole source partitions, so each chunk is a
+                  union of source partitions. Useful for finely partitioned
+                  sources (e.g. ERA5 ``chunks={"time": 1}``), coarsening many
+                  tiny partitions into memory-sized, aligned chunks.
 
         Returns:
             An ``xr.Dataset`` with ``dims`` as dimensions and the
@@ -679,7 +753,8 @@ class XarrayDataFrame:
         for dimensions actually split into more than one chunk in the input
         (a single full chunk is not "chunked"), so reductions that drop the
         chunked dimension resolve to ``None`` (eager) automatically. Mappings
-        and ``"auto"`` pass through to ``Dataset.chunk`` unchanged.
+        pass through unchanged; ``"auto"`` passes through here and is snapped to
+        source partition boundaries later (see :func:`_auto_chunks`).
         """
         if chunks is None:
             return None

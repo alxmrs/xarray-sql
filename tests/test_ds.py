@@ -231,6 +231,34 @@ def test_chunks_argument_controls_partitioning(synthetic_dataset):
     )
 
 
+def test_chunks_auto_snaps_to_source_partitions():
+    """``chunks="auto"`` coarsens to the byte budget but snaps chunk boundaries
+    to whole source partitions (so no chunk splits a source partition)."""
+    import dask
+
+    # 12 source partitions of size 2 along time.
+    ds = xr.Dataset(
+        {"v": (("time", "x"), np.arange(24 * 4, dtype="float64").reshape(24, 4))},
+        coords={"time": np.arange(24), "x": np.arange(4)},
+    ).chunk({"time": 2})
+    ctx = XarrayContext()
+    ctx.from_dataset("t", ds)
+
+    # block bytes = 8 * 2(time) * 4(x) = 64; target 192 -> merge 3 partitions.
+    with dask.config.set({"array.chunk-size": "192B"}):
+        out = ctx.sql("SELECT * FROM t").to_dataset(chunks="auto")
+
+    time_chunks = out.chunksizes["time"]
+    assert all(c % 2 == 0 for c in time_chunks)  # aligned to source size 2
+    assert time_chunks[0] > 2  # genuinely coarsened
+    assert len(time_chunks) < 12  # fewer chunks than source partitions
+
+    xr.testing.assert_allclose(
+        out.compute().sortby(["time", "x"]),
+        ds.compute().sortby(["time", "x"]),
+    )
+
+
 # ---------------------------------------------------------------------------
 # dimension_columns / template resolution rules
 # ---------------------------------------------------------------------------
