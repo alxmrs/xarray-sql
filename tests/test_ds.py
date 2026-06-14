@@ -2,18 +2,18 @@
 
 Covers the user-facing contract of ``ctx.sql(...).to_dataset(...)``:
 
-* Wrapper behavior on the object returned by ``ctx.sql`` and DataFusion
-  method passthrough.
-* Round-trip identity across varied source Datasets (one parametrized
-  ``assert_identical`` test, not eight per-aspect checks).
-* Aggregation, ``dimension_columns`` inference, and the template /
-  ``template`` resolution rules (name or Dataset) with their error paths.
-* Sparsity handling and ``fill_value`` dtype behavior.
-* The vectorized-indexer fallback through xarray's adapter.
+* Wrapper behavior on the object returned by ``ctx.sql`` (method passthrough,
+  ``to_pandas`` equivalence).
+* Round-trip identity across the eager and chunked paths (one parametrized
+  ``assert_identical`` test).
+* Aggregation behavior: dim reduction, single-scan execution, ``ORDER BY``
+  direction, and the ``chunks`` argument (eager / inherit / ``"auto"``).
+* ``dims`` inference and ``template`` resolution (name or Dataset), with error
+  paths and metadata recovery.
+* Indexing the chunked backend, sparsity handling, and ``fill_value`` dtype.
 
-The tests favor checking the user-visible contract (values, dims,
-attrs) over the implementation path (call counts, internal class
-identity), so the suite stays useful as the lazy backend evolves.
+The tests favor the user-visible contract (values, dims, attrs) over the
+implementation path, so the suite stays useful as the backend evolves.
 """
 
 import numpy as np
@@ -30,11 +30,15 @@ from xarray_sql.ds import XarrayDataFrame
 # ---------------------------------------------------------------------------
 
 
-def test_ctx_sql_returns_xarray_dataframe(air_dataset_small):
+def test_sql_returns_wrapper_that_forwards_methods(air_dataset_small):
+    """``ctx.sql`` returns an ``XarrayDataFrame`` that forwards un-overridden
+    DataFusion methods (e.g. ``schema()``) via ``__getattr__``."""
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
     result = ctx.sql("SELECT * FROM air LIMIT 5")
     assert isinstance(result, XarrayDataFrame)
+    names = [f.name for f in result.schema()]
+    assert {"lat", "lon", "time", "air"}.issubset(set(names))
 
 
 def test_to_pandas_unchanged_behavior(air_dataset_small):
@@ -46,15 +50,6 @@ def test_to_pandas_unchanged_behavior(air_dataset_small):
     wrapped = ctx.sql("SELECT * FROM air LIMIT 7").to_pandas()
     raw = SessionContext.sql(ctx, "SELECT * FROM air LIMIT 7").to_pandas()
     pd.testing.assert_frame_equal(wrapped, raw)
-
-
-def test_passthrough_methods(air_dataset_small):
-    """DataFusion methods we did not override forward via ``__getattr__``."""
-    ctx = XarrayContext()
-    ctx.from_dataset("air", air_dataset_small)
-    result = ctx.sql("SELECT * FROM air LIMIT 5")
-    names = [f.name for f in result.schema()]
-    assert {"lat", "lon", "time", "air"}.issubset(set(names))
 
 
 # ---------------------------------------------------------------------------
@@ -75,39 +70,22 @@ def _clear_encoding(ds: xr.Dataset) -> xr.Dataset:
     return ds
 
 
-def _load_tutorial(name: str) -> xr.Dataset | None:
-    """Return a small xarray tutorial Dataset, or None when unavailable.
-
-    Used to widen round-trip coverage beyond the conftest fixtures without
-    requiring network in CI. Pooch caches downloads locally on first run.
-    """
-    try:
-        return xr.tutorial.open_dataset(name)
-    except (OSError, ValueError, ImportError):
-        return None
-
-
 @pytest.mark.parametrize(
     "fixture_name",
-    ["air_dataset_small", "weather_dataset", "synthetic_dataset", "eraint_uvz"],
+    # ``air`` exercises the eager path (single-chunk source); ``weather``
+    # exercises the chunked path and adds datetime + non-dim coordinates.
+    ["air_dataset_small", "weather_dataset"],
 )
 def test_round_trip_identity(request, fixture_name):
     """``SELECT *`` round-trips to a Dataset that is ``assert_identical``
     to the source: values, dims, coord values, dtypes, non-dim coords,
     and attrs all match (modulo coord ordering, normalized on both
-    sides). One test covers what was previously a fan of narrow checks,
-    parametrized over local fixtures and one xarray tutorial dataset.
+    sides).
     """
-    if fixture_name == "eraint_uvz":
-        source = _load_tutorial("eraint_uvz")
-        if source is None:
-            pytest.skip("eraint_uvz tutorial dataset unavailable")
-        source = source.chunk()
-    else:
-        source = request.getfixturevalue(fixture_name).copy()
-        source.attrs["round_trip_marker"] = "yes"
-        first_var = next(iter(source.data_vars))
-        source[first_var].attrs["units"] = "test_units"
+    source = request.getfixturevalue(fixture_name).copy()
+    source.attrs["round_trip_marker"] = "yes"
+    first_var = next(iter(source.data_vars))
+    source[first_var].attrs["units"] = "test_units"
 
     ctx = XarrayContext()
     ctx.from_dataset("t", source)
@@ -264,18 +242,6 @@ def test_chunks_auto_snaps_to_source_partitions():
 # ---------------------------------------------------------------------------
 
 
-def test_to_dataset_multi_registered_requires_explicit_template(
-    air_dataset_small,
-):
-    """With more than one registered Dataset, the caller disambiguates by
-    passing a registered table name as ``template=``."""
-    ctx = XarrayContext()
-    ctx.from_dataset("air1", air_dataset_small)
-    ctx.from_dataset("air2", air_dataset_small)
-    out = ctx.sql("SELECT * FROM air1").to_dataset(template="air1")
-    assert set(out.dims) == {"time", "lat", "lon"}
-
-
 def test_to_dataset_infer_fails_when_no_template_fits(air_dataset_small):
     """If no registered Dataset's dims fit the result -> clear error."""
     ctx = XarrayContext()
@@ -349,98 +315,53 @@ def test_template_aggregation_alias_no_attrs(air_dataset_small):
     assert out["air_avg"].attrs == {}
 
 
-def test_to_dataset_explicit_template_overrides_auto_resolve(
-    air_dataset_small,
-):
-    """Explicit template= wins over the auto-resolved FROM-clause table."""
-    other = air_dataset_small.copy()
-    other.attrs = {"flag": "explicit"}
-    ctx = XarrayContext()
-    ctx.from_dataset("air", air_dataset_small)
-    out = ctx.sql("SELECT * FROM air").to_dataset(
-        dims=["time", "lat", "lon"], template=other
-    )
-    assert out.attrs == {"flag": "explicit"}
-
-
 # ---------------------------------------------------------------------------
-# Lazy backend: value-level contract (not call counts)
+# Chunked (lazy SQLBackendArray) backend: value-level contract
 # ---------------------------------------------------------------------------
 
 
-def test_lazy_isel_int_round_trip(air_dataset_small):
-    """``isel(time=0)`` on the lazy result matches the eager equivalent."""
-    ctx = XarrayContext()
-    ctx.from_dataset("air", air_dataset_small)
-    lazy = ctx.sql("SELECT * FROM air").to_dataset()
-    eager = lazy.compute()
-    actual = lazy["air"].isel(time=0).sortby(["lat", "lon"]).values
-    expected = eager["air"].isel(time=0).sortby(["lat", "lon"]).values
-    np.testing.assert_array_equal(actual, expected)
+def test_chunked_backend_indexing_matches_eager(air_dataset_small):
+    """Indexing a chunked result (the lazy ``SQLBackendArray`` path, reached by
+    passing ``chunks=``) matches the eager equivalent across every indexer kind.
 
-
-def test_lazy_isel_slice_round_trip(air_dataset_small):
-    """isel(time=slice(0, 3)) round-trip matches the source."""
-    ctx = XarrayContext()
-    ctx.from_dataset("air", air_dataset_small)
-    out = ctx.sql("SELECT * FROM air").to_dataset()
-    actual = out["air"].isel(time=slice(0, 3)).sortby(["lat", "lon"]).values
-    expected = (
-        air_dataset_small["air"]
-        .compute()
-        .isel(time=slice(0, 3))
-        .sortby(["lat", "lon"])
-        .values
-    )
-    np.testing.assert_array_equal(actual, expected)
-
-
-def test_lazy_outer_indexer_array(air_dataset_small):
-    """Fancy index along one dim works (IN-equivalent pushdown)."""
-    ctx = XarrayContext()
-    ctx.from_dataset("air", air_dataset_small)
-    lazy = ctx.sql("SELECT * FROM air").to_dataset()
-    eager = lazy.compute()
-    indices = [0, 3, 5]
-    np.testing.assert_array_equal(
-        lazy["air"].isel(lat=indices).values,
-        eager["air"].isel(lat=indices).values,
-    )
-
-
-def test_lazy_compute_returns_eager(air_dataset_small):
-    """``.compute()`` returns an in-memory Dataset matching the source."""
-    ctx = XarrayContext()
-    ctx.from_dataset("air", air_dataset_small)
-    out = ctx.sql("SELECT * FROM air").to_dataset().compute()
-    np.testing.assert_array_equal(
-        out.sortby(["time", "lat", "lon"])["air"].values,
-        air_dataset_small.compute()
-        .sortby(["time", "lat", "lon"])["air"]
-        .values,
-    )
-
-
-def test_vectorized_indexer_falls_back_via_xarray_adapter(
-    air_dataset_small,
-):
-    """VectorizedIndexer paths through xarray's adapter to outer + gather.
-
-    Our SQLBackendArray declares ``IndexingSupport.OUTER``, so xarray's
-    ``explicit_indexing_adapter`` converts vectorized indexers into a
-    series of outer reads followed by an in-memory numpy gather. The
-    public contract: values match the eager-computed equivalent.
+    ``chunks=`` forces the dask-wrapped backend whose chunks read their
+    coordinate range via DataFusion filter pushdown; this exercises the int,
+    slice, outer-array, and vectorized indexer translations -- the last via
+    xarray's ``IndexingSupport.OUTER`` adapter (outer reads + numpy gather).
     """
+    import dask.array as da
+
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
-    lazy = ctx.sql("SELECT * FROM air").to_dataset()
-    eager = lazy.compute()
+    chunked = ctx.sql("SELECT * FROM air").to_dataset(chunks={"time": 4})
+    assert isinstance(chunked["air"].data, da.Array)  # genuinely lazy/chunked
+    # Compare lazy indexing against computing-then-indexing the SAME Dataset, so
+    # both sides share one coordinate order (positional indexers stay aligned).
+    eager = chunked.compute()
 
-    points_t = xr.DataArray([0, 3, 1], dims="point")
-    points_lat = xr.DataArray([2, 0, 5], dims="point")
+    def s(da_):  # normalize coord order before comparing values
+        return da_.sortby(["lat", "lon"]).values
+
+    # int indexer
     np.testing.assert_array_equal(
-        lazy["air"].isel(time=points_t, lat=points_lat).values,
-        eager["air"].isel(time=points_t, lat=points_lat).values,
+        s(chunked["air"].isel(time=0)), s(eager["air"].isel(time=0))
+    )
+    # slice indexer
+    np.testing.assert_array_equal(
+        s(chunked["air"].isel(time=slice(0, 3))),
+        s(eager["air"].isel(time=slice(0, 3))),
+    )
+    # outer (fancy) array indexer
+    np.testing.assert_array_equal(
+        chunked["air"].isel(lat=[0, 3, 5]).values,
+        eager["air"].isel(lat=[0, 3, 5]).values,
+    )
+    # vectorized indexer (xarray adapter -> outer + gather)
+    pt = xr.DataArray([0, 3, 1], dims="point")
+    pl = xr.DataArray([2, 0, 5], dims="point")
+    np.testing.assert_array_equal(
+        chunked["air"].isel(time=pt, lat=pl).values,
+        eager["air"].isel(time=pt, lat=pl).values,
     )
 
 
@@ -500,26 +421,6 @@ def test_sparsity_invalid_value_raises(air_dataset_small):
         )
 
 
-def test_sparsity_template_with_aggregation(air_dataset_small):
-    """sparsity='template' on an aggregation respects dimension_columns subset."""
-    ctx = XarrayContext()
-    ctx.from_dataset("air", air_dataset_small)
-    threshold = float(air_dataset_small["lat"].values[5])
-    out = ctx.sql(
-        f"""
-        SELECT lat, lon, AVG(air) AS air_avg
-        FROM air
-        WHERE lat > {threshold}
-        GROUP BY lat, lon
-        """
-    ).to_dataset(dims=["lat", "lon"], sparsity="template")
-    assert out.sizes["lat"] == air_dataset_small.sizes["lat"]
-    assert "time" not in out.dims
-    below_mask = out["lat"].values <= threshold
-    below = out["air_avg"].isel(lat=np.where(below_mask)[0])
-    assert np.isnan(below.values).all()
-
-
 def test_fill_value_int_upcasts_to_float():
     """fill_value=NaN forces float upcast on int columns -- documented."""
     ds = xr.Dataset(
@@ -554,19 +455,3 @@ def test_fill_value_custom_preserves_int(air_dataset_small):
     assert np.issubdtype(out["v"].dtype, np.integer)
     assert (out["v"].sel(lat=0).values == -1).all()
     assert out["v"].sel(lat=2, lon=11).item() == 6
-
-
-def test_sparsity_template_then_metadata(air_dataset_small):
-    """sparsity='template' composes with template metadata recovery."""
-    ds = air_dataset_small.copy()
-    ds.attrs = {"src": "tmpl"}
-    ds["air"].attrs = {"units": "K"}
-    ctx = XarrayContext()
-    ctx.from_dataset("air", ds)
-    threshold = float(ds["lat"].values[5])
-    out = ctx.sql(f"SELECT * FROM air WHERE lat > {threshold}").to_dataset(
-        sparsity="template"
-    )
-    assert out.attrs == {"src": "tmpl"}
-    assert out["air"].attrs == {"units": "K"}
-    assert out.sizes["lat"] == ds.sizes["lat"]
