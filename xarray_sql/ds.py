@@ -8,7 +8,7 @@ method that round-trips a query result back to ``xr.Dataset``.
 
 Reconstruction is controlled by the ``chunks`` argument to
 :meth:`XarrayDataFrame.to_dataset` -- the xarray idiom for tuning how a
-result is partitioned -- rather than by reflecting on the query plan:
+result is partitioned:
 
 * **Eager** (``chunks=None``, or the default ``"inherit"`` when the
   result keeps no multi-chunk source dimension): the plan executes
