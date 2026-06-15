@@ -367,6 +367,29 @@ class SQLBackendArray(xr.backends.BackendArray):
         )
 
 
+def _coords_from_batches(
+    batches: list[pa.RecordBatch], dimension_columns: list[str]
+) -> dict[str, np.ndarray]:
+    """Distinct coordinate values per dim, in first-appearance order.
+
+    This preserves stability in result orders between chunked and non-chunked
+    versions of a sorted query (i.e. queries that use ORDER BY).
+    """
+    coord_arrays: dict[str, np.ndarray] = {}
+    for d in dimension_columns:
+        if not batches:
+            coord_arrays[d] = np.asarray([])
+            continue
+        vals = np.concatenate(
+            [
+                b.column(b.schema.names.index(d)).to_numpy(zero_copy_only=False)
+                for b in batches
+            ]
+        )
+        coord_arrays[d] = np.asarray(pd.unique(vals))
+    return coord_arrays
+
+
 def _materialize(
     inner_df: Any,
     dimension_columns: list[str],
@@ -383,24 +406,7 @@ def _materialize(
     scan, regardless of how many dimensions or variables the result has.
     """
     batches = [b.to_pyarrow() for b in inner_df.execute_stream()]
-
-    coord_arrays: dict[str, np.ndarray] = {}
-    for d in dimension_columns:
-        if not batches:
-            coord_arrays[d] = np.asarray([])
-            continue
-        vals = np.concatenate(
-            [
-                b.column(b.schema.names.index(d)).to_numpy(zero_copy_only=False)
-                for b in batches
-            ]
-        )
-        # Preserve the order coordinate values first appear in the result so an
-        # ORDER BY direction (e.g. ``ORDER BY level DESC``) carries through to
-        # the Dataset dimension instead of being force-sorted ascending.
-        # pd.unique keeps first-appearance order; the scatter below argsorts
-        # internally, so arbitrarily-ordered coordinates are placed correctly.
-        coord_arrays[d] = np.asarray(pd.unique(vals))
+    coord_arrays = _coords_from_batches(batches, dimension_columns)
     shape = tuple(len(coord_arrays[d]) for d in dimension_columns)
 
     data_vars: dict[str, xr.Variable] = {}
@@ -433,23 +439,15 @@ def _build_lazy_scan(
 
     Used when output chunking is requested: each data variable stays lazy and,
     once wrapped by ``Dataset.chunk``, every chunk reads its coordinate range via
-    a pushdown filter on first access. Coordinates are discovered per dim via
-    ``inner_df.select(col(d)).distinct().sort(...).execute_stream()``; the table
-    provider projects to that single coordinate column and skips data variables,
-    so discovery reads coordinate values only (no data-variable I/O).
+    a pushdown filter on first access. Coordinates are discovered by projecting
+    the result to its dimension columns and streaming them once
+    (:func:`_coords_from_batches`), so discovery reads coordinate values only
+    (the provider skips data variables) and uses the same first-appearance
+    ordering as the eager path -- keeping ``to_dataset`` order-stable.
     """
-    coord_arrays: dict[str, np.ndarray] = {}
-    for d in dimension_columns:
-        dim_only = (
-            inner_df.select(col(f'"{d}"')).distinct().sort(col(f'"{d}"').sort())
-        )
-        chunks = [b.to_pyarrow() for b in dim_only.execute_stream()]
-        if not chunks:
-            coord_arrays[d] = np.asarray([])
-            continue
-        coord_arrays[d] = np.concatenate(
-            [c.column(0).to_numpy(zero_copy_only=False) for c in chunks]
-        )
+    dim_proj = inner_df.select(*(col(f'"{d}"') for d in dimension_columns))
+    coord_batches = [b.to_pyarrow() for b in dim_proj.execute_stream()]
+    coord_arrays = _coords_from_batches(coord_batches, dimension_columns)
     shape = tuple(len(coord_arrays[d]) for d in dimension_columns)
 
     data_vars: dict[str, xr.Variable] = {}

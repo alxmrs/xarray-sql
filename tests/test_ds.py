@@ -113,14 +113,19 @@ def test_round_trip_identity(request, fixture_name):
 
     ctx = XarrayContext()
     ctx.from_dataset("t", source)
-    out = ctx.sql("SELECT * FROM t ORDER BY lat DESC, lon").to_dataset().compute()
+    # ORDER BY each dimension in its native direction: this gives a single,
+    # deterministically-ordered stream so the round-trip reproduces the
+    # source coordinate order exactly -- no re-sorting. (Without ORDER BY,
+    # row order across partitions is unspecified, so coord order would be.)
+    src = source.compute()
+    order = ", ".join(
+        f'"{d}" {"DESC" if src[d].values[0] > src[d].values[-1] else "ASC"}'
+        for d in src.dims
+    )
+    out = ctx.sql(f"SELECT * FROM t ORDER BY {order}").to_dataset().compute()
 
-    # The chunked path discovers coordinates ascending, so normalize both
-    # sides for the cross-fixture comparison (some sources, e.g. weather's
-    # level, are natively descending).
-    sort_keys = list(out.dims)
     actual = _clear_encoding(out)
-    expected = _clear_encoding(source.compute())
+    expected = _clear_encoding(src)
     xr.testing.assert_identical(actual, expected)
 
 
@@ -234,8 +239,11 @@ def test_chunks_argument_controls_partitioning(synthetic_dataset):
     eager = ctx.sql("SELECT * FROM t").to_dataset(chunks=None)
     assert not isinstance(eager[var].data, da.Array)
 
+    # No ORDER BY, so coordinate order across partitions is unspecified;
+    # normalize both sides before comparing values.
     xr.testing.assert_allclose(
-        inherited.compute(), synthetic_dataset.compute()
+        inherited.compute().sortby(["time", "lat", "lon"]),
+        synthetic_dataset.compute().sortby(["time", "lat", "lon"]),
     )
 
 
@@ -261,7 +269,9 @@ def test_chunks_auto_snaps_to_source_partitions():
     assert time_chunks[0] > 2  # genuinely coarsened
     assert len(time_chunks) < 12  # fewer chunks than source partitions
 
-    xr.testing.assert_allclose(out.compute(), ds.compute())
+    xr.testing.assert_allclose(
+        out.compute().sortby(["time", "x"]), ds.compute().sortby(["time", "x"])
+    )
 
 
 # ---------------------------------------------------------------------------
