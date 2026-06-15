@@ -580,9 +580,7 @@ def _result_to_xarray(
     field_types = {f.name: f.type for f in schema}
 
     if chunks is None:
-        ds = _materialize(
-            inner_df, dimension_columns, field_names, field_types
-        )
+        ds = _materialize(inner_df, dimension_columns, field_names, field_types)
     else:
         ds = _build_lazy_scan(
             inner_df, dimension_columns, field_names, field_types

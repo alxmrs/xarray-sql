@@ -195,9 +195,9 @@ def test_order_by_direction_sets_dim_order(air_dataset_small):
 
     # Values stay aligned to the descending coordinate (scatter handles order).
     expected = (
-        air_dataset_small.compute().mean(dim=["time", "lon"])["air"].sortby(
-            "lat", ascending=False
-        )
+        air_dataset_small.compute()
+        .mean(dim=["time", "lon"])["air"]
+        .sortby("lat", ascending=False)
     )
     np.testing.assert_allclose(out["air_avg"].values, expected.values)
 
@@ -218,9 +218,7 @@ def test_chunks_argument_controls_partitioning(synthetic_dataset):
     inherited = ctx.sql("SELECT * FROM t").to_dataset()
     assert isinstance(inherited[var].data, da.Array)
     # Output time chunks align to the source's time partitions.
-    assert (
-        inherited.chunksizes["time"] == synthetic_dataset.chunksizes["time"]
-    )
+    assert inherited.chunksizes["time"] == synthetic_dataset.chunksizes["time"]
 
     eager = ctx.sql("SELECT * FROM t").to_dataset(chunks=None)
     assert not isinstance(eager[var].data, da.Array)
@@ -238,7 +236,12 @@ def test_chunks_auto_snaps_to_source_partitions():
 
     # 12 source partitions of size 2 along time.
     ds = xr.Dataset(
-        {"v": (("time", "x"), np.arange(24 * 4, dtype="float64").reshape(24, 4))},
+        {
+            "v": (
+                ("time", "x"),
+                np.arange(24 * 4, dtype="float64").reshape(24, 4),
+            )
+        },
         coords={"time": np.arange(24), "x": np.arange(4)},
     ).chunk({"time": 2})
     ctx = XarrayContext()
@@ -280,9 +283,7 @@ def test_to_dataset_infer_fails_when_no_template_fits(air_dataset_small):
     """If no registered Dataset's dims fit the result -> clear error."""
     ctx = XarrayContext()
     ctx.from_dataset("air", air_dataset_small)
-    with pytest.raises(
-        ValueError, match="dims cannot be inferred"
-    ):
+    with pytest.raises(ValueError, match="dims cannot be inferred"):
         ctx.sql(
             "SELECT lat, lon, AVG(air) AS air_avg FROM air GROUP BY lat, lon"
         ).to_dataset()
@@ -327,9 +328,7 @@ def test_template_recovers_var_encoding_strips_dtype(air_dataset_small):
     }
     ctx = XarrayContext()
     ctx.from_dataset("air", ds)
-    out = ctx.sql("SELECT * FROM air").to_dataset(
-        dims=["time", "lat", "lon"]
-    )
+    out = ctx.sql("SELECT * FROM air").to_dataset(dims=["time", "lat", "lon"])
     assert out["air"].encoding.get("zlib") is True
     assert "dtype" not in out["air"].encoding
     assert "_FillValue" not in out["air"].encoding
