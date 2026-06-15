@@ -13,6 +13,15 @@ from . import cftime as cft
 Block = dict[Hashable, slice]
 Chunks = dict[str, int] | None
 
+#: Default upper bound on the number of scan partitions produced at
+#: registration time. Native xarray chunks are coalesced so that registration
+#: cost is O(target) rather than O(num_native_chunks). See
+#: ``coalesce_group_sizes`` and ``coalesced_blocks``. 16384 keeps registration
+#: well under a second even for stores with tens of millions of native chunks,
+#: while leaving ample parallelism and partition-pruning granularity. Pass
+#: ``target_partitions=None`` to disable coalescing (one partition per chunk).
+DEFAULT_TARGET_PARTITIONS: int = 16_384
+
 
 # Borrowed from Xarray
 def _get_chunk_slicer(
@@ -55,7 +64,7 @@ def compute_chunks(
 
 def resolve_chunks(
     ds: xr.Dataset, chunks: Chunks
-) -> Mapping[Hashable, tuple[int, ...]]:
+) -> dict[Hashable, tuple[int, ...]]:
     """Normalise the user's ``chunks`` argument to per-dim size tuples.
 
     Filters out keys for dims this dataset doesn't have (sub-datasets in a
@@ -63,8 +72,10 @@ def resolve_chunks(
     spec), then either rechunks arithmetically via ``compute_chunks`` or
     falls back to the dataset's existing dask chunks.
 
-    Returns an empty mapping for scalar datasets; callers should treat that
-    as "one block covering everything".
+    Returns ``{dim: (size, ...)}``. An empty dict means the dataset has no
+    chunkable dimensions (a single block); callers that emit blocks should
+    treat the empty result as "one block covering everything" and assert
+    against the dataset's own dimensions if needed.
     """
     if chunks is not None:
         chunks = {dim: size for dim, size in chunks.items() if dim in ds.sizes}
@@ -76,7 +87,7 @@ def resolve_chunks(
 def _block_slices_from_resolved(
     ds: xr.Dataset, resolved: Mapping[Hashable, tuple[int, ...]]
 ) -> Iterator[Block]:
-    """Emit blocks given pre-resolved per-dim chunk tuples."""
+    """Emit blocks given pre-resolved per-dim chunk tuples (one per chunk)."""
     if not resolved:
         # No chunkable dimensions. A dimensionless dataset (e.g. scalar
         # metadata variables) is a single block; a dataset that has
@@ -104,8 +115,158 @@ def _block_slices_from_resolved(
 
 # Adapted from Xarray `map_blocks` implementation.
 def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> Iterator[Block]:
-    """Compute block slices for a chunked Dataset."""
+    """Compute block slices for a chunked Dataset (one block per chunk)."""
     yield from _block_slices_from_resolved(ds, resolve_chunks(ds, chunks))
+
+
+def _int_nth_root(value: int, n: int) -> int:
+    """Largest integer ``r`` with ``r ** n <= value`` (``value, n >= 1``).
+
+    Used to split a partition budget evenly across ``n`` dimensions. Starts
+    from the float estimate then corrects in both directions so float rounding
+    never makes the result too large.
+    """
+    if n == 1 or value <= 1:
+        return value if n == 1 else 1
+    r = int(value ** (1.0 / n))
+    while (r + 1) ** n <= value:
+        r += 1
+    while r > 1 and r**n > value:
+        r -= 1
+    return r
+
+
+def coalesce_group_sizes(
+    chunk_counts: dict[Hashable, int], target: int | None
+) -> dict[Hashable, int]:
+    """Per-dimension native-chunk group sizes that bound the partition count.
+
+    Returns ``{dim: group_size}`` where merging ``group_size`` consecutive
+    native chunks along ``dim`` yields ``prod(ceil(count / group)) <= target``
+    coalesced partitions. The result is the identity (all ``1``) when ``target``
+    is ``None`` or the native partition count already fits under ``target``.
+
+    Uses a balanced *tight* allocation: each dimension (fewest native chunks
+    first) is handed an equal share of the remaining partition budget, capped
+    at its own chunk count. Handing small dimensions their full count first
+    frees the unused budget for the larger, more prunable dimensions, so the
+    result hugs ``target`` from below, maximising pruning granularity in every
+    dimension. ``prod(parts) <= target`` is guaranteed by the running
+    floor-division regardless of float rounding, and the cost is O(D log D),
+    independent of the total native chunk count (which can be in the tens of
+    millions).
+    """
+    groups: dict[Hashable, int] = {dim: 1 for dim in chunk_counts}
+    if target is None or not chunk_counts:
+        return groups
+
+    native_partitions = 1
+    for count in chunk_counts.values():
+        native_partitions *= count
+    if native_partitions <= target:
+        return groups  # already fits: one partition per native chunk
+
+    remaining = target
+    dims_by_count = sorted(chunk_counts, key=lambda d: chunk_counts[d])
+    for offset, dim in enumerate(dims_by_count):
+        dims_left = len(dims_by_count) - offset
+        share = _int_nth_root(remaining, dims_left)
+        parts = max(1, min(chunk_counts[dim], share))
+        group = -(-chunk_counts[dim] // parts)  # ceil(count / parts)
+        groups[dim] = group
+        # Actual partitions after the ceil may be fewer than `parts`; divide by
+        # the real count so the leftover budget flows to subsequent dimensions.
+        remaining //= -(-chunk_counts[dim] // group)
+    return groups
+
+
+def _make_subblock_iter(
+    ds: xr.Dataset,
+    chunk_bounds: Mapping,
+    native_ranges: dict[Hashable, tuple[int, int]],
+) -> Callable[[], Iterator[Block]]:
+    """Return a re-iterable thunk over a coalesced partition's native blocks.
+
+    The thunk closes over only ``native_ranges`` (a handful of ints per
+    dimension) and the shared ``chunk_bounds``; the native sub-block slice
+    dicts are reconstructed lazily on each call. This keeps per-partition
+    registration memory O(D), not O(num_native_chunks), while still letting
+    the partition be scanned repeatedly (a table can be queried many times).
+    """
+    dims = list(native_ranges)
+    index_ranges = [range(*native_ranges[dim]) for dim in dims]
+
+    def subblocks() -> Iterator[Block]:
+        for combo in itertools.product(*index_ranges):
+            chunk_index = dict(zip(dims, combo))
+            yield {
+                dim: _get_chunk_slicer(dim, chunk_index, chunk_bounds)
+                for dim in ds.dims
+            }
+
+    return subblocks
+
+
+def _coalesced_blocks_from_resolved(
+    ds: xr.Dataset,
+    resolved: Mapping[Hashable, tuple[int, ...]],
+    target: int | None,
+) -> Iterator[tuple[Block, Callable[[], Iterator[Block]]]]:
+    """``coalesced_blocks`` body, given pre-resolved chunk tuples."""
+    if not resolved:
+        # See _block_slices_from_resolved for the same scalar-dataset guard.
+        assert not ds.sizes, (
+            "Dataset `ds` must be chunked or `chunks` must be provided."
+        )
+        yield {}, lambda: iter([{}])
+        return
+
+    chunk_bounds = {
+        dim: np.cumsum((0,) + tuple(c)) for dim, c in resolved.items()
+    }
+    chunk_counts = {dim: len(c) for dim, c in resolved.items()}
+    groups = coalesce_group_sizes(chunk_counts, target)
+    n_groups = {
+        dim: -(-chunk_counts[dim] // groups[dim]) for dim in resolved
+    }
+
+    gk = list(resolved)
+    gv = [range(n_groups[dim]) for dim in gk]
+    for group_index in itertools.product(*gv):
+        gi = dict(zip(gk, group_index))
+        native_ranges: dict[Hashable, tuple[int, int]] = {}
+        super_block: Block = {}
+        for dim in ds.dims:
+            if dim not in gi:
+                super_block[dim] = slice(None)
+                continue
+            start = gi[dim] * groups[dim]
+            stop = min(start + groups[dim], chunk_counts[dim])
+            native_ranges[dim] = (start, stop)
+            super_block[dim] = slice(
+                chunk_bounds[dim][start], chunk_bounds[dim][stop]
+            )
+        yield super_block, _make_subblock_iter(ds, chunk_bounds, native_ranges)
+
+
+def coalesced_blocks(
+    ds: xr.Dataset, chunks: Chunks, target: int | None
+) -> Iterator[tuple[Block, Callable[[], Iterator[Block]]]]:
+    """Yield ``(super_block, subblocks)`` for each coalesced scan partition.
+
+    ``super_block`` is the bounding slice dict over the merged native chunks,
+    used to compute partition-pruning metadata (``_block_metadata``).
+    ``subblocks`` is a re-iterable thunk (see ``_make_subblock_iter``) over the
+    native blocks the partition covers, so a consumer can stream one native
+    chunk at a time and keep peak query memory at a single native chunk.
+
+    With ``target=None`` (or a target above the native partition count) this is
+    equivalent to ``block_slices``: one partition per native chunk, each with a
+    single sub-block.
+    """
+    yield from _coalesced_blocks_from_resolved(
+        ds, resolve_chunks(ds, chunks), target
+    )
 
 
 def explode(ds: xr.Dataset, chunks: Chunks = None) -> Iterator[xr.Dataset]:

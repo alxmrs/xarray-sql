@@ -21,8 +21,9 @@ from .df import (
     Block,
     Chunks,
     DEFAULT_BATCH_SIZE,
+    DEFAULT_TARGET_PARTITIONS,
     _block_metadata,
-    _block_slices_from_resolved,
+    _coalesced_blocks_from_resolved,
     _parse_schema,
     block_slices,
     iter_record_batches,
@@ -194,6 +195,7 @@ def read_xarray_table(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
     coord_arrays: dict[str, np.ndarray] | None = None,
+    target_partitions: int | None = DEFAULT_TARGET_PARTITIONS,
     _iteration_callback: (
         Callable[[Block, list[str] | None], None] | None
     ) = None,
@@ -204,8 +206,12 @@ def read_xarray_table(
     Data is only read when queries are executed, not during registration.
     The table can be queried multiple times.
 
-    Each chunk becomes a separate partition, enabling DataFusion's parallel
-    execution across multiple cores.
+    Native chunks are coalesced into at most ``target_partitions`` scan
+    partitions, so registration cost stays bounded at O(target_partitions)
+    rather than O(num_native_chunks), even for stores with millions of fine
+    chunks. Each partition still streams one native chunk at a time, so peak
+    memory per partition is unchanged. This enables DataFusion's parallel
+    execution while keeping registration tractable.
 
     Note:
         SQL queries with WHERE clauses on dimension columns (time, lat, lon, etc.)
@@ -230,8 +236,17 @@ def read_xarray_table(
             from ARCO-ERA5); the dim coords are otherwise read once per
             ``read_xarray_table`` call, which is a network round-trip for
             Zarr-backed datasets.
-        _iteration_callback: Internal callback for testing. Called with
-            each block dict just before it's converted to Arrow.
+        target_partitions: Upper bound on the number of scan partitions.
+            Native chunks are coalesced (consecutive chunks merged, balanced
+            across dimensions) so this many partitions or fewer are created,
+            keeping registration cost independent of how finely the store is
+            chunked. Coarser partitions mean coarser filter-pushdown pruning;
+            raise this for more selective pruning, lower it for faster
+            registration. Pass ``None`` to disable coalescing entirely (one
+            partition per native chunk, the historical behavior).
+        _iteration_callback: Internal callback for testing. Called once per
+            coalesced partition with that partition's (super-)block dict just
+            before it's converted to Arrow.
 
     Returns:
         A LazyArrowStreamTable ready for registration with DataFusion.
@@ -267,13 +282,14 @@ def read_xarray_table(
     data_var_names = set(ds.data_vars.keys())
 
     def make_partition_factory(
-        block: Block,
+        super_block: Block,
+        subblocks: Callable[[], Iterator[Block]],
     ) -> Callable[[list[str] | None], pa.RecordBatchReader]:
         def make_stream(
             projection_names: list[str] | None,
         ) -> pa.RecordBatchReader:
             if _iteration_callback is not None:
-                _iteration_callback(block, projection_names)
+                _iteration_callback(super_block, projection_names)
 
             if projection_names is not None:
                 # Restrict to the data variables mentioned in the projection.
@@ -281,32 +297,47 @@ def read_xarray_table(
                 data_vars_needed = [
                     c for c in projection_names if c in data_var_names
                 ]
-                if data_vars_needed:
-                    ds_block = ds[data_vars_needed].isel(block)
-                else:
-                    # Only dimension coords requested — drop all data vars to avoid
-                    # loading them unnecessarily (e.g. for queries like SELECT lat, lon).
-                    ds_block = ds.drop_vars(list(ds.data_vars)).isel(block)
                 batch_schema = pa.schema(
                     [schema.field(name) for name in projection_names]
                 )
             else:
-                ds_block = ds.isel(block)
+                data_vars_needed = None
                 batch_schema = schema
 
+            def stream_batches() -> Iterator[pa.RecordBatch]:
+                # Stream one native sub-block at a time so peak memory stays at
+                # a single native chunk, even when many native chunks were
+                # coalesced into this one scan partition.
+                for block in subblocks():
+                    if projection_names is None:
+                        ds_block = ds.isel(block)
+                    elif data_vars_needed:
+                        ds_block = ds[data_vars_needed].isel(block)
+                    else:
+                        # Only dimension coords requested: drop all data vars
+                        # to avoid loading them (e.g. SELECT lat, lon).
+                        ds_block = ds.drop_vars(list(ds.data_vars)).isel(block)
+                    yield from iter_record_batches(
+                        ds_block, batch_schema, batch_size
+                    )
+
             return pa.RecordBatchReader.from_batches(
-                batch_schema,
-                iter_record_batches(ds_block, batch_schema, batch_size),
+                batch_schema, stream_batches()
             )
 
         return make_stream
 
-    # Separate dims whose chunk bounds vary across partitions from those
-    # whose bounds are constant (one chunk spanning the whole axis).  For the
-    # latter we compute min/max once instead of re-scanning the full coord
-    # array on every partition — dominant cost when registering hundreds of
-    # thousands of single-time-step partitions on a 4-D dataset like ERA5.
+    # Resolve chunks once; share with both the static/dynamic metadata split
+    # and the coalesced-block iterator so we don't repeat the work.
     resolved = resolve_chunks(ds, chunks)
+
+    # Separate dims whose chunk bounds vary across partitions from those whose
+    # bounds are constant (one chunk spanning the whole axis).  For the latter
+    # we compute min/max once instead of re-scanning the full coord array on
+    # every partition — dominant cost when registering many partitions on a
+    # multi-dim dataset like ERA5.  This still holds after coalescing: a dim
+    # whose native chunk tuple has length 1 contributes ``slice(None)`` to
+    # every super-block, so its bounds remain constant.
     varying_dims = [d for d, tup in resolved.items() if len(tup) > 1]
     static_dims = [d for d in ds.dims if d not in varying_dims]
     static_block: Block = {d: slice(None) for d in static_dims}
@@ -315,17 +346,22 @@ def read_xarray_table(
     )
 
     def partition_pairs():
-        """Lazily yield (factory, metadata) for each partition.
+        """Lazily yield (factory, metadata) for each coalesced partition.
 
         Consuming this generator one item at a time means Python never holds
-        all N block dicts, metadata dicts, and factory closures simultaneously.
-        Peak Python memory during registration is O(1) per partition instead
-        of O(N_partitions).
+        all partitions' factories and metadata simultaneously. Each factory
+        captures only its super-block and a small re-iterable thunk over native
+        sub-block indices (O(D) ints), so peak registration memory is
+        O(num_partitions), independent of the native chunk count.
         """
-        for block in _block_slices_from_resolved(ds, resolved):
-            dynamic = _block_metadata(coord_arrays, block, dims=varying_dims)
+        for super_block, subblocks in _coalesced_blocks_from_resolved(
+            ds, resolved, target_partitions
+        ):
+            dynamic = _block_metadata(
+                coord_arrays, super_block, dims=varying_dims
+            )
             yield (
-                make_partition_factory(block),
+                make_partition_factory(super_block, subblocks),
                 {**static_ranges, **dynamic},
             )
 
