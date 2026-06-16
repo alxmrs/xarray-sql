@@ -100,8 +100,16 @@ class XarrayContext(SessionContext):
             # Scalar variables group under empty dims, where "_".join(()) is
             # the empty string; fall back to a valid default table name.
             sub_name = table_names.get(dims, "_".join(dims) or "scalar")
+            # The SQL table is ``<name>.<sub_name>``; key the template registry
+            # by that same fully-qualified name so ``template="era5.surface"``
+            # matches the table the user queries (and so sub-tables of different
+            # datasets that share a sub-name don't collide).
             self._from_dataset(
-                sub_name, input_table[var_names], chunks, schema=schema
+                sub_name,
+                input_table[var_names],
+                chunks,
+                schema=schema,
+                registry_name=f"{name}.{sub_name}",
             )
 
         return self
@@ -112,13 +120,16 @@ class XarrayContext(SessionContext):
         input_table: xr.Dataset,
         chunks: Chunks = None,
         schema: Schema | None = None,
+        registry_name: str | None = None,
     ):
         """Register a Dataset as a single SQL table.
 
         Registers a top-level table by default, or a table inside ``schema``
-        (a SQL namespace) when one is given.
+        (a SQL namespace) when one is given. ``registry_name`` is the key the
+        template registry uses (the fully-qualified ``<schema>.<table>`` for
+        namespaced tables); it defaults to ``table_name`` for top-level tables.
         """
-        self._registered_datasets[table_name] = input_table
+        self._registered_datasets[registry_name or table_name] = input_table
         register = (
             self.register_table if schema is None else schema.register_table
         )

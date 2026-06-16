@@ -424,3 +424,172 @@ def test_filtered_query_keeps_present_coords(air_dataset_small):
     out = ctx.sql(f"SELECT * FROM air WHERE lat > {threshold}").to_dataset()
     assert (out["lat"].values > threshold).all()
     assert out.sizes["lat"] < air_dataset_small.sizes["lat"]
+
+
+# ---------------------------------------------------------------------------
+# Filtered/lazy path, empty results, and malformed-grid guards
+# ---------------------------------------------------------------------------
+
+
+def test_filtered_query_through_chunked_path():
+    """A WHERE filter combined with chunks= exercises the lazy SQLBackendArray
+    pushdown (indexer -> df.filter -> searchsorted scatter), not just eager."""
+    import dask.array as da
+
+    ds = xr.Dataset(
+        {"v": (("time", "lat"), np.arange(8 * 5, dtype="float64").reshape(8, 5))},
+        coords={"time": np.arange(8), "lat": np.arange(5) * 1.0},
+    ).chunk({"time": 2})
+    ctx = XarrayContext()
+    ctx.from_dataset("t", ds)
+
+    chunked = ctx.sql(
+        "SELECT * FROM t WHERE lat >= 2 ORDER BY time, lat"
+    ).to_dataset(chunks={"time": 2})
+    assert isinstance(chunked["v"].data, da.Array)  # genuinely lazy/chunked
+    assert list(chunked["lat"].values) == [2.0, 3.0, 4.0]  # filtered subset
+
+    np.testing.assert_array_equal(
+        chunked.compute()["v"].values,
+        ds.sel(lat=ds["lat"] >= 2)["v"].values,
+    )
+
+
+def test_empty_result_eager_and_chunked():
+    """A query that returns zero rows yields a well-formed empty Dataset on
+    both the eager and chunked paths (no exception)."""
+    ds = xr.Dataset(
+        {"v": (("time", "lat"), np.arange(8 * 5, dtype="float64").reshape(8, 5))},
+        coords={"time": np.arange(8), "lat": np.arange(5) * 1.0},
+    ).chunk({"time": 2})
+    ctx = XarrayContext()
+    ctx.from_dataset("t", ds)
+    q = "SELECT * FROM t WHERE lat > 9999"
+
+    eager = ctx.sql(q).to_dataset(chunks=None)
+    assert eager.sizes["time"] == 0 and eager.sizes["lat"] == 0
+
+    chunked = ctx.sql(q).to_dataset(chunks={"time": 2}).compute()
+    assert chunked.sizes["time"] == 0 and chunked.sizes["lat"] == 0
+
+
+def test_integer_var_with_missing_cells_raises():
+    """An integer data variable that doesn't fill the grid raises (integers
+    have no missing-value sentinel) rather than emit silent garbage."""
+    ds = xr.Dataset(
+        {"n": (("lat", "lon"), np.arange(6, dtype=np.int64).reshape(3, 2))},
+        coords={"lat": [0, 1, 2], "lon": [10, 11]},
+    ).chunk({"lat": 3})
+    ctx = XarrayContext()
+    ctx.from_dataset("t", ds)
+    # Drop a single cell -> the lat/lon grid has a hole, but n is int64.
+    with pytest.raises(ValueError, match="integer dtype"):
+        ctx.sql(
+            "SELECT lat, lon, n FROM t WHERE NOT (lat = 1 AND lon = 11)"
+        ).to_dataset(dims=["lat", "lon"])
+
+
+def test_duplicate_dimension_tuples_raise():
+    """Dropping a dimension without aggregating yields duplicate dim tuples
+    (more rows than cells) -> ValueError, not silent last-write-wins."""
+    ds = xr.Dataset(
+        {"v": (("time", "lat"), np.arange(6, dtype="float64").reshape(3, 2))},
+        coords={"time": [0, 1, 2], "lat": [0.0, 1.0]},
+    ).chunk({"time": 3})
+    ctx = XarrayContext()
+    ctx.from_dataset("t", ds)
+    with pytest.raises(ValueError, match="duplicate dimension tuples"):
+        ctx.sql("SELECT lat, v FROM t").to_dataset(dims=["lat"])
+
+
+# ---------------------------------------------------------------------------
+# dims inference / multi-table / chunks inherit edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_inherit_reduction_drops_chunked_dim_is_eager(synthetic_dataset):
+    """The default chunks='inherit' over a reduction that drops the chunked
+    dimension yields an eager (non-dask) result -- the stated default."""
+    import dask.array as da
+
+    ctx = XarrayContext()
+    ctx.from_dataset("t", synthetic_dataset)
+    out = ctx.sql(
+        "SELECT lat, lon, AVG(temperature) AS m FROM t "
+        "GROUP BY lat, lon ORDER BY lat, lon"
+    ).to_dataset(dims=["lat", "lon"])
+    assert not isinstance(out["m"].data, da.Array)
+
+
+def test_multi_table_schema_round_trip():
+    """A mixed-dimension Dataset registers as namespaced tables; one sub-table
+    round-trips, inferring dims from (and recovering metadata via) its
+    registered-name template."""
+    ds = xr.Dataset(
+        {
+            "t2m": (("time", "x"), np.arange(12, dtype="float32").reshape(4, 3)),
+            "temp": (
+                ("time", "lev", "x"),
+                np.arange(24, dtype="float32").reshape(4, 2, 3),
+            ),
+        },
+        coords={"time": np.arange(4), "lev": [100, 200], "x": [0, 1, 2]},
+    ).chunk({"time": 2})
+    ctx = XarrayContext()
+    ctx.from_dataset(
+        "era5",
+        ds,
+        table_names={
+            ("time", "x"): "surface",
+            ("time", "lev", "x"): "atmosphere",
+        },
+    )
+    out = (
+        ctx.sql("SELECT * FROM era5.surface ORDER BY time, x")
+        .to_dataset(template="era5.surface")
+        .compute()
+    )
+    assert set(out.dims) == {"time", "x"}  # dims inferred from the surface table
+    np.testing.assert_array_equal(out["t2m"].values, ds["t2m"].values)
+
+
+def test_dims_inference_ambiguous_raises():
+    """When several registered Datasets' dims all fit the result, dims cannot
+    be inferred unambiguously."""
+    a = xr.Dataset(
+        {"u": (("lat", "lon"), np.zeros((2, 2)))},
+        coords={"lat": [0, 1], "lon": [0, 1]},
+    ).chunk({"lat": 2})
+    b = a.rename({"u": "w"})
+    ctx = XarrayContext()
+    ctx.from_dataset("a", a)
+    ctx.from_dataset("b", b)
+    with pytest.raises(ValueError, match="cannot be inferred"):
+        ctx.sql("SELECT lat, lon, u FROM a").to_dataset()
+
+
+def test_cftime_gregorian_like_round_trips_values():
+    """A noleap (Gregorian-like cftime) dataset round-trips its DATA correctly.
+
+    Known limitation: the calendar label is NOT restored on the reverse path --
+    the time coordinate comes back as datetime64, not cftime. The forward path
+    encodes Gregorian-like cftime as Arrow timestamps; to_dataset does not
+    re-decode them to cftime. This test pins the data round-trip and documents
+    the gap (it deliberately does not assert the time dtype).
+    """
+    times = xr.date_range(
+        "2000-01-01", periods=6, freq="D", calendar="noleap", use_cftime=True
+    )
+    ds = xr.Dataset(
+        {"v": (("time", "x"), np.arange(18, dtype="float64").reshape(6, 3))},
+        coords={"time": times, "x": [0, 1, 2]},
+    ).chunk({"time": 3})
+    ctx = XarrayContext()
+    ctx.from_dataset("t", ds)
+    out = (
+        ctx.sql("SELECT * FROM t ORDER BY time, x")
+        .to_dataset(template=ds)
+        .compute()
+    )
+    assert out.sizes == {"time": 6, "x": 3}
+    np.testing.assert_array_equal(out["v"].values, ds["v"].values)

@@ -156,13 +156,39 @@ def _scatter_batches_to_ndarray(
     values within the caller's requested coord arrays
     (``np.searchsorted``), then scatter-write the value at that index.
 
-    Missing combinations (sparse results from filtered queries) stay as
-    ``NaN`` for floating-point outputs by pre-filling the buffer; integer
-    outputs leave them as ``np.empty``-style undefined values.
+    The result must be a clean grid: exactly one row per cell. We guard both
+    failure modes rather than corrupt silently:
+
+    * **Missing cells** (a filter or non-rectangular result leaves holes).
+      Float outputs pre-fill with ``NaN``; integer outputs have no missing
+      sentinel, so a hole would be silent garbage -- we raise instead.
+    * **Duplicate cells** (more rows than the grid holds, e.g. a query that
+      drops a dimension) -- we raise rather than last-write-wins.
+
+    Raises:
+        ValueError: the result does not fill an integer grid completely, or
+            contains more rows than cells (duplicate dimension tuples), or
+            carries a coordinate value absent from ``requested``.
     """
-    # NaN fill for float outputs; default for int/datetime falls through
-    # to ``np.empty``-style undefined values (but every output cell is
-    # written below for non-sparse cases).
+    n_cells = int(np.prod(out_shape)) if out_shape else 1
+    n_rows = sum(b.num_rows for b in batches)
+    if n_rows > n_cells:
+        raise ValueError(
+            f"the result has {n_rows} rows for a {n_cells}-cell grid while "
+            f"reconstructing {var_name!r}: the dimension columns do not "
+            f"uniquely identify a cell (duplicate dimension tuples). Aggregate "
+            f"or add dimension columns so each row maps to one cell."
+        )
+    if n_rows < n_cells and not np.issubdtype(dtype, np.floating):
+        raise ValueError(
+            f"data variable {var_name!r} has integer dtype {dtype} but the "
+            f"result fills only {n_rows} of {n_cells} cells; integers cannot "
+            f"represent the missing cells. Cast it to a floating type in SQL "
+            f"(e.g. CAST({var_name} AS DOUBLE)), or return a complete grid."
+        )
+
+    # NaN fill for float outputs (sparse cells stay NaN); integer outputs are
+    # guaranteed complete by the check above, so every cell is written below.
     out = (
         np.full(out_shape, np.nan, dtype=dtype)
         if np.issubdtype(dtype, np.floating)
@@ -186,7 +212,19 @@ def _scatter_batches_to_ndarray(
         for d in dimension_columns:
             col_arr = batch.column(schema_names.index(d))
             vals = col_arr.to_numpy(zero_copy_only=False)
+            hi = len(sorted_req[d])
             pos_in_sorted = np.searchsorted(sorted_req[d], vals)
+            # ``searchsorted`` returns an insertion point, not a match. Verify
+            # the row's coordinate actually exists in ``requested`` so a stray
+            # value can't scatter into the wrong cell or index out of bounds.
+            if hi == 0 or not np.array_equal(
+                sorted_req[d][np.clip(pos_in_sorted, 0, hi - 1)], vals
+            ):
+                raise ValueError(
+                    f"result contains {d!r} values absent from the discovered "
+                    f"coordinates while reading {var_name!r}; the coordinate "
+                    f"set and the data are inconsistent."
+                )
             positions.append(sorted_idx[d][pos_in_sorted])
         value_arr = batch.column(schema_names.index(var_name)).to_numpy(
             zero_copy_only=False
@@ -696,9 +734,13 @@ class XarrayDataFrame(DataFrame):
             remaining result columns as data variables.
 
         Raises:
-            ValueError: ``dims`` cannot be inferred, names a missing
-                column, or the result has duplicate dim tuples; or
-                ``template`` names an unknown registered table.
+            ValueError: ``dims`` cannot be inferred; ``template`` names an
+                unknown registered table; the result has duplicate dimension
+                tuples (more rows than the coordinate grid holds); or an
+                integer data variable does not fill the grid completely
+                (integers have no missing-value sentinel -- cast it to a
+                floating type in SQL). These are raised lazily on the chunked
+                path, when a chunk is first read.
         """
         template = self._resolve_template(template)
         dims = dims or self._infer_dims(preferred_template=template)
