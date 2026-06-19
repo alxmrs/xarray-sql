@@ -196,6 +196,8 @@ I want to give a special thanks to the following folks and institutions:
   who are working to make this library better.
 - Andrew Huang for the sense of taste he brings to the project and consummate code
   changes.
+- Aman Kumar for spending a considerable amount of his GSoC internship 
+  contributing to this project. 
 
 
 ## License
