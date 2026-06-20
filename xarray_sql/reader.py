@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pyarrow as pa
 import xarray as xr
 
@@ -192,7 +193,7 @@ def read_xarray_table(
     chunks: Chunks = None,
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
-    coord_arrays: dict | None = None,
+    coord_arrays: dict[str, np.ndarray] | None = None,
     _iteration_callback: (
         Callable[[Block, list[str] | None], None] | None
     ) = None,
