@@ -1102,6 +1102,44 @@ class TestFilterPushdown:
             f"Expected exactly 2 partitions for lat < 0, got {tracker.iteration_count}"
         )
 
+    def test_unchunked_dim_filter_still_prunes(self):
+        """Filters on an *unchunked* dim still prune via static bounds.
+
+        ``read_xarray_table`` precomputes bounds for unchunked dims once
+        rather than re-scanning their full coord array on every partition.
+        Regression guard: if the static-range merge ever stops attaching
+        those bounds to each partition, the Rust pruner falls back to
+        "never prune" for the unchunked dim and reads every partition.
+        """
+        np.random.seed(42)
+        time = pd.date_range("2020-01-01", periods=100, freq="D")
+        lat = np.linspace(-90, 90, 50)  # unchunked
+        data = np.random.rand(100, 50).astype(np.float32)
+
+        ds = xr.Dataset(
+            {"temperature": (["time", "lat"], data)},
+            coords={"time": time, "lat": lat},
+        )
+
+        tracker = IterationTracker()
+        # Chunk only on time → lat is "static" (one chunk spanning the axis).
+        # Every partition still spans lat -90 to +90.
+        table = read_xarray_table(
+            ds, chunks={"time": 25}, _iteration_callback=tracker
+        )
+
+        ctx = SessionContext()
+        ctx.register_table("test", table)
+
+        # WHERE lat > 100 matches no rows.  With static bounds (lat ∈ [-90, 90])
+        # attached to every partition, the pruner drops *all* partitions and
+        # the table is never iterated.  Without them, all 4 are read.
+        ctx.sql("SELECT COUNT(*) FROM test WHERE lat > 100").collect()
+        assert tracker.iteration_count == 0, (
+            "Static lat bounds should let the pruner skip every partition; "
+            f"got {tracker.iteration_count} partitions read."
+        )
+
     def test_no_pruning_for_data_column_filters(self, time_chunked_ds):
         """Filters on data columns (not dimensions) should not prune."""
         tracker = IterationTracker()

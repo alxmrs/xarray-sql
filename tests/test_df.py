@@ -10,6 +10,7 @@ from xarray_sql.df import (
     DEFAULT_BATCH_SIZE,
     _parse_schema,
     block_slices,
+    compute_chunks,
     dataset_to_record_batch,
     explode,
     from_map,
@@ -473,3 +474,61 @@ def test_read_xarray_table_memory_bounds(large_ds):
         )
     finally:
         tracemalloc.stop()
+
+
+# ---------------------------------------------------------------------------
+# compute_chunks: arithmetic replacement for ds.chunk(...).chunks.
+# Dask serves as the source of truth.
+# ---------------------------------------------------------------------------
+
+
+def _dask_chunks(ds: xr.Dataset, chunks: dict) -> dict:
+    rechunked = ds.copy(data=None, deep=False).chunk(chunks)
+    return {str(k): tuple(v) for k, v in rechunked.chunks.items()}
+
+
+def _normalise(result: dict) -> dict:
+    return {str(k): tuple(v) for k, v in result.items()}
+
+
+def _simple_ds(shape: tuple[int, ...], dims: tuple[str, ...]) -> xr.Dataset:
+    return xr.Dataset(
+        {"v": (dims, np.zeros(shape))},
+        coords={d: np.arange(s) for d, s in zip(dims, shape)},
+    )
+
+
+@pytest.mark.parametrize(
+    "ds,chunks",
+    [
+        # Even divide on a single dim.
+        (_simple_ds((10,), ("x",)), {"x": 5}),
+        # Uneven divide: trailing remainder chunk.
+        (_simple_ds((10,), ("x",)), {"x": 3}),
+        # Requested chunk size larger than the dim → single chunk.
+        (_simple_ds((5,), ("x",)), {"x": 100}),
+        # Multi-dim spec with a dim left unspecified (kept as one chunk).
+        (_simple_ds((4, 6), ("x", "y")), {"x": 2}),
+        # Multi-dim spec rechunking every dim.
+        (_simple_ds((7, 11, 13), ("a", "b", "c")), {"a": 3, "b": 4, "c": 5}),
+    ],
+)
+def test_compute_chunks_matches_dask(ds, chunks):
+    assert _normalise(compute_chunks(ds, chunks)) == _dask_chunks(ds, chunks)
+
+
+def test_compute_chunks_preserves_existing_dask_chunking():
+    # When the dataset is already dask-backed, rechunking one dim must
+    # leave other dims' existing chunk tuples alone.
+    ds = _simple_ds((4, 5), ("x", "y")).chunk({"x": 1, "y": 2})
+    chunks = {"x": 2}
+    assert _normalise(compute_chunks(ds, chunks)) == _dask_chunks(ds, chunks)
+
+
+def test_compute_chunks_tuples_sum_to_dim_size():
+    # Dask-independent invariant: every per-dim chunk tuple must fully
+    # cover its dimension.
+    ds = _simple_ds((7, 11, 13), ("a", "b", "c"))
+    result = compute_chunks(ds, {"a": 3, "b": 4, "c": 5})
+    for dim, tup in result.items():
+        assert sum(tup) == ds.sizes[dim]

@@ -1,5 +1,5 @@
 import itertools
-from collections.abc import Callable, Hashable, Iterator, Mapping
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping
 from typing import Any
 
 import numpy as np
@@ -26,22 +26,58 @@ def _get_chunk_slicer(
     return slice(None)
 
 
-# Adapted from Xarray `map_blocks` implementation.
-def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> Iterator[Block]:
-    """Compute block slices for a chunked Dataset."""
+def compute_chunks(
+    ds: xr.Dataset, chunks: dict[str, int]
+) -> dict[Hashable, tuple[int, ...]]:
+    """Per-dim chunk-size tuples matching ``ds.chunk(chunks).chunks``.
+
+    Pure arithmetic replacement for the dask rechunk round-trip; dask's
+    ``.chunk()`` eagerly builds a task graph, which dominates
+    ``block_slices()`` cost on large datasets.
+    """
+    existing = dict(ds.chunks) if ds.chunks else {}
+    result: dict[Hashable, tuple[int, ...]] = {}
+    for dim in ds.dims:
+        size = ds.sizes[dim]
+        if dim in chunks:
+            cs = chunks[dim]
+            if cs <= 0 or cs >= size:
+                result[dim] = (size,)
+            else:
+                n_full, rem = divmod(size, cs)
+                result[dim] = (cs,) * n_full + ((rem,) if rem else ())
+        elif dim in existing:
+            result[dim] = tuple(existing[dim])
+        else:
+            result[dim] = (size,)
+    return result
+
+
+def resolve_chunks(
+    ds: xr.Dataset, chunks: Chunks
+) -> Mapping[Hashable, tuple[int, ...]]:
+    """Normalise the user's ``chunks`` argument to per-dim size tuples.
+
+    Filters out keys for dims this dataset doesn't have (sub-datasets in a
+    heterogeneous group need not contain every dimension named in the
+    spec), then either rechunks arithmetically via ``compute_chunks`` or
+    falls back to the dataset's existing dask chunks.
+
+    Returns an empty mapping for scalar datasets; callers should treat that
+    as "one block covering everything".
+    """
     if chunks is not None:
-        # Only chunk dimensions this dataset actually has. A sub-dataset
-        # (e.g. one dimension group of a heterogeneous Dataset) need not
-        # contain every dimension named in the chunks spec.
         chunks = {dim: size for dim, size in chunks.items() if dim in ds.sizes}
     if chunks:
-        for_chunking = ds.copy(data=None, deep=False).chunk(chunks)
-        chunks = for_chunking.chunks
-        del for_chunking
-    else:
-        chunks = ds.chunks
+        return compute_chunks(ds, chunks)
+    return {d: tuple(c) for d, c in ds.chunks.items()}
 
-    if not chunks:
+
+def _block_slices_from_resolved(
+    ds: xr.Dataset, resolved: Mapping[Hashable, tuple[int, ...]]
+) -> Iterator[Block]:
+    """Emit blocks given pre-resolved per-dim chunk tuples."""
+    if not resolved:
         # No chunkable dimensions. A dimensionless dataset (e.g. scalar
         # metadata variables) is a single block; a dataset that has
         # dimensions but no chunking is a user error.
@@ -51,22 +87,25 @@ def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> Iterator[Block]:
         yield {}
         return
 
-    # chunks is Dict[str, Tuple[int, ...]] from xarray
     chunk_bounds = {
-        dim: np.cumsum((0,) + tuple(c))  # type: ignore[arg-type]
-        for dim, c in chunks.items()
+        dim: np.cumsum((0,) + tuple(c)) for dim, c in resolved.items()
     }
-    ichunk = {dim: range(len(tuple(c))) for dim, c in chunks.items()}  # type: ignore[arg-type]
+    ichunk = {dim: range(len(tuple(c))) for dim, c in resolved.items()}
     ick, icv = zip(*ichunk.items())  # Makes same order of keys and val.
     chunk_idxs = (dict(zip(ick, i)) for i in itertools.product(*icv))
-    blocks = (
+    yield from (
         {
             dim: _get_chunk_slicer(dim, chunk_index, chunk_bounds)
             for dim in ds.dims
         }
         for chunk_index in chunk_idxs
     )
-    yield from blocks
+
+
+# Adapted from Xarray `map_blocks` implementation.
+def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> Iterator[Block]:
+    """Compute block slices for a chunked Dataset."""
+    yield from _block_slices_from_resolved(ds, resolve_chunks(ds, chunks))
 
 
 def explode(ds: xr.Dataset, chunks: Chunks = None) -> Iterator[xr.Dataset]:
@@ -376,7 +415,11 @@ def _parse_schema(ds: xr.Dataset) -> pa.Schema:
 PartitionBounds = dict[str, tuple[Any, Any, str]]
 
 
-def _block_metadata(coord_arrays: dict, block: Block) -> PartitionBounds:
+def _block_metadata(
+    coord_arrays: dict,
+    block: Block,
+    dims: Iterable[Hashable] | None = None,
+) -> PartitionBounds:
     """Compute min/max coordinate values for a single partition block.
 
     Args:
@@ -384,14 +427,19 @@ def _block_metadata(coord_arrays: dict, block: Block) -> PartitionBounds:
             string.  Hoist this outside any loop to avoid repeated remote I/O
             for Zarr-backed datasets.
         block: A single block slice dict from block_slices().
+        dims: Optional restriction to a subset of dims to compute.  Used by
+            ``read_xarray_table`` to skip unchunked dims whose bounds are
+            constant across all partitions and have been precomputed once.
+            Defaults to all dims present in ``block``.
 
     Returns:
         Dict mapping dimension name to (min_value, max_value, dtype_str).
         Dimensions with an empty slice are omitted; the Rust pruning logic
         treats missing dimensions conservatively (never prunes on them).
     """
+    items = ((d, block[d]) for d in dims) if dims is not None else block.items()
     ranges: PartitionBounds = {}
-    for dim, slc in block.items():
+    for dim, slc in items:
         coord_values = coord_arrays[str(dim)][slc]
         if len(coord_values) == 0:
             continue
