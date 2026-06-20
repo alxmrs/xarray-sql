@@ -53,21 +53,30 @@ def compute_chunks(
     return result
 
 
-# Adapted from Xarray `map_blocks` implementation.
-def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> Iterator[Block]:
-    """Compute block slices for a chunked Dataset."""
+def resolve_chunks(
+    ds: xr.Dataset, chunks: Chunks
+) -> Mapping[Hashable, tuple[int, ...]]:
+    """Normalise the user's ``chunks`` argument to per-dim size tuples.
+
+    Filters out keys for dims this dataset doesn't have (sub-datasets in a
+    heterogeneous group need not contain every dimension named in the
+    spec), then either rechunks arithmetically via ``compute_chunks`` or
+    falls back to the dataset's existing dask chunks.
+
+    Returns an empty mapping for scalar datasets; callers should treat that
+    as "one block covering everything".
+    """
     if chunks is not None:
-        # Only chunk dimensions this dataset actually has. A sub-dataset
-        # (e.g. one dimension group of a heterogeneous Dataset) need not
-        # contain every dimension named in the chunks spec.
         chunks = {dim: size for dim, size in chunks.items() if dim in ds.sizes}
     if chunks:
-        resolved: Mapping[Hashable, tuple[int, ...]] = compute_chunks(
-            ds, chunks
-        )
-    else:
-        resolved = ds.chunks
+        return compute_chunks(ds, chunks)
+    return {d: tuple(c) for d, c in ds.chunks.items()}
 
+
+def _block_slices_from_resolved(
+    ds: xr.Dataset, resolved: Mapping[Hashable, tuple[int, ...]]
+) -> Iterator[Block]:
+    """Emit blocks given pre-resolved per-dim chunk tuples."""
     if not resolved:
         # No chunkable dimensions. A dimensionless dataset (e.g. scalar
         # metadata variables) is a single block; a dataset that has
@@ -78,21 +87,25 @@ def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> Iterator[Block]:
         yield {}
         return
 
-    # resolved is Mapping[Hashable, Tuple[int, ...]]
     chunk_bounds = {
         dim: np.cumsum((0,) + tuple(c)) for dim, c in resolved.items()
     }
     ichunk = {dim: range(len(tuple(c))) for dim, c in resolved.items()}
     ick, icv = zip(*ichunk.items())  # Makes same order of keys and val.
     chunk_idxs = (dict(zip(ick, i)) for i in itertools.product(*icv))
-    blocks = (
+    yield from (
         {
             dim: _get_chunk_slicer(dim, chunk_index, chunk_bounds)
             for dim in ds.dims
         }
         for chunk_index in chunk_idxs
     )
-    yield from blocks
+
+
+# Adapted from Xarray `map_blocks` implementation.
+def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> Iterator[Block]:
+    """Compute block slices for a chunked Dataset."""
+    yield from _block_slices_from_resolved(ds, resolve_chunks(ds, chunks))
 
 
 def explode(ds: xr.Dataset, chunks: Chunks = None) -> Iterator[xr.Dataset]:

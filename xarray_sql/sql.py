@@ -89,9 +89,18 @@ class XarrayContext(SessionContext):
         """
         groups = _group_vars_by_dims(input_table)
 
+        # Materialise dim coordinates once and share across every sub-table.
+        # For Zarr-backed parents (e.g. ARCO-ERA5 on GCS) this saves one
+        # network round-trip per dim per dim-group.
+        coord_arrays = {
+            str(dim): input_table.coords[dim].values for dim in input_table.dims
+        }
+
         if len(groups) <= 1:
             self._registered_datasets[name] = input_table
-            return self._from_dataset(name, input_table, chunks)
+            return self._from_dataset(
+                name, input_table, chunks, coord_arrays=coord_arrays
+            )
 
         table_names = table_names or {}
         schema = Schema.memory_schema(self)
@@ -102,7 +111,13 @@ class XarrayContext(SessionContext):
             # the empty string; fall back to a valid default table name.
             sub_name = table_names.get(dims, "_".join(dims) or "scalar")
             sub_ds = input_table[var_names]
-            self._from_dataset(sub_name, sub_ds, chunks, schema=schema)
+            self._from_dataset(
+                sub_name,
+                sub_ds,
+                chunks,
+                schema=schema,
+                coord_arrays=coord_arrays,
+            )
             # Track the fully-qualified name so XarrayDataFrame metadata
             # recovery can find this Dataset on round-trip.
             self._registered_datasets[f"{name}.{sub_name}"] = sub_ds
@@ -115,6 +130,7 @@ class XarrayContext(SessionContext):
         input_table: xr.Dataset,
         chunks: Chunks = None,
         schema: Schema | None = None,
+        coord_arrays: dict | None = None,
     ):
         """Register a Dataset as a single SQL table.
 
@@ -124,7 +140,10 @@ class XarrayContext(SessionContext):
         register = (
             self.register_table if schema is None else schema.register_table
         )
-        register(table_name, read_xarray_table(input_table, chunks))
+        register(
+            table_name,
+            read_xarray_table(input_table, chunks, coord_arrays=coord_arrays),
+        )
         self._maybe_register_cftime_udf(input_table)
         return self
 

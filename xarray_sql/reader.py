@@ -21,10 +21,11 @@ from .df import (
     Chunks,
     DEFAULT_BATCH_SIZE,
     _block_metadata,
+    _block_slices_from_resolved,
     _parse_schema,
     block_slices,
-    compute_chunks,
     iter_record_batches,
+    resolve_chunks,
 )
 
 if TYPE_CHECKING:
@@ -191,6 +192,7 @@ def read_xarray_table(
     chunks: Chunks = None,
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    coord_arrays: dict | None = None,
     _iteration_callback: (
         Callable[[Block, list[str] | None], None] | None
     ) = None,
@@ -221,6 +223,12 @@ def read_xarray_table(
         batch_size: Maximum rows per Arrow RecordBatch emitted per partition.
             Smaller values let DataFusion start processing earlier; the default
             (65 536) works well for most datasets.
+        coord_arrays: Pre-materialised coordinate arrays keyed by dim-name
+            string.  Hand in to share a single read across multiple tables
+            built from the same parent Dataset (e.g. surface + atmosphere
+            from ARCO-ERA5); the dim coords are otherwise read once per
+            ``read_xarray_table`` call, which is a network round-trip for
+            Zarr-backed datasets.
         _iteration_callback: Internal callback for testing. Called with
             each block dict just before it's converted to Arrow.
 
@@ -247,8 +255,11 @@ def read_xarray_table(
     schema = _parse_schema(ds)
 
     # Hoist coordinate reads once; avoids N_partitions remote I/O calls for
-    # Zarr-backed datasets (e.g. ARCO-ERA5 on GCS).
-    coord_arrays = {str(dim): ds.coords[dim].values for dim in ds.dims}
+    # Zarr-backed datasets (e.g. ARCO-ERA5 on GCS).  When the caller supplies
+    # pre-materialised arrays (e.g. shared across surface + atmosphere
+    # tables), reuse them and skip the extra read.
+    if coord_arrays is None:
+        coord_arrays = {str(dim): ds.coords[dim].values for dim in ds.dims}
 
     # Determine which column names are data variables (not dimension coordinates).
     # Used by the factory to skip loading unrequested variables.
@@ -294,12 +305,7 @@ def read_xarray_table(
     # latter we compute min/max once instead of re-scanning the full coord
     # array on every partition — dominant cost when registering hundreds of
     # thousands of single-time-step partitions on a 4-D dataset like ERA5.
-    if chunks:
-        resolved = compute_chunks(ds, chunks)
-    elif ds.chunks:
-        resolved = {d: tuple(c) for d, c in ds.chunks.items()}
-    else:
-        resolved = {}
+    resolved = resolve_chunks(ds, chunks)
     varying_dims = [d for d, tup in resolved.items() if len(tup) > 1]
     static_dims = [d for d in ds.dims if d not in varying_dims]
     static_block: Block = {d: slice(None) for d in static_dims}
@@ -315,7 +321,7 @@ def read_xarray_table(
         Peak Python memory during registration is O(1) per partition instead
         of O(N_partitions).
         """
-        for block in block_slices(ds, chunks):
+        for block in _block_slices_from_resolved(ds, resolved):
             dynamic = _block_metadata(coord_arrays, block, dims=varying_dims)
             yield (
                 make_partition_factory(block),
