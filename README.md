@@ -34,6 +34,7 @@ ctx.from_dataset('era5', ds, chunks=dict(time=6), table_names={
     ('time', 'latitude', 'longitude'): 'surface',
     ('time', 'level', 'latitude', 'longitude'): 'atmosphere',
 })
+# Registration takes ~10s on my machine.
 
 # Heads up: ARCO-ERA5 has 262 surface + 11 atmospheric variables. The library
 # pushes column projection down to Zarr, so SELECT only fetches what you ask
