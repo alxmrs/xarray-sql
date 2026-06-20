@@ -30,7 +30,7 @@ ds = xr.open_zarr(
 
 ctx = xql.XarrayContext()
 # Make sure to pass `chunks`!
-ctx.from_dataset('era5', ds, chunks=dict(time=1), table_names={
+ctx.from_dataset('era5', ds, chunks=dict(time=6), table_names={
     ('time', 'latitude', 'longitude'): 'surface',
     ('time', 'level', 'latitude', 'longitude'): 'atmosphere',
 })

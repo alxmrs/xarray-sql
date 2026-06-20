@@ -23,6 +23,7 @@ from .df import (
     _block_metadata,
     _parse_schema,
     block_slices,
+    compute_chunks,
     iter_record_batches,
 )
 
@@ -288,6 +289,24 @@ def read_xarray_table(
 
         return make_stream
 
+    # Separate dims whose chunk bounds vary across partitions from those
+    # whose bounds are constant (one chunk spanning the whole axis).  For the
+    # latter we compute min/max once instead of re-scanning the full coord
+    # array on every partition — dominant cost when registering hundreds of
+    # thousands of single-time-step partitions on a 4-D dataset like ERA5.
+    if chunks:
+        resolved = compute_chunks(ds, chunks)
+    elif ds.chunks:
+        resolved = {d: tuple(c) for d, c in ds.chunks.items()}
+    else:
+        resolved = {}
+    varying_dims = [d for d, tup in resolved.items() if len(tup) > 1]
+    static_dims = [d for d in ds.dims if d not in varying_dims]
+    static_block: Block = {d: slice(None) for d in static_dims}
+    static_ranges = _block_metadata(
+        coord_arrays, static_block, dims=static_dims
+    )
+
     def partition_pairs():
         """Lazily yield (factory, metadata) for each partition.
 
@@ -297,9 +316,10 @@ def read_xarray_table(
         of O(N_partitions).
         """
         for block in block_slices(ds, chunks):
+            dynamic = _block_metadata(coord_arrays, block, dims=varying_dims)
             yield (
                 make_partition_factory(block),
-                _block_metadata(coord_arrays, block),
+                {**static_ranges, **dynamic},
             )
 
     return LazyArrowStreamTable(partition_pairs(), schema)

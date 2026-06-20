@@ -18,8 +18,10 @@ partitions for ``WHERE time …`` filters, and pushes ``WHERE
 latitude/longitude …`` down to dimension columns.
 
 ARCO-ERA5's atmospheric variables are stored in native Zarr chunks of shape
-``(1, 37, 721, 1440)`` — about 150 MB per hour. We align Dask chunks to that
-shape with ``chunks=dict(time=1)`` so chunks fetch from GCS concurrently.
+``(1, 37, 721, 1440)`` — about 150 MB per hour. ``chunks=dict(time=6)`` groups
+six native chunks per DataFusion partition: large enough to keep partition
+count (and registration time) low, small enough that a 6-hour WHERE clause
+hits a single partition with no wasted I/O.
 
 The Zarr is read anonymously from the public GCS bucket — no auth required.
 """
@@ -57,7 +59,7 @@ def main() -> None:
     ctx.from_dataset(
         "era5",
         ds,
-        chunks=dict(time=1),
+        chunks=dict(time=6),
         table_names={
             ("time", "latitude", "longitude"): "surface",
             ("time", "level", "latitude", "longitude"): "atmosphere",

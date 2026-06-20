@@ -1,5 +1,5 @@
 import itertools
-from collections.abc import Callable, Hashable, Iterator, Mapping
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping
 from typing import Any
 
 import numpy as np
@@ -402,7 +402,11 @@ def _parse_schema(ds: xr.Dataset) -> pa.Schema:
 PartitionBounds = dict[str, tuple[Any, Any, str]]
 
 
-def _block_metadata(coord_arrays: dict, block: Block) -> PartitionBounds:
+def _block_metadata(
+    coord_arrays: dict,
+    block: Block,
+    dims: Iterable[Hashable] | None = None,
+) -> PartitionBounds:
     """Compute min/max coordinate values for a single partition block.
 
     Args:
@@ -410,14 +414,19 @@ def _block_metadata(coord_arrays: dict, block: Block) -> PartitionBounds:
             string.  Hoist this outside any loop to avoid repeated remote I/O
             for Zarr-backed datasets.
         block: A single block slice dict from block_slices().
+        dims: Optional restriction to a subset of dims to compute.  Used by
+            ``read_xarray_table`` to skip unchunked dims whose bounds are
+            constant across all partitions and have been precomputed once.
+            Defaults to all dims present in ``block``.
 
     Returns:
         Dict mapping dimension name to (min_value, max_value, dtype_str).
         Dimensions with an empty slice are omitted; the Rust pruning logic
         treats missing dimensions conservatively (never prunes on them).
     """
+    items = ((d, block[d]) for d in dims) if dims is not None else block.items()
     ranges: PartitionBounds = {}
-    for dim, slc in block.items():
+    for dim, slc in items:
         coord_values = coord_arrays[str(dim)][slc]
         if len(coord_values) == 0:
             continue
