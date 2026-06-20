@@ -26,6 +26,33 @@ def _get_chunk_slicer(
     return slice(None)
 
 
+def compute_chunks(
+    ds: xr.Dataset, chunks: dict[str, int]
+) -> dict[Hashable, tuple[int, ...]]:
+    """Per-dim chunk-size tuples matching ``ds.chunk(chunks).chunks``.
+
+    Pure arithmetic replacement for the dask rechunk round-trip; dask's
+    ``.chunk()`` eagerly builds a task graph, which dominates
+    ``block_slices()`` cost on large datasets.
+    """
+    existing = dict(ds.chunks) if ds.chunks else {}
+    result: dict[Hashable, tuple[int, ...]] = {}
+    for dim in ds.dims:
+        size = ds.sizes[dim]
+        if dim in chunks:
+            cs = chunks[dim]
+            if cs <= 0 or cs >= size:
+                result[dim] = (size,)
+            else:
+                n_full, rem = divmod(size, cs)
+                result[dim] = (cs,) * n_full + ((rem,) if rem else ())
+        elif dim in existing:
+            result[dim] = tuple(existing[dim])
+        else:
+            result[dim] = (size,)
+    return result
+
+
 # Adapted from Xarray `map_blocks` implementation.
 def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> Iterator[Block]:
     """Compute block slices for a chunked Dataset."""
@@ -35,13 +62,13 @@ def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> Iterator[Block]:
         # contain every dimension named in the chunks spec.
         chunks = {dim: size for dim, size in chunks.items() if dim in ds.sizes}
     if chunks:
-        for_chunking = ds.copy(data=None, deep=False).chunk(chunks)
-        chunks = for_chunking.chunks
-        del for_chunking
+        resolved: Mapping[Hashable, tuple[int, ...]] = compute_chunks(
+            ds, chunks
+        )
     else:
-        chunks = ds.chunks
+        resolved = ds.chunks
 
-    if not chunks:
+    if not resolved:
         # No chunkable dimensions. A dimensionless dataset (e.g. scalar
         # metadata variables) is a single block; a dataset that has
         # dimensions but no chunking is a user error.
@@ -51,12 +78,11 @@ def block_slices(ds: xr.Dataset, chunks: Chunks = None) -> Iterator[Block]:
         yield {}
         return
 
-    # chunks is Dict[str, Tuple[int, ...]] from xarray
+    # resolved is Mapping[Hashable, Tuple[int, ...]]
     chunk_bounds = {
-        dim: np.cumsum((0,) + tuple(c))  # type: ignore[arg-type]
-        for dim, c in chunks.items()
+        dim: np.cumsum((0,) + tuple(c)) for dim, c in resolved.items()
     }
-    ichunk = {dim: range(len(tuple(c))) for dim, c in chunks.items()}  # type: ignore[arg-type]
+    ichunk = {dim: range(len(tuple(c))) for dim, c in resolved.items()}
     ick, icv = zip(*ichunk.items())  # Makes same order of keys and val.
     chunk_idxs = (dict(zip(ick, i)) for i in itertools.product(*icv))
     blocks = (
