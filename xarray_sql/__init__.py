@@ -1,7 +1,7 @@
 from . import cftime
+from .df import from_map
 from .reader import read_xarray, read_xarray_table
 from .sql import XarrayContext
-from .df import from_map
 
 __all__ = [
     "cftime",

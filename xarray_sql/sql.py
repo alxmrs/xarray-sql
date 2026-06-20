@@ -5,11 +5,22 @@ from collections import defaultdict
 
 from . import cftime as cft
 from .df import Chunks
+from .ds import XarrayDataFrame
 from .reader import read_xarray_table
 
 
 class XarrayContext(SessionContext):
     """A datafusion `SessionContext` that also supports `xarray.Dataset`s."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Track registered xarray Datasets so XarrayDataFrame can recover
+        # defaults (dimension_columns) and metadata (var/dataset attrs,
+        # non-dim coords, dim-coord dtype) that the forward pivot drops.
+        # Keys are the fully-qualified table names users will reference
+        # in SQL (e.g. ``"air"`` for a uniform-dim Dataset, or
+        # ``"era5.surface"`` for one entry from a multi-dim-group split).
+        self._registered_datasets: dict[str, xr.Dataset] = {}
 
     def from_dataset(
         self,
@@ -79,6 +90,7 @@ class XarrayContext(SessionContext):
         groups = _group_vars_by_dims(input_table)
 
         if len(groups) <= 1:
+            self._registered_datasets[name] = input_table
             return self._from_dataset(name, input_table, chunks)
 
         table_names = table_names or {}
@@ -89,9 +101,11 @@ class XarrayContext(SessionContext):
             # Scalar variables group under empty dims, where "_".join(()) is
             # the empty string; fall back to a valid default table name.
             sub_name = table_names.get(dims, "_".join(dims) or "scalar")
-            self._from_dataset(
-                sub_name, input_table[var_names], chunks, schema=schema
-            )
+            sub_ds = input_table[var_names]
+            self._from_dataset(sub_name, sub_ds, chunks, schema=schema)
+            # Track the fully-qualified name so XarrayDataFrame metadata
+            # recovery can find this Dataset on round-trip.
+            self._registered_datasets[f"{name}.{sub_name}"] = sub_ds
 
         return self
 
@@ -122,6 +136,27 @@ class XarrayContext(SessionContext):
                 if not cft.is_gregorian_like(cal):
                     self.register_udf(cft.make_cftime_udf(units, cal))
                     break  # One UDF per context is enough.
+
+    def sql(self, query: str, *args, **kwargs) -> XarrayDataFrame:
+        """Run a SQL query, returning an :class:`XarrayDataFrame` wrapper.
+
+        Identical to ``datafusion.SessionContext.sql`` except the returned
+        object wraps the DataFusion DataFrame. The wrapper exposes
+        ``.to_pandas()`` (unchanged), forwards every other DataFusion
+        method via ``__getattr__``, and adds
+        ``.to_dataset(dimension_columns=[...])`` for round-tripping the
+        result back to an ``xr.Dataset``.
+
+        Args:
+            query: A SQL query string.
+            *args: Forwarded to ``SessionContext.sql``.
+            **kwargs: Forwarded to ``SessionContext.sql``.
+
+        Returns:
+            An :class:`XarrayDataFrame` wrapping the DataFusion DataFrame.
+        """
+        inner = super().sql(query, *args, **kwargs)
+        return XarrayDataFrame(inner, templates=self._registered_datasets)
 
 
 def _group_vars_by_dims(ds: xr.Dataset) -> dict[tuple[str, ...], list[str]]:
