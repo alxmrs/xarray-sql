@@ -20,22 +20,20 @@ import xarray as xr
 import xarray_sql as xql
 
 
-# Open a year of ARCO-ERA5 — all 273 variables. Selecting a year up front
-# keeps Dask's partition setup cheap before any chunks are read from GCS.
-ds = (
-  xr.open_zarr('gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3',
-               chunks=dict(time=1),
-               storage_options={'token': 'anon'})  # Anonymous read from the public GCS bucket — no auth required.
-  .sel(time='2020')
+# Open ARCO-ERA5 — a weather dataset with 273 variables since 1940. 
+# Turning off dask means we don't have to wait to construct a task graph.
+ds = xr.open_zarr(
+  'gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3',
+  chunks=None,  # Turn dask off
+  storage_options={'token': 'anon'}  # Anonymous read from the public GCS bucket — no auth required.
 )
 
 ctx = xql.XarrayContext()
-ctx.from_dataset('era5', ds, table_names={
+# Make sure to pass `chunks`!
+ctx.from_dataset('era5', ds, chunks=dict(time=1), table_names={
     ('time', 'latitude', 'longitude'): 'surface',
     ('time', 'level', 'latitude', 'longitude'): 'atmosphere',
 })
-# Registration: ~0.5s for a full year of hourly ERA5, all variables.
-
 
 # Heads up: ARCO-ERA5 has 262 surface + 11 atmospheric variables. The library
 # pushes column projection down to Zarr, so SELECT only fetches what you ask
@@ -81,13 +79,26 @@ result = ctx.sql('''
 # | 775   | -2.3064649711534457  |
 # +-------+----------------------+
 
-avg_temp_ds = result.to_dataset(dims=["level"])
-# <xarray.Dataset> Size: 592B
-# Dimensions:  (level: 37)
+ctx.sql('''
+  SELECT latitude, longitude, AVG("2m_temperature") - 273.15 AS avg_c
+  FROM era5.surface
+  WHERE time BETWEEN TIMESTAMP '2020-01-01'
+                 AND TIMESTAMP '2020-01-01 05:00:00'
+  GROUP BY latitude, longitude
+  ORDER BY latitude DESC, longitude
+''').to_dataset(dims=['latitude', 'longitude'], template=ds)
+# <xarray.Dataset> Size: 8MB
+# Dimensions:    (latitude: 721, longitude: 1440)
 # Coordinates:
-#   * level    (level) int64 296B 1000 975 950 925 900 875 850 ... 20 10 7 5 3 2 1
+#   * latitude   (latitude) float32 3kB 90.0 89.75 89.5 ... -89.5 -89.75 -90.0
+#   * longitude  (longitude) float32 6kB 0.0 0.25 0.5 0.75 ... 359.2 359.5 359.8
 # Data variables:
-#     avg_c    (level) float64 296B 6.621 5.186 4.028 ... -21.51 -13.36 -9.021
+#     avg_c      (latitude, longitude) float64 8MB -26.84 -26.84 ... -27.38 -27.38
+# Attributes:
+#     last_updated:           2026-06-20 02:33:34.265980+00:00
+#     valid_time_start:       1940-01-01
+#     valid_time_stop:        2025-12-31
+#     valid_time_stop_era5t:  2026-06-14
 ```
 
 _(A runnable version of this example lives at
