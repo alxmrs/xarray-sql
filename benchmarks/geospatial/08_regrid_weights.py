@@ -42,7 +42,7 @@ import xarray as xr
 
 import xarray_sql as xql
 
-from _harness import check_close, run_case, show_sql, timed
+from _harness import assert_grid_close, run_case, show_sql, timed
 
 
 def _linear_weights(
@@ -134,23 +134,25 @@ def main() -> None:
     """
     show_sql(sql)
 
+    # The result is keyed by dst_id (row-major over the target grid); reshape
+    # it back to the (lat, lon) field it represents.
     with timed("SQL regrid (weight-table JOIN + weighted SUM)"):
-        got = (
-            ctx.sql(sql)
-            .to_pandas()
-            .sort_values("dst_id")
-            .reset_index(drop=True)
+        flat = ctx.sql(sql).to_dataset(dims=["dst_id"]).regridded
+        got = xr.DataArray(
+            flat.values.reshape(len(tlat), len(tlon)),
+            dims=["lat", "lon"],
+            coords={"lat": tlat, "lon": tlon},
         )
 
     # Array reference: xarray's own bilinear interpolation onto the target grid.
     with timed("xarray .interp reference"):
         ref = src_da.interp(lat=tlat, lon=tlon, method="linear")
 
-    check_close("bilinear regrid", got["regridded"], ref, rtol=1e-9, atol=1e-9)
+    assert_grid_close("bilinear regrid", got, ref, rtol=1e-9, atol=1e-9)
 
     print(
-        f"\n  {len(got):,} target cells regridded; "
-        f"value range [{got.regridded.min():.3f}, {got.regridded.max():.3f}]."
+        f"\n  {got.size:,} target cells regridded; "
+        f"value range [{float(got.min()):.3f}, {float(got.max()):.3f}]."
     )
 
 

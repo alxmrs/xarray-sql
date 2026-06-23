@@ -3,7 +3,6 @@
 # dependencies = [
 #   "xarray-sql",
 #   "xarray",
-#   "numpy",
 #   "gcsfs",
 #   "zarr>=3",
 # ]
@@ -30,27 +29,46 @@ the GROUP BY produces a 721-point global temperature profile.
 
 from __future__ import annotations
 
+import xarray as xr
 
 import xarray_sql as xql
 
-from _era5 import open_era5, register_era5
-from _harness import check_close, run_case, show_sql, timed
+from _harness import CaseSkipped, assert_grid_close, run_case, show_sql, timed
 
+_URL = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
 # One day of hourly data, global; the WHERE below prunes ERA5 to this window.
 _DAY = "2020-06-01"
 
 
 def main() -> None:
-    ds = open_era5()
+    # Open the full ARCO-ERA5 archive (lazy, dask off) — no slicing here; the
+    # SQL WHERE clause prunes it to the window we ask for.
+    try:
+        import gcsfs  # noqa: F401 — required by the gs:// protocol
+
+        ds = xr.open_zarr(_URL, chunks=None, storage_options={"token": "anon"})
+    except Exception as exc:  # noqa: BLE001 — any failure → skip, not crash
+        raise CaseSkipped(f"ARCO-ERA5 unavailable ({exc})") from exc
+
     print(
         f"  ARCO-ERA5: {ds.sizes['time']:,} hourly timesteps, "
         f"{ds.sizes['latitude']}×{ds.sizes['longitude']} grid, "
         f"{len(ds.data_vars)} variables (no pre-slicing)"
     )
 
+    # ERA5 mixes surface (time, lat, lon) and atmospheric (… level …) variables,
+    # so register it as two tables under an ``era5`` schema.
     ctx = xql.XarrayContext()
     with timed("register full ERA5"):
-        register_era5(ctx, ds)
+        ctx.from_dataset(
+            "era5",
+            ds,
+            chunks={"time": 6},
+            table_names={
+                ("time", "latitude", "longitude"): "surface",
+                ("time", "level", "latitude", "longitude"): "atmosphere",
+            },
+        )
 
     sql = f"""
         SELECT latitude,
@@ -63,26 +81,27 @@ def main() -> None:
     """
     show_sql(sql)
 
+    # Round-trip the profile back to an xarray Dataset keyed by latitude.
     with timed("SQL zonal mean (WHERE-pruned to one day)"):
-        got = ctx.sql(sql).to_pandas()
+        got = ctx.sql(sql).to_dataset(dims=["latitude"])
 
     # Array reference: reduce the same day over the two un-grouped axes.
     with timed("xarray reference"):
-        window = ds["2m_temperature"].sel(time=_DAY)
-        ref = (window.mean(dim=["longitude", "time"]) - 273.15).sortby(
-            "latitude", ascending=False
+        ref = (
+            ds["2m_temperature"].sel(time=_DAY).mean(["longitude", "time"])
+            - 273.15
         )
 
-    check_close(
+    assert_grid_close(
         "zonal mean (2m_temp vs latitude, °C)",
-        got["air_mean_c"],
+        got.air_mean_c,
         ref,
         rtol=1e-4,
         atol=1e-3,
     )
 
-    print("\n  Global temperature profile (every 10th parallel):")
-    print(got.iloc[::72].to_string(index=False))
+    print("\n  Global temperature profile (every 72nd parallel, °C):")
+    print(got.air_mean_c.isel(latitude=slice(None, None, 72)).to_series())
 
 
 if __name__ == "__main__":

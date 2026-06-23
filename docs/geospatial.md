@@ -12,7 +12,10 @@ operations. But it is not the only one, and for a large and growing audience —
 the people fluent in SQL rather than in `apply_ufunc` and rechunking — it is not
 the most accessible one. [`xarray-sql`](../README.md) lets you pose these
 questions in SQL and answers them with a real query engine (DataFusion),
-complete with partition pruning and projection pushdown.
+complete with partition pruning and projection pushdown. And because a gridded
+result is still gridded data, every query here round-trips its answer straight
+back to an `xarray.Dataset` (via `to_dataset`) — SQL in, an array out, ready to
+plot or save.
 
 This page makes the argument case by case. Every claim below is backed by a
 runnable script in [`benchmarks/geospatial/`](../benchmarks/geospatial/) that

@@ -32,8 +32,8 @@ timestamp + duration arithmetic the engine does natively::
     GROUP BY f.prediction_timedelta
 
 The whole evaluation — temporal alignment, spatial matching, the score — is one
-JOIN and one aggregate. We run it for both models and check each against a NumPy
-reference.
+JOIN and one aggregate. We run it for both models and check each against an
+xarray reference.
 
 Datasets: WeatherBench 2 **Pangu**, **GraphCast**, and **ERA5** at a coarse
 64×32 grid (so the demo is small and fast), read from the public ``gs://
@@ -48,7 +48,13 @@ import xarray as xr
 
 import xarray_sql as xql
 
-from _harness import CaseSkipped, check_close, run_case, show_sql, timed
+from _harness import (
+    CaseSkipped,
+    assert_grid_close,
+    run_case,
+    show_sql,
+    timed,
+)
 
 _SO = {"token": "anon"}
 _GRID = "64x32_equiangular_conservative"
@@ -104,21 +110,23 @@ def _rmse_sql(table: str) -> str:
     """
 
 
-def _rmse_by_lead(ctx: xql.XarrayContext, table: str) -> pd.DataFrame:
-    return ctx.sql(_rmse_sql(table)).to_pandas()
+def _rmse_by_lead(ctx: xql.XarrayContext, table: str) -> xr.DataArray:
+    """Run the RMSE query, returning the skill curve as a DataArray over lead."""
+    return ctx.sql(_rmse_sql(table)).to_dataset(dims=["lead"]).rmse
 
 
-def _reference_rmse(fc: xr.Dataset, truth: xr.Dataset) -> np.ndarray:
-    """NumPy reference: for each lead, align truth at valid_time and take RMSE."""
+def _reference_rmse(fc: xr.Dataset, truth: xr.Dataset) -> xr.DataArray:
+    """xarray reference: for each lead, align truth at valid_time and take RMSE."""
     f = fc[_VAR]
     e = truth[_VAR]
+    leads = f.prediction_timedelta
     out = []
-    for lead in f.prediction_timedelta.values:
-        valid = f.time.values + lead
-        e_at_valid = e.sel(time=valid).values  # (init, lat, lon)
-        diff = f.sel(prediction_timedelta=lead).values - e_at_valid
-        out.append(float(np.sqrt(np.mean(diff**2))))
-    return np.array(out)
+    for lead in leads.values:
+        valid = f.time.values + lead  # valid_time = init + lead
+        e_at_valid = e.sel(time=valid)
+        diff = f.sel(prediction_timedelta=lead) - e_at_valid.values
+        out.append(float(np.sqrt((diff**2).mean())))
+    return xr.DataArray(out, coords={"lead": leads.values}, dims=["lead"])
 
 
 def main() -> None:
@@ -158,22 +166,20 @@ def main() -> None:
     for name, fc in [("pangu", pangu), ("graphcast", graphcast)]:
         with timed(f"SQL RMSE-by-lead: {name}"):
             got = _rmse_by_lead(ctx, name)
-        with timed(f"NumPy reference: {name}"):
+        with timed(f"xarray reference: {name}"):
             ref = _reference_rmse(fc, truth)
-        check_close(
-            f"{name} RMSE(lead)", got["rmse"], ref, rtol=1e-4, atol=1e-3
-        )
+        assert_grid_close(f"{name} RMSE(lead)", got, ref, rtol=1e-4, atol=1e-3)
         results[name] = got
 
     # Headline table: error growth with forecast horizon, both models.
-    leads = results["pangu"]["lead"].dt.total_seconds() / 86400.0
+    lead_days = results["pangu"]["lead"].values / np.timedelta64(1, "D")
     print("\n  2m-temperature RMSE (K) vs lead time — lower is better:")
     print(f"  {'lead (days)':>12} {'Pangu':>9} {'GraphCast':>11}")
-    for i in range(0, len(leads), 4):
+    for i in range(0, len(lead_days), 4):
         print(
-            f"  {leads.iloc[i]:>12.2f} "
-            f"{results['pangu']['rmse'].iloc[i]:>9.3f} "
-            f"{results['graphcast']['rmse'].iloc[i]:>11.3f}"
+            f"  {lead_days[i]:>12.2f} "
+            f"{float(results['pangu'][i]):>9.3f} "
+            f"{float(results['graphcast'][i]):>11.3f}"
         )
 
 

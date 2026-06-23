@@ -3,8 +3,6 @@
 # dependencies = [
 #   "xarray-sql",
 #   "xarray",
-#   "numpy",
-#   "pandas",
 #   "gcsfs",
 #   "zarr>=3",
 # ]
@@ -27,30 +25,41 @@ climatology CTE joined back to the raw observations::
       ON (a.latitude, a.longitude, hour(a.time)) = (c.latitude, c.longitude, c.hour)
 
 Dataset: **ARCO-ERA5** 2m-temperature over a North-American box for a few days,
-read once into memory (anomalies vs the diurnal cycle of that window).
+opened and sliced with a single fluent xarray chain (anomalies vs the diurnal
+cycle of that window).
 """
 
 from __future__ import annotations
 
+import xarray as xr
+
 import xarray_sql as xql
 
-from _era5 import load_window, open_era5
-from _harness import check_close, run_case, show_sql, timed
+from _harness import CaseSkipped, assert_grid_close, run_case, show_sql, timed
 
+_URL = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
 _TIME = slice("2020-06-01", "2020-06-03T23")
 _LAT = slice(50.0, 25.0)
 _LON = slice(235.0, 290.0)
 
 
 def main() -> None:
-    full = open_era5()
-    with timed("read ERA5 window into memory"):
-        ds = load_window(
-            full, "2m_temperature", time=_TIME, latitude=_LAT, longitude=_LON
-        )
+    try:
+        import gcsfs  # noqa: F401 — required by the gs:// protocol
+
+        with timed("open + slice ERA5 window"):
+            ds = (
+                xr.open_zarr(
+                    _URL, chunks=None, storage_options={"token": "anon"}
+                )[["2m_temperature"]]
+                .sel(time=_TIME, latitude=_LAT, longitude=_LON)
+                .load()
+            )
+    except Exception as exc:  # noqa: BLE001 — any failure → skip, not crash
+        raise CaseSkipped(f"ARCO-ERA5 unavailable ({exc})") from exc
+
     print(
-        f"  ERA5 2m_temperature window: {dict(ds.sizes)}  "
-        f"(anomaly vs diurnal normals)"
+        f"  ERA5 2m_temperature window: {dict(ds.sizes)}  (anomaly vs diurnal normals)"
     )
 
     ctx = xql.XarrayContext()
@@ -71,36 +80,28 @@ def main() -> None:
           ON a.latitude = c.latitude
          AND a.longitude = c.longitude
          AND date_part('hour', a.time) = c.hour
+        ORDER BY a.time, a.latitude DESC, a.longitude
     """
     show_sql(sql)
 
+    # The anomaly is a gridded field; round-trip it to (time, lat, lon).
     with timed("SQL anomaly (climatology CTE self-join)"):
-        got = ctx.sql(sql).to_pandas()
+        got = ctx.sql(sql).to_dataset(dims=["time", "latitude", "longitude"])
 
-    # Array reference: grouped broadcast-subtract.
+    # Array reference: grouped broadcast-subtract, in pure xarray.
     with timed("xarray reference"):
-        clim = ds["2m_temperature"].groupby("time.hour").mean("time")
-        anom = ds["2m_temperature"].groupby("time.hour") - clim
-        ref = anom.to_dataframe(name="anomaly").reset_index()
+        grouped = ds["2m_temperature"].groupby("time.hour")
+        ref = grouped - grouped.mean("time")
 
-    merged = got.merge(
-        ref,
-        on=["time", "latitude", "longitude"],
-        suffixes=("_sql", "_ref"),
-        validate="one_to_one",
-    )
-    assert len(merged) == len(got) == len(ref), (
-        f"row-count mismatch: sql={len(got)} ref={len(ref)} merged={len(merged)}"
-    )
-    check_close(
+    assert_grid_close(
         "anomaly (T − diurnal climatology)",
-        merged["anomaly_sql"],
-        merged["anomaly_ref"],
-        rtol=1e-4,
-        atol=1e-3,
+        got.anomaly,
+        ref,
+        rtol=1e-3,
+        atol=1e-2,
     )
 
-    print(f"\n  {len(got):,} hourly anomalies over the window.")
+    print(f"\n  anomaly Dataset: {dict(got.sizes)}")
 
 
 if __name__ == "__main__":

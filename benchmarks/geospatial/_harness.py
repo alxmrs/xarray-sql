@@ -10,9 +10,10 @@ These helpers keep each case script short and uniform:
 
 * :func:`banner` / :func:`show_sql` — readable section headers and SQL echo.
 * :func:`timed` — a context manager that reports elapsed time and peak memory.
-* :func:`check_close` — assert a SQL result matches an array reference, then
-  print a PASS line. Raises ``AssertionError`` on mismatch (so a broken case
-  fails loudly rather than silently "passing").
+* :func:`assert_grid_close` — assert a SQL result (round-tripped to an
+  ``xr.DataArray``) matches an xarray reference, aligned by coordinate label.
+  Raises ``AssertionError`` on mismatch (so a broken case fails loudly rather
+  than silently "passing").
 * :func:`run_case` — run a case's ``main()``, turning a raised
   :class:`CaseSkipped` (e.g. an offline dataset) into a clean skip.
 """
@@ -24,9 +25,8 @@ import sys
 import time
 import tracemalloc
 from collections.abc import Callable, Iterator
-from typing import Any
 
-import numpy as np
+import xarray as xr
 
 _WIDTH = 72
 
@@ -70,34 +70,32 @@ def timed(label: str) -> Iterator[None]:
         print(f"  ⏱  {label}: {elapsed:.3f}s  (peak {peak / 1e6:.1f} MB)")
 
 
-def check_close(
+def assert_grid_close(
     name: str,
-    got: Any,
-    expected: Any,
+    got: xr.DataArray,
+    ref: xr.DataArray,
     *,
     rtol: float = 1e-5,
     atol: float = 1e-6,
-    equal_nan: bool = True,
 ) -> None:
-    """Assert ``got`` matches the array reference ``expected``, then print PASS.
+    """Assert two gridded ``DataArray`` results match, then print PASS.
 
-    Both arguments are coerced to ``float64`` numpy arrays and flattened, so a
-    SQL result column (pandas Series / pyarrow) can be compared directly to an
-    xarray ``DataArray`` reference. Order-sensitive: sort both sides on a shared
-    key before calling if the SQL result order is not guaranteed.
+    For cases whose SQL result is round-tripped back to an ``xr.DataArray``
+    (via ``XarrayDataFrame.to_dataset``), compare it to the array reference the
+    xarray way: align ``ref`` onto ``got``'s coordinates and dimension order,
+    then ``xr.testing.assert_allclose``. This aligns by *label*, so neither side
+    needs an explicit sort, and NaNs in matching cells compare equal.
+
+    Helper coordinates xarray attaches along the way (e.g. the ``hour`` label a
+    ``groupby("time.hour")`` leaves behind) are dropped before comparing.
     """
-    g = np.asarray(getattr(got, "values", got), dtype=np.float64).ravel()
-    e = np.asarray(
-        getattr(expected, "values", expected), dtype=np.float64
-    ).ravel()
-    if g.shape != e.shape:
-        raise AssertionError(
-            f"{name}: shape mismatch — SQL {g.shape} vs reference {e.shape}"
-        )
-    np.testing.assert_allclose(g, e, rtol=rtol, atol=atol, equal_nan=equal_nan)
+    aligned = ref.reindex_like(got).transpose(*got.dims)
+    extra = [c for c in aligned.coords if c not in got.coords]
+    aligned = aligned.drop_vars(extra)
+    xr.testing.assert_allclose(got, aligned, rtol=rtol, atol=atol)
     print(
-        f"  ✅ {name}: SQL matches array reference "
-        f"(n={g.size}, rtol={rtol:g}, atol={atol:g})"
+        f"  ✅ {name}: SQL matches xarray reference "
+        f"(n={got.size:,}, coordinate-aligned)"
     )
 
 

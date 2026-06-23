@@ -39,9 +39,9 @@ import xarray as xr
 
 import xarray_sql as xql
 
-from _era5 import load_window, open_era5, register_era5
-from _harness import check_close, run_case, show_sql, timed
+from _harness import CaseSkipped, assert_grid_close, run_case, show_sql, timed
 
+_URL = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
 _DAY = "2020-06-01"
 
 # Continental-scale boxes (name, lat_min, lat_max, lon_min, lon_max), lon 0–360°E.
@@ -69,16 +69,30 @@ def _regions_dataset() -> xr.Dataset:
 
 
 def main() -> None:
-    full = open_era5()
+    try:
+        import gcsfs  # noqa: F401 — required by the gs:// protocol
+
+        ds = xr.open_zarr(_URL, chunks=None, storage_options={"token": "anon"})
+    except Exception as exc:  # noqa: BLE001 — any failure → skip, not crash
+        raise CaseSkipped(f"ARCO-ERA5 unavailable ({exc})") from exc
+
     print(
-        f"  raster: full ARCO-ERA5 ({full.sizes['time']:,} timesteps, "
-        f"{full.sizes['latitude']}×{full.sizes['longitude']})   "
+        f"  raster: full ARCO-ERA5 ({ds.sizes['time']:,} timesteps, "
+        f"{ds.sizes['latitude']}×{ds.sizes['longitude']})   "
         f"vector: {len(_REGIONS)} continental boxes"
     )
 
     ctx = xql.XarrayContext()
     with timed("register full ERA5 + regions"):
-        register_era5(ctx, full)
+        ctx.from_dataset(
+            "era5",
+            ds,
+            chunks={"time": 6},
+            table_names={
+                ("time", "latitude", "longitude"): "surface",
+                ("time", "level", "latitude", "longitude"): "atmosphere",
+            },
+        )
         ctx.from_dataset(
             "regions", _regions_dataset(), chunks={"region": len(_REGIONS)}
         )
@@ -99,34 +113,40 @@ def main() -> None:
     show_sql(sql)
 
     with timed("SQL zonal stats (raster × vector range JOIN, WHERE-pruned)"):
-        got = (
-            ctx.sql(sql)
-            .to_pandas()
-            .sort_values("region_id")
-            .reset_index(drop=True)
-        )
+        got = ctx.sql(sql).to_dataset(dims=["region_id"])
 
     # Array reference: load the same day once, mask each region in memory.
     with timed("xarray reference"):
-        day = load_window(full, "2m_temperature", time=_DAY)["2m_temperature"]
-        ref_vals = []
-        for _, lat_min, lat_max, lon_min, lon_max in _REGIONS:
-            mask = (
-                (day.latitude >= lat_min)
-                & (day.latitude <= lat_max)
-                & (day.longitude >= lon_min)
-                & (day.longitude <= lon_max)
+        day = (
+            xr.open_zarr(_URL, chunks=None, storage_options={"token": "anon"})[
+                "2m_temperature"
+            ]
+            .sel(time=_DAY)
+            .load()
+        )
+        avg_c = [
+            float(
+                day.where(
+                    (day.latitude >= lat_min)
+                    & (day.latitude <= lat_max)
+                    & (day.longitude >= lon_min)
+                    & (day.longitude <= lon_max)
+                ).mean()
             )
-            ref_vals.append(float(day.where(mask).mean()) - 273.15)
-        ref = np.array(ref_vals)
+            - 273.15
+            for _, lat_min, lat_max, lon_min, lon_max in _REGIONS
+        ]
+        ref = xr.DataArray(
+            avg_c, dims=["region_id"], coords={"region_id": got.region_id}
+        )
 
-    check_close(
-        "zonal mean per region (°C)", got["avg_c"], ref, rtol=1e-4, atol=1e-2
+    assert_grid_close(
+        "zonal mean per region (°C)", got.avg_c, ref, rtol=1e-4, atol=1e-2
     )
 
     print("\n  Region                 avg °C      n_obs")
-    for (name, *_), row in zip(_REGIONS, got.itertuples()):
-        print(f"  {name:<20} {row.avg_c:7.2f}  {row.n_obs:>10,}")
+    for (name, *_), avg, n in zip(_REGIONS, got.avg_c.values, got.n_obs.values):
+        print(f"  {name:<20} {avg:7.2f}  {int(n):>10,}")
 
 
 if __name__ == "__main__":
