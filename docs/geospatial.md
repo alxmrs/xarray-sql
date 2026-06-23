@@ -25,7 +25,7 @@ computes the same numbers — at ERA5's real 0.25° global resolution.
 
 | Operation | The "array" framing | The relational reality | Script |
 |-----------|---------------------|------------------------|--------|
-| Spectral index (NDVI) | `apply_ufunc` over a raster | column algebra + `CASE` mask | [`01_ndvi.py`](../benchmarks/geospatial/01_ndvi.py) |
+| Spectral index (NDVI) | `apply_ufunc` over a raster | column arithmetic | [`01_ndvi.py`](../benchmarks/geospatial/01_ndvi.py) |
 | Climatology | rechunk → grouped reduction | `GROUP BY lat, lon, hour-of-day` | [`02_climatology.py`](../benchmarks/geospatial/02_climatology.py) |
 | Zonal mean | reduce over lon/time axes | `GROUP BY lat` | [`03_zonal_mean.py`](../benchmarks/geospatial/03_zonal_mean.py) |
 | Anomaly | grouped broadcast-subtract | climatology CTE self-`JOIN` | [`04_anomaly.py`](../benchmarks/geospatial/04_anomaly.py) |
@@ -36,22 +36,24 @@ computes the same numbers — at ERA5's real 0.25° global resolution.
 
 ## 1. A pixel-wise formula is a column expression
 
-NDVI is `(NIR − Red) / (NIR + Red)`, per pixel, with clouds/nodata masked out.
-The array idiom broadcasts a ufunc over the raster. But "one output per pixel,
-computed from that pixel's bands" is the definition of a SQL projection, and
-"drop invalid pixels" is `CASE WHEN`:
+NDVI is `(NIR − Red) / (NIR + Red)`, per pixel. The array idiom broadcasts a
+ufunc over the raster. But "one output per pixel, computed from that pixel's
+bands" is the definition of a SQL projection:
 
 ```sql
-SELECT x, y,
-       CASE WHEN red = 0 OR nir = 0 THEN NULL
-            ELSE (nir_refl - red_refl) / (nir_refl + red_refl)
-       END AS ndvi
+SELECT x, y, (nir - red) / (nir + red) AS ndvi
 FROM scene
+ORDER BY y, x
 ```
 
+Invalid pixels need no special handling: xarray decodes the band's `_FillValue`
+to `NaN` on open, and `NaN` propagates through the arithmetic on both sides, so
+the masking is free.
+
 [`01_ndvi.py`](../benchmarks/geospatial/01_ndvi.py) runs this against a **real
-Sentinel-2 L2A scene in Zarr** (ESA's EOPF sample service) and matches xarray's
-`apply_ufunc`-style result over a million pixels.
+Sentinel-2 L2A scene in Zarr** — discovered with `pystac-client` and opened the
+canonical way with `xr.open_datatree` (ESA's EOPF sample service) — and matches
+xarray's `apply_ufunc`-style result over a million pixels.
 
 ## 2. A climatology is a `GROUP BY` over the cycle
 

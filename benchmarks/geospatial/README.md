@@ -15,7 +15,7 @@ plain-English definition of the operation, and computes the same numbers.
 
 | # | Case | Array mental model | Relational reality |
 |---|------|--------------------|--------------------|
-| 01 | `01_ndvi.py` | `apply_ufunc` over a raster | column algebra + `CASE` mask |
+| 01 | `01_ndvi.py` | `apply_ufunc` over a raster | column arithmetic |
 | 02 | `02_climatology.py` | rechunk → grouped reduction | `GROUP BY lat, lon, hour-of-day` |
 | 03 | `03_zonal_mean.py` | reduce over lon/time axes | `GROUP BY latitude` |
 | 04 | `04_anomaly.py` | climatology broadcast-subtract | climatology CTE self-`JOIN` |
@@ -35,7 +35,8 @@ interpolation weights — the geometry — which SQL applies but does not comput
 ## Datasets
 
 - **01 NDVI** — a real Sentinel-2 L2A scene in **Zarr** from the ESA EOPF sample
-  service (bands B04/B08). Requires network; skips cleanly if offline.
+  service, discovered with `pystac-client` and opened with `xr.open_datatree`
+  (bands B04/B08). Requires network; skips cleanly if offline.
 - **02–06** — the full **[ARCO-ERA5](https://github.com/google-research/arco-era5)**
   archive (0.25° global, ~1.3M hourly timesteps, 273 variables) read anonymously
   from a public GCS bucket. Cases 03 and 06 register the *whole* archive and let
