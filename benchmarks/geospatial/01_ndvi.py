@@ -42,7 +42,13 @@ import xarray as xr
 
 import xarray_sql as xql
 
-from _harness import CaseSkipped, run_case, show_sql, timed
+from _harness import (
+    CaseSkipped,
+    assert_grid_close,
+    run_case,
+    show_sql,
+    timed,
+)
 
 # EOPF sample-service STAC catalog; an agricultural AOI near Torino, Italy, in
 # early May (peak spring growth). The search is deterministic — it resolves to
@@ -117,13 +123,9 @@ def main() -> None:
     with timed("xarray reference"):
         ref = (scene.nir - scene.red) / (scene.nir + scene.red)
 
-    # Compare by coordinate label (reindex_like), so neither side needs an
-    # explicit sort. NaNs (decoded nodata) in matching cells compare equal.
-    xr.testing.assert_allclose(got, ref.reindex_like(got), rtol=1e-6)
-    print(
-        f"  ✅ NDVI (per-pixel): SQL matches xarray reference "
-        f"(n={got.size:,}, coordinate-aligned)"
-    )
+    # Compare the xarray way — aligned by coordinate label, so the ORDER BY
+    # above is enough and neither side needs an explicit sort.
+    assert_grid_close("NDVI (per-pixel)", got, ref, rtol=1e-6)
 
     valid = ref.notnull()
     print(

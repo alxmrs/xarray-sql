@@ -19,12 +19,12 @@ world already does it — PostGIS ``ST_Transform`` and DuckDB-spatial
 
 So we register a PROJ-backed scalar UDF and reproject in SQL::
 
-    SELECT x, y, utm_to_lon(x, y) AS lon, utm_to_lat(x, y) AS lat
+    SELECT x, y, reproject(x, y)['lon'] AS lon, reproject(x, y)['lat'] AS lat
     FROM grid
 
 The UDF (built on ``pyproj``, vectorized over each Arrow batch) mirrors the
 ``cftime()`` UDF already shipped in xarray-sql (see ``xarray_sql/cftime.py``);
-it could graduate into the package as ``xql.register_reproject_udfs``.
+it could graduate into the package as ``xql.register_reproject_udf``.
 
 **What this does *not* do:** it moves the coordinates, it does not resample onto
 a regular target grid. Producing a gridded product in the new CRS still needs
@@ -54,7 +54,7 @@ from datafusion import udf
 
 import xarray_sql as xql
 
-from _harness import check_close, run_case, show_sql, timed
+from _harness import assert_grid_close, run_case, show_sql, timed
 
 
 def register_reproject_udf(
@@ -133,8 +133,9 @@ def main() -> None:
     """
     show_sql(sql)
 
+    # Round-trip the reprojected coordinates back to an (y, x) grid.
     with timed("SQL reprojection (PROJ scalar UDF)"):
-        got = ctx.sql(sql).to_pandas()
+        got = ctx.sql(sql).to_dataset(dims=["y", "x"])
 
     # Array reference: the same PROJ transform applied to the full grid.
     with timed("pyproj reference"):
@@ -142,21 +143,22 @@ def main() -> None:
             src_crs, dst_crs, always_xy=True
         )
         xx, yy = np.meshgrid(ds.x.values, ds.y.values)
-        ref_lon, ref_lat = transformer.transform(xx.ravel(), yy.ravel())
+        lon, lat = transformer.transform(xx, yy)
+        coords = {"y": ds.y, "x": ds.x}
+        ref_lon = xr.DataArray(lon, dims=["y", "x"], coords=coords)
+        ref_lat = xr.DataArray(lat, dims=["y", "x"], coords=coords)
 
-    got = got.sort_values(["y", "x"]).reset_index(drop=True)
-    # The reference is built in (y, x) row-major order; align by sorting both.
-    order = np.lexsort((xx.ravel(), yy.ravel()))
-    check_close(
-        "reprojected longitude", got["lon"], ref_lon[order], rtol=0, atol=1e-9
+    assert_grid_close(
+        "reprojected longitude", got.lon, ref_lon, rtol=0, atol=1e-9
     )
-    check_close(
-        "reprojected latitude", got["lat"], ref_lat[order], rtol=0, atol=1e-9
+    assert_grid_close(
+        "reprojected latitude", got.lat, ref_lat, rtol=0, atol=1e-9
     )
 
+    corner = got.isel(x=0, y=0)
     print(
-        f"\n  Corner check: UTM ({got.x.iloc[0]:.0f}, {got.y.iloc[0]:.0f}) → "
-        f"lon {got.lon.iloc[0]:.4f}, lat {got.lat.iloc[0]:.4f}"
+        f"\n  Corner check: UTM ({float(corner.x):.0f}, {float(corner.y):.0f}) → "
+        f"lon {float(corner.lon):.4f}, lat {float(corner.lat):.4f}"
     )
 
 
