@@ -108,6 +108,12 @@ _(A runnable version of this example lives at
 Succinctly, we "pivot" Xarray Datasets to treat them like tables so we can run
 SQL queries against them. 
 
+For worked examples of common geospatial operations expressed in SQL — NDVI,
+climatology, anomalies, zonal statistics, forecast skill (Pangu-Weather and
+GraphCast vs ERA5), reprojection, and regridding, each checked against an xarray
+reference — see [`benchmarks/geospatial/`](benchmarks/geospatial/) and the
+[Geospatial operations are relational operations](docs/geospatial.md) write-up.
+
 ## Why build this?
 
 A few reasons:
