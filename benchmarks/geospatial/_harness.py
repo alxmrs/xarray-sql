@@ -185,10 +185,12 @@ def measured(label: str) -> Iterator[None]:
         tracemalloc.start()
         tracemalloc.reset_peak()
         t0 = time.perf_counter()
-        yield
-        elapsed = time.perf_counter() - t0
-        _, peak = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
+        try:
+            yield
+        finally:
+            elapsed = time.perf_counter() - t0
+            _, peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
         if i >= warmup:
             times.append(elapsed)
             peak_max = max(peak_max, peak)
@@ -219,6 +221,16 @@ def assert_grid_close(
     Helper coordinates xarray attaches along the way (e.g. the ``hour`` label a
     ``groupby("time.hour")`` leaves behind) are dropped before comparing.
     """
+    short = {
+        d: (got.sizes[d], ref.sizes[d])
+        for d in ref.dims
+        if d in got.sizes and got.sizes[d] != ref.sizes[d]
+    }
+    if short:
+        raise AssertionError(
+            f"{name}: SQL result does not cover the reference grid "
+            f"(dim: got vs ref = {short}); the comparison would be partial"
+        )
     aligned = ref.reindex_like(got).transpose(*got.dims)
     extra = [c for c in aligned.coords if c not in got.coords]
     aligned = aligned.drop_vars(extra)

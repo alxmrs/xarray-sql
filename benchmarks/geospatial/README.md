@@ -23,11 +23,15 @@ plain-English definition of the operation, and computes the same numbers.
 | 06 | `06_zonal_vector.py` | rasterize + mask per region | range `JOIN` raster↔regions |
 | 07 | `07_reproject_udf.py` | per-pixel CRS transform | scalar **UDF** (`reproject()`), à la PostGIS `ST_Transform` |
 | 08 | `08_regrid_weights.py` | interpolation to a new grid | sparse-weight table `JOIN` + weighted `GROUP BY` |
+| 09 | `09_lazy_roundtrip.py` | read one slab from a big array | lazy round-trip: `.sel()` pushes a `WHERE` into SQL |
 
 Cases 01–06 show operations that are *natively* relational. Cases 07–08 are the
 "hardest" array operations — reprojection and regridding — and show where a UDF
 fits (a per-row coordinate transform) versus where the operation is really a
-sparse matrix multiply expressed as a `JOIN`. See
+sparse matrix multiply expressed as a `JOIN`. Case 09 steps back from *which*
+operation and measures the round-trip itself: that `to_dataset()` is lazy, so
+slicing the result reads only the slab asked for, the property that lets these
+queries point at an archive far larger than memory. See
 [`docs/geospatial.md`](../../docs/geospatial.md) for the full narrative,
 including *where the array paradigm still earns its keep* (generating the
 interpolation weights — the geometry — which SQL applies but does not compute).
@@ -53,6 +57,10 @@ interpolation weights — the geometry — which SQL applies but does not comput
   reference, not PROJ-vs-PROJ. 08 regrids real **SRTM elevation** (Sierra Nevada)
   and validates against xarray's bilinear `.interp()`. Both run against Earth
   Engine using your existing `gcloud` login, and skip cleanly without it.
+- **09 lazy round-trip**: `air_temperature` from `xarray.tutorial` (NCEP
+  reanalysis, 2920×25×53), downloaded once via `pooch`. Small on purpose: it has
+  to fit in memory the *eager* way so the lazy path has something to beat. Skips
+  cleanly offline.
 
 ## Running
 
