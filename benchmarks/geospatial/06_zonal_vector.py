@@ -127,7 +127,7 @@ def main() -> None:
     """
     show_sql(sql)
 
-    with timed("SQL zonal stats (raster × vector range JOIN, WHERE-pruned)"):
+    with timed("SQL zonal stats (raster × vector range JOIN)"):
         got = ctx.sql(
             sql, param_values={"start": _START, "end": _END}
         ).to_dataset(dims=["region_id"])

@@ -35,9 +35,8 @@ timestamp + duration arithmetic the engine does natively::
     GROUP BY f.model, f.prediction_timedelta
 
 We stack the two models along a ``model`` dimension into a single forecast
-table, so the query groups by a ``model`` *column* — no table name is formatted
-into the SQL. Nothing is loaded up front either: the forecasts and ERA5 are
-registered lazily, and the JOIN reads only what it needs at query time.
+table, so one query scores them together, grouped by the ``model`` column. The
+forecasts and ERA5 are opened lazily, and the JOIN reads only what it needs.
 
 Datasets: WeatherBench 2 **Pangu**, **GraphCast**, and **ERA5** at a coarse
 64×32 grid (so the demo is small and fast), read from the public ``gs://
@@ -116,8 +115,8 @@ def main() -> None:
     # The two models store different pressure-level sets (Pangu 13, GraphCast
     # 37), so we keep the common surface field 2m_temperature and stack the
     # models along a `model` dimension into one forecast table. Snap the grid
-    # onto ERA5's exact coordinates (same 64×32 grid) so the equality JOIN is
-    # bit-safe across the Zarr stores.
+    # onto ERA5's exact coordinates (same 64×32 grid) so the join on latitude and
+    # longitude lines up exactly across the two Zarr stores.
     pangu = _open(_PANGU)[[_VAR]].sel(time=_INIT)
     graphcast = _open(_GRAPHCAST)[[_VAR]].sel(time=_INIT)
     forecasts = xr.concat([pangu, graphcast], dim="model").assign_coords(

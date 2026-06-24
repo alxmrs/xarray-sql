@@ -200,8 +200,8 @@ against an xarray/array reference** to floating-point tolerance:
 
 * **Spectral indices** (NDVI) — column arithmetic over a real Sentinel-2 scene.
 * **Climatology, anomalies, zonal means** — `GROUP BY` and self-`JOIN` over the
-  full 0.25° **ARCO-ERA5** archive (≈1.3M hourly steps), read lazily with
-  partition pruning and column pushdown.
+  full 0.25° **ARCO-ERA5** archive (≈1.3M hourly steps), read lazily so each
+  query touches only the data it needs.
 * **Forecast skill** — scoring the **Pangu-Weather** and **GraphCast** ML models
   against ERA5 (WeatherBench 2) as a `JOIN` on `valid_time = init + lead`; it
   reproduces the published result that GraphCast beats Pangu at every lead.
