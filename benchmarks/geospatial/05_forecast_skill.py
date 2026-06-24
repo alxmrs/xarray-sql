@@ -60,7 +60,6 @@ from _harness import (
     show_sql,
 )
 
-_SO = {"token": "anon"}
 _GRID = "64x32_equiangular_conservative"
 _ERA5 = f"gs://weatherbench2/datasets/era5/1959-2023_01_10-6h-{_GRID}.zarr"
 _PANGU = f"gs://weatherbench2/datasets/pangu/2018-2022_0012_{_GRID}.zarr"
@@ -79,7 +78,10 @@ def _open(url: str) -> xr.Dataset:
         # decode_timedelta=True: forecasts store prediction_timedelta as a
         # real duration (and it silences xarray's decode-timedelta warning).
         return xr.open_zarr(
-            url, chunks=None, storage_options=_SO, decode_timedelta=True
+            url,
+            chunks=None,
+            storage_options={"token": "anon"},
+            decode_timedelta=True,
         )
     except Exception as exc:  # noqa: BLE001
         raise CaseSkipped(f"WeatherBench2 unavailable ({exc})") from exc

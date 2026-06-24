@@ -185,10 +185,12 @@ def measured(label: str) -> Iterator[None]:
         tracemalloc.start()
         tracemalloc.reset_peak()
         t0 = time.perf_counter()
-        yield
-        elapsed = time.perf_counter() - t0
-        _, peak = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
+        try:
+            yield
+        finally:
+            elapsed = time.perf_counter() - t0
+            _, peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
         if i >= warmup:
             times.append(elapsed)
             peak_max = max(peak_max, peak)
@@ -218,7 +220,18 @@ def assert_grid_close(
 
     Helper coordinates xarray attaches along the way (e.g. the ``hour`` label a
     ``groupby("time.hour")`` leaves behind) are dropped before comparing.
+
+    ``reindex_like`` would quietly align away any cells missing from ``got``, so
+    a query that returns *fewer* cells than it should would still "pass". Guard
+    against that first — the suite's whole point is the same numbers, all of them.
     """
+    short = {
+        d: (got.sizes[d], ref.sizes[d])
+        for d in ref.dims
+        if d in got.sizes and got.sizes[d] != ref.sizes[d]
+    }
+    if short:
+        raise AssertionError(f"{name}: result misses grid cells {short}")
     aligned = ref.reindex_like(got).transpose(*got.dims)
     extra = [c for c in aligned.coords if c not in got.coords]
     aligned = aligned.drop_vars(extra)

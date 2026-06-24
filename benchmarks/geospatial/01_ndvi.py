@@ -99,7 +99,6 @@ def _load_scene() -> tuple[xr.Dataset, str]:
         r10m[["b04", "b08"]]
         .rename(b04="red", b08="nir")
         .isel(y=slice(_Y0, _Y0 + _N), x=slice(_X0, _X0 + _N))
-        .load()
     )
     return scene, item.id
 
@@ -125,9 +124,11 @@ def main() -> None:
     for _ in measured("SQL NDVI"):
         got = ctx.sql(sql).to_dataset(dims=["y", "x"]).ndvi
 
-    # Array reference: the same formula in pure xarray.
+    # Array reference: the same formula in pure xarray. ``.compute()`` reads the
+    # window and evaluates it here (the scene is lazy), so this measures the same
+    # read-and-compute the SQL side does — not just graph construction.
     for _ in measured("xarray reference"):
-        ref = (scene.nir - scene.red) / (scene.nir + scene.red)
+        ref = ((scene.nir - scene.red) / (scene.nir + scene.red)).compute()
 
     # Compare the xarray way — aligned by coordinate label, so the ORDER BY
     # above is enough and neither side needs an explicit sort.
