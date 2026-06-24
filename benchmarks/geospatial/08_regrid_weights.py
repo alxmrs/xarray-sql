@@ -5,6 +5,9 @@
 #   "xarray",
 #   "numpy",
 #   "scipy",
+#   "xee",
+#   "earthengine-api",
+#   "shapely",
 # ]
 # ///
 """Regridding — interpolation to a new grid is a sparse matmul, i.e. a JOIN.
@@ -31,18 +34,29 @@ conservative remapping on real grids you would let ESMF/xESMF compute them once
 and hand the resulting sparse matrix to SQL as a table. SQL *applies* the
 weights; it does not invent the geometry.
 
-We validate the SQL matmul against xarray's own bilinear ``.interp()``.
-No network; fully synthetic.
+The field is real **SRTM elevation** (terrain over the Sierra Nevada), opened
+from the Earth Engine catalog through [Xee](https://github.com/google/Xee). We
+regrid it coarse → fine in SQL and validate against xarray's own bilinear
+``.interp()`` on the same source field.
+
+Requires Earth Engine access: ``earthengine authenticate`` once, then an
+initialized project (set ``EARTHENGINE_PROJECT``). Skips cleanly otherwise.
 """
 
 from __future__ import annotations
+
+import os
 
 import numpy as np
 import xarray as xr
 
 import xarray_sql as xql
 
-from _harness import assert_grid_close, run_case, show_sql, timed
+from _harness import CaseSkipped, assert_grid_close, run_case, show_sql, timed
+
+# A 1° box over the Sierra Nevada — real terrain with strong relief.
+_AOI = (-119.6, 37.0, -118.6, 38.0)
+_SRC_SCALE_DEG = 0.02  # ~2 km source pixels (a coarse DEM to upsample)
 
 
 def _linear_weights(
@@ -91,20 +105,64 @@ def _bilinear_weight_table(
     ).chunk({"pair": n})
 
 
-def main() -> None:
-    # Coarse source grid with a smooth field; finer target grid strictly inside.
-    slat = np.linspace(0.0, 10.0, 11)
-    slon = np.linspace(0.0, 10.0, 11)
-    field = (
-        np.sin(slat[:, None] / 3.0) * np.cos(slon[None, :] / 4.0)
-        + 0.1 * slat[:, None]
+def _open_srtm() -> xr.DataArray:
+    """Open SRTM elevation over the AOI as a coarse (lat, lon) field via Xee."""
+    try:
+        import ee
+        import shapely.geometry as sgeom
+        from xee import helpers
+    except ImportError as exc:  # pragma: no cover
+        raise CaseSkipped(
+            "Earth Engine support needs `pip install earthengine-api xee`"
+        ) from exc
+
+    try:
+        ee.Initialize(
+            project=os.environ.get("EARTHENGINE_PROJECT"),
+            opt_url="https://earthengine-highvolume.googleapis.com",
+        )
+    except Exception as exc:  # noqa: BLE001 — not authenticated → skip
+        raise CaseSkipped(
+            f"Earth Engine not initialized ({exc}); run "
+            "`earthengine authenticate` and set EARTHENGINE_PROJECT"
+        ) from exc
+
+    # fit_geometry builds the pixel grid (crs, crs_transform, shape_2d) Xee's
+    # backend expects — here a geographic grid at _SRC_SCALE_DEG° over the AOI.
+    grid = helpers.fit_geometry(
+        sgeom.box(*_AOI),
+        grid_crs="EPSG:4326",
+        grid_scale=(_SRC_SCALE_DEG, _SRC_SCALE_DEG),
     )
-    src_da = xr.DataArray(
-        field, coords={"lat": slat, "lon": slon}, dims=["lat", "lon"]
+    ic = ee.ImageCollection([ee.Image("USGS/SRTMGL1_003")])  # band: elevation
+    ds = xr.open_dataset(ic, engine="ee", **grid)
+    da = ds["elevation"].isel(time=0)
+    # Normalize Xee's spatial coordinate names to lat/lon and sort ascending so
+    # the 1-D weight construction (searchsorted) sees increasing coordinates.
+    rename = {}
+    for d in da.dims:
+        dl = d.lower()
+        if dl in ("y", "lat", "latitude"):
+            rename[d] = "lat"
+        elif dl in ("x", "lon", "longitude"):
+            rename[d] = "lon"
+    return da.rename(rename).sortby("lat").sortby("lon").load()
+
+
+def main() -> None:
+    with timed("open SRTM via Xee"):
+        src_da = _open_srtm()
+    slat = src_da.lat.values
+    slon = src_da.lon.values
+    field = src_da.values.astype("float64")
+    print(
+        f"  SRTM elevation source grid {len(slat)}×{len(slon)} "
+        f"({float(np.nanmin(field)):.0f}–{float(np.nanmax(field)):.0f} m)"
     )
 
-    tlat = np.linspace(0.3, 9.7, 25)
-    tlon = np.linspace(0.4, 9.6, 30)
+    # Finer target grid strictly inside the source extent (bilinear upsampling).
+    tlat = np.linspace(slat[1], slat[-2], 60)
+    tlon = np.linspace(slon[1], slon[-2], 72)
     print(
         f"  regrid {len(slat)}×{len(slon)} → {len(tlat)}×{len(tlon)} (bilinear)"
     )
@@ -144,7 +202,7 @@ def main() -> None:
             coords={"lat": tlat, "lon": tlon},
         )
 
-    # Array reference: xarray's own bilinear interpolation onto the target grid.
+    # Array reference: xarray's own bilinear interpolation of the same field.
     with timed("xarray .interp reference"):
         ref = src_da.interp(lat=tlat, lon=tlon, method="linear")
 
@@ -152,9 +210,11 @@ def main() -> None:
 
     print(
         f"\n  {got.size:,} target cells regridded; "
-        f"value range [{float(got.min()):.3f}, {float(got.max()):.3f}]."
+        f"elevation range [{float(got.min()):.0f}, {float(got.max()):.0f}] m."
     )
 
 
 if __name__ == "__main__":
-    raise SystemExit(run_case(main, "Regridding: sparse weight-table JOIN"))
+    raise SystemExit(
+        run_case(main, "Regridding: sparse weight-table JOIN (SRTM)")
+    )

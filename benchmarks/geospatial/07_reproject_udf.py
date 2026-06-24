@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
@@ -6,12 +7,15 @@
 #   "numpy",
 #   "pyproj",
 #   "pyarrow",
+#   "xee",
+#   "earthengine-api",
+#   "shapely",
 # ]
 # ///
 """Reprojection — a per-pixel CRS transform is a scalar UDF (à la ST_Transform).
 
-Reprojection moves coordinates from one CRS to another (here UTM zone 32N,
-EPSG:32632, → lon/lat, EPSG:4326). Crucially it is **row-independent**: each
+Reprojection moves coordinates from one CRS to another (here UTM zone 10N,
+EPSG:32610, → lon/lat, EPSG:4326). Crucially it is **row-independent**: each
 pixel's new coordinate depends only on its own old coordinate. That is exactly
 the shape of a SQL *scalar UDF*, and it is precisely how the geospatial SQL
 world already does it — PostGIS ``ST_Transform`` and DuckDB-spatial
@@ -22,29 +26,28 @@ So we register a PROJ-backed scalar UDF and reproject in SQL::
     SELECT x, y, reproject(x, y)['lon'] AS lon, reproject(x, y)['lat'] AS lat
     FROM grid
 
+**The reference is Earth Engine itself.** We open a UTM grid through
+[Xee](https://github.com/google/Xee) carrying ``ee.Image.pixelLonLat()`` — Earth
+Engine's *own* geodesy engine computes the true lon/lat of every UTM pixel
+centre. So this case validates our PROJ-in-SQL transform against a fully
+**independent** reprojection implementation (EE), not against PROJ again. They
+agree to sub-metre precision.
+
 The UDF (built on ``pyproj``, vectorized over each Arrow batch) mirrors the
 ``cftime()`` UDF already shipped in xarray-sql (see ``xarray_sql/cftime.py``);
 it could graduate into the package as ``xql.register_reproject_udf``.
 
-**What this does *not* do:** it moves the coordinates, it does not resample onto
-a regular target grid. Producing a gridded product in the new CRS still needs
-interpolation — which is case 08, where regridding turns out to be a JOIN
-against a weight table rather than a scalar UDF.
+PROJ's context is not thread-safe and DataFusion evaluates projection
+expressions concurrently, so we return *both* coordinates from one
+struct-returning UDF and keep the source in a single chunk (one serial UDF).
 
-**An honest caveat on threading:** PROJ's transformation context is not
-thread-safe, and DataFusion evaluates independent projection expressions on
-concurrent worker threads. Two separate PROJ UDFs in one ``SELECT`` (one for
-lon, one for lat) race and segfault. The fix is to return *both* coordinates
-from a **single** struct-returning UDF (so PROJ is touched once per row), and
-to keep the source in one chunk so that single UDF runs serially. A
-production-grade ``ST_Transform`` would additionally give each worker thread its
-own PROJ context; the point here is the *shape* of the operation — a scalar
-UDF — not the parallel execution.
-
-No network: a synthetic UTM grid over the extent of a Sentinel-2 tile.
+Requires Earth Engine access: ``earthengine authenticate`` once, then an
+initialized project (set ``EARTHENGINE_PROJECT``). Skips cleanly otherwise.
 """
 
 from __future__ import annotations
+
+import os
 
 import numpy as np
 import pyarrow as pa
@@ -54,7 +57,12 @@ from datafusion import udf
 
 import xarray_sql as xql
 
-from _harness import assert_grid_close, run_case, show_sql, timed
+from _harness import CaseSkipped, assert_grid_close, run_case, show_sql, timed
+
+_SRC_CRS, _DST_CRS = "EPSG:32610", "EPSG:4326"  # UTM zone 10N → lon/lat
+# A 1° box over the San Francisco Bay area, well inside UTM zone 10N.
+_AOI = (-122.6, 37.4, -121.6, 38.4)
+_SCALE_M = 2_000  # 2 km pixels → a ~50×60 grid
 
 
 def register_reproject_udf(
@@ -97,32 +105,63 @@ def register_reproject_udf(
     )
 
 
-def _utm_grid() -> xr.Dataset:
-    """A synthetic field on a UTM grid matching a Sentinel-2 T32T tile extent."""
-    # EPSG:32632 extent of tile T32TLQ (from the STAC proj:bbox), coarsened.
-    x = np.linspace(300_000.0, 409_800.0, 60, dtype="float64")
-    y = np.linspace(5_000_040.0, 4_890_240.0, 60, dtype="float64")
-    elevation = np.zeros(
-        (y.size, x.size), dtype="float64"
-    )  # value is irrelevant
-    # Single chunk → single partition → serial UDF (PROJ is not thread-safe).
-    return xr.Dataset(
-        {"elevation": (["y", "x"], elevation)},
-        coords={"y": y, "x": x},
-    ).chunk({"y": 60, "x": 60})
+def _open_ee_lonlat_grid() -> xr.Dataset:
+    """Open ``ee.Image.pixelLonLat()`` on a UTM grid via Xee.
+
+    Earth Engine evaluates ``pixelLonLat`` on the requested UTM grid, so each
+    pixel carries its UTM ``x``/``y`` (coordinates) and EE's own ``longitude`` /
+    ``latitude`` (data variables) — the independent reprojection reference.
+    """
+    try:
+        import ee
+        import shapely.geometry as sgeom
+        from xee import helpers
+    except ImportError as exc:  # pragma: no cover
+        raise CaseSkipped(
+            "Earth Engine support needs `pip install earthengine-api xee`"
+        ) from exc
+
+    try:
+        ee.Initialize(
+            project=os.environ.get("EARTHENGINE_PROJECT"),
+            opt_url="https://earthengine-highvolume.googleapis.com",
+        )
+    except Exception as exc:  # noqa: BLE001 — not authenticated → skip
+        raise CaseSkipped(
+            f"Earth Engine not initialized ({exc}); run "
+            "`earthengine authenticate` and set EARTHENGINE_PROJECT"
+        ) from exc
+
+    # fit_geometry builds the pixel grid (crs, crs_transform, shape_2d) Xee's
+    # backend expects — here a UTM grid at _SCALE_M metres covering the AOI.
+    grid = helpers.fit_geometry(
+        sgeom.box(*_AOI),
+        geometry_crs="EPSG:4326",
+        grid_crs=_SRC_CRS,
+        grid_scale=(float(_SCALE_M), float(_SCALE_M)),
+    )
+    ic = ee.ImageCollection([ee.Image.pixelLonLat()])
+    ds = xr.open_dataset(ic, engine="ee", **grid)
+    # One image → a length-1 time axis; drop it. Xee names projected spatial
+    # coordinates "X"/"Y" (UTM metres); normalize to lower case for the SQL.
+    ds = ds.isel(time=0).rename({"X": "x", "Y": "y"})
+    return ds.load()
 
 
 def main() -> None:
-    src_crs, dst_crs = "EPSG:32632", "EPSG:4326"
-    ds = _utm_grid()
+    ds = _open_ee_lonlat_grid()
+    n = ds.sizes["y"] * ds.sizes["x"]
     print(
-        f"  UTM grid {dict(ds.sizes)}  ({ds.sizes['y'] * ds.sizes['x']:,} points)  "
-        f"{src_crs} → {dst_crs}"
+        f"  EE pixelLonLat on UTM grid {dict(ds.sizes)}  ({n:,} pixels)  "
+        f"{_SRC_CRS} → {_DST_CRS}"
     )
 
     ctx = xql.XarrayContext()
-    ctx.from_dataset("grid", ds, chunks={"y": 60, "x": 60})
-    register_reproject_udf(ctx, src_crs, dst_crs)
+    # Single chunk → single partition → serial UDF (PROJ is not thread-safe).
+    ctx.from_dataset(
+        "grid", ds, chunks={"y": ds.sizes["y"], "x": ds.sizes["x"]}
+    )
+    register_reproject_udf(ctx, _SRC_CRS, _DST_CRS)
 
     sql = """
         SELECT x, y,
@@ -133,26 +172,16 @@ def main() -> None:
     """
     show_sql(sql)
 
-    # Round-trip the reprojected coordinates back to an (y, x) grid.
     with timed("SQL reprojection (PROJ scalar UDF)"):
         got = ctx.sql(sql).to_dataset(dims=["y", "x"])
 
-    # Array reference: the same PROJ transform applied to the full grid.
-    with timed("pyproj reference"):
-        transformer = pyproj.Transformer.from_crs(
-            src_crs, dst_crs, always_xy=True
-        )
-        xx, yy = np.meshgrid(ds.x.values, ds.y.values)
-        lon, lat = transformer.transform(xx, yy)
-        coords = {"y": ds.y, "x": ds.x}
-        ref_lon = xr.DataArray(lon, dims=["y", "x"], coords=coords)
-        ref_lat = xr.DataArray(lat, dims=["y", "x"], coords=coords)
-
+    # Reference: Earth Engine's own per-pixel lon/lat (independent of PROJ).
+    # EE and PROJ are separate implementations, so compare at ~1e-5° (~1 m).
     assert_grid_close(
-        "reprojected longitude", got.lon, ref_lon, rtol=0, atol=1e-9
+        "reprojected longitude", got.lon, ds.longitude, rtol=0, atol=1e-5
     )
     assert_grid_close(
-        "reprojected latitude", got.lat, ref_lat, rtol=0, atol=1e-9
+        "reprojected latitude", got.lat, ds.latitude, rtol=0, atol=1e-5
     )
 
     corner = got.isel(x=0, y=0)
@@ -164,5 +193,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     raise SystemExit(
-        run_case(main, "Reprojection: PROJ scalar UDF (ST_Transform)")
+        run_case(main, "Reprojection: PROJ scalar UDF vs Earth Engine")
     )
