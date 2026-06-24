@@ -6,6 +6,9 @@
 #   "gcsfs",
 #   "zarr>=3",
 # ]
+#
+# [tool.uv.sources]
+# xarray-sql = { path = "../../", editable = true }
 # ///
 """Temperature anomaly — "broadcast-subtract the climatology" is a self-JOIN.
 

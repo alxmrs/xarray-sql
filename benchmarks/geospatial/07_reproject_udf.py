@@ -11,6 +11,9 @@
 #   "earthengine-api",
 #   "shapely",
 # ]
+#
+# [tool.uv.sources]
+# xarray-sql = { path = "../../", editable = true }
 # ///
 """Reprojection — a per-pixel CRS transform is a scalar UDF (à la ST_Transform).
 

@@ -9,6 +9,9 @@
 #   "earthengine-api",
 #   "shapely",
 # ]
+#
+# [tool.uv.sources]
+# xarray-sql = { path = "../../", editable = true }
 # ///
 """Regridding — interpolation to a new grid is a sparse matmul, i.e. a JOIN.
 

@@ -7,6 +7,9 @@
 #   "gcsfs",
 #   "zarr>=3",
 # ]
+#
+# [tool.uv.sources]
+# xarray-sql = { path = "../../", editable = true }
 # ///
 """Zonal statistics over regions — "rasterize the polygons, then mask" is a JOIN.
 

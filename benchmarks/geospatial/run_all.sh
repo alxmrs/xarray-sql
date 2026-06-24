@@ -8,10 +8,10 @@
 #   ./run_all.sh                 # from anywhere
 #   bash benchmarks/geospatial/run_all.sh
 #
-# These cases use xarray-sql features (e.g. XarrayDataFrame.to_dataset) that may
-# be newer than the latest PyPI release, so we hand `uv` the *local* checkout
-# with --with-editable rather than letting it resolve xarray-sql from PyPI. Once
-# a release ships those features, plain `uv run <script>` will work too.
+# Each script's metadata points xarray-sql at this local checkout
+# ([tool.uv.sources] path = "../../"), so uv uses the in-repo build (which has
+# features newer than the latest PyPI release) — relative to the script, so it
+# resolves no matter the working directory.
 #
 # Network/credential-gated cases (ERA5, WeatherBench2, Earth Engine) skip
 # cleanly when their data is unavailable. Exits non-zero if any case fails
@@ -19,16 +19,14 @@
 
 set -uo pipefail
 
-# Directory this script lives in, and the repo root, regardless of the caller's
-# working directory.
+# Directory this script lives in, regardless of the caller's working directory.
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$DIR/../.." && pwd)"
 
 status=0
 for script in "$DIR"/[0-9][0-9]_*.py; do
   name="$(basename "$script")"
   echo "════════════════════════════════════════ ${name}"
-  if uv run --with-editable "$REPO_ROOT" "$script"; then
+  if uv run "$script"; then
     echo "✅ ${name}"
   else
     echo "❌ ${name} (exit $?)"
