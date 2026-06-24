@@ -43,6 +43,7 @@ import xarray_sql as xql
 from _harness import (
     CaseSkipped,
     assert_grid_close,
+    measured,
     run_case,
     show_result,
     show_sql,
@@ -109,13 +110,13 @@ def main() -> None:
     show_sql(sql)
 
     # The anomaly is a gridded field; round-trip it to (time, lat, lon).
-    with timed("SQL anomaly (climatology CTE self-join, lazy read)"):
+    for _ in measured("SQL anomaly (climatology CTE self-join, lazy read)"):
         got = ctx.sql(sql, param_values=_PARAMS).to_dataset(
             dims=["time", "latitude", "longitude"]
         )
 
     # Array reference: grouped broadcast-subtract, in pure xarray (lazy window).
-    with timed("xarray reference"):
+    for _ in measured("xarray reference"):
         window = ds["2m_temperature"].sel(
             time=slice(_START, _END),
             latitude=slice(_LAT_N, _LAT_S),

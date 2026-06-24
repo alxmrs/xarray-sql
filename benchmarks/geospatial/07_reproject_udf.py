@@ -62,10 +62,10 @@ from _harness import (
     CaseSkipped,
     assert_grid_close,
     initialize_earth_engine,
+    measured,
     run_case,
     show_result,
     show_sql,
-    timed,
 )
 
 _SRC_CRS, _DST_CRS = "EPSG:32610", "EPSG:4326"  # UTM zone 10N → lon/lat
@@ -170,7 +170,7 @@ def main() -> None:
     """
     show_sql(sql)
 
-    with timed("SQL reprojection (PROJ scalar UDF)"):
+    for _ in measured("SQL reprojection (PROJ scalar UDF)"):
         got = ctx.sql(sql).to_dataset(dims=["y", "x"])
 
     # Reference: Earth Engine's own per-pixel lon/lat (independent of PROJ).

@@ -44,6 +44,7 @@ import xarray_sql as xql
 from _harness import (
     CaseSkipped,
     assert_grid_close,
+    measured,
     run_case,
     show_result,
     show_sql,
@@ -105,14 +106,14 @@ def main() -> None:
 
     # A climatology is a gridded product: round-trip the result back to an
     # xarray Dataset keyed by (latitude, longitude, hour) — how it is used.
-    with timed("SQL diurnal climatology (lazy read)"):
+    for _ in measured("SQL diurnal climatology (lazy read)"):
         got = ctx.sql(sql, param_values=_PARAMS).to_dataset(
             dims=["latitude", "longitude", "hour"]
         )
 
     # Array reference: the textbook groupby-over-the-cycle reduction, in °C —
     # the same lazy window, materialized only on demand.
-    with timed("xarray reference"):
+    for _ in measured("xarray reference"):
         window = ds["2m_temperature"].sel(
             time=slice(_START, _END),
             latitude=slice(_LAT_N, _LAT_S),
