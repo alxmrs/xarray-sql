@@ -72,3 +72,22 @@ that need data or credentials you don't have print `⏭ SKIPPED` and exit 0.
 
 Shared helpers — timing, peak memory, the result check and its printout, SQL
 echo — live in [`_harness.py`](_harness.py).
+
+## Profiling
+
+To capture a performance table, set `GEOBENCH_PROFILE` and point `GEOBENCH_CSV`
+at an output file. Each case then runs a warmup plus `GEOBENCH_REPS` measured
+repetitions, and a row of summary statistics for every timed step is appended to
+the CSV:
+
+```shell
+GEOBENCH_PROFILE=1 GEOBENCH_REPS=5 GEOBENCH_CSV=perf.csv \
+  bash benchmarks/geospatial/run_all.sh
+```
+
+The columns are `case, title, step, reps, t_min_s, t_median_s, t_mean_s,
+t_stdev_s, t_max_s, peak_mb`. The warmup primes connections and caches, so the
+measured repetitions report steady-state cost — run it close to the data (a VM
+in the bucket's region) for representative, low-variance numbers. The case
+scripts are unchanged by profiling; the repetition and aggregation live in the
+harness (`run_case`).
