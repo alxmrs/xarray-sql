@@ -47,8 +47,6 @@ initialized project (set ``EARTHENGINE_PROJECT``). Skips cleanly otherwise.
 
 from __future__ import annotations
 
-import os
-
 import numpy as np
 import pyarrow as pa
 import pyproj
@@ -57,7 +55,14 @@ from datafusion import udf
 
 import xarray_sql as xql
 
-from _harness import CaseSkipped, assert_grid_close, run_case, show_sql, timed
+from _harness import (
+    CaseSkipped,
+    assert_grid_close,
+    initialize_earth_engine,
+    run_case,
+    show_sql,
+    timed,
+)
 
 _SRC_CRS, _DST_CRS = "EPSG:32610", "EPSG:4326"  # UTM zone 10N → lon/lat
 # A 1° box over the San Francisco Bay area, well inside UTM zone 10N.
@@ -113,7 +118,6 @@ def _open_ee_lonlat_grid() -> xr.Dataset:
     ``latitude`` (data variables) — the independent reprojection reference.
     """
     try:
-        import ee
         import shapely.geometry as sgeom
         from xee import helpers
     except ImportError as exc:  # pragma: no cover
@@ -121,16 +125,7 @@ def _open_ee_lonlat_grid() -> xr.Dataset:
             "Earth Engine support needs `pip install earthengine-api xee`"
         ) from exc
 
-    try:
-        ee.Initialize(
-            project=os.environ.get("EARTHENGINE_PROJECT"),
-            opt_url="https://earthengine-highvolume.googleapis.com",
-        )
-    except Exception as exc:  # noqa: BLE001 — not authenticated → skip
-        raise CaseSkipped(
-            f"Earth Engine not initialized ({exc}); run "
-            "`earthengine authenticate` and set EARTHENGINE_PROJECT"
-        ) from exc
+    ee = initialize_earth_engine()
 
     # fit_geometry builds the pixel grid (crs, crs_transform, shape_2d) Xee's
     # backend expects — here a UTM grid at _SCALE_M metres covering the AOI.
@@ -142,10 +137,9 @@ def _open_ee_lonlat_grid() -> xr.Dataset:
     )
     ic = ee.ImageCollection([ee.Image.pixelLonLat()])
     ds = xr.open_dataset(ic, engine="ee", **grid)
-    # One image → a length-1 time axis; drop it. Xee names projected spatial
-    # coordinates "X"/"Y" (UTM metres); normalize to lower case for the SQL.
-    ds = ds.isel(time=0).rename({"X": "x", "Y": "y"})
-    return ds.load()
+    # One image → a length-1 time axis; drop it. Xee gives x/y coordinates (UTM
+    # metres) and longitude/latitude data variables (EE's per-pixel geodesy).
+    return ds.isel(time=0).load()
 
 
 def main() -> None:

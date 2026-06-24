@@ -45,14 +45,19 @@ initialized project (set ``EARTHENGINE_PROJECT``). Skips cleanly otherwise.
 
 from __future__ import annotations
 
-import os
-
 import numpy as np
 import xarray as xr
 
 import xarray_sql as xql
 
-from _harness import CaseSkipped, assert_grid_close, run_case, show_sql, timed
+from _harness import (
+    CaseSkipped,
+    assert_grid_close,
+    initialize_earth_engine,
+    run_case,
+    show_sql,
+    timed,
+)
 
 # A 1° box over the Sierra Nevada — real terrain with strong relief.
 _AOI = (-119.6, 37.0, -118.6, 38.0)
@@ -108,7 +113,6 @@ def _bilinear_weight_table(
 def _open_srtm() -> xr.DataArray:
     """Open SRTM elevation over the AOI as a coarse (lat, lon) field via Xee."""
     try:
-        import ee
         import shapely.geometry as sgeom
         from xee import helpers
     except ImportError as exc:  # pragma: no cover
@@ -116,16 +120,7 @@ def _open_srtm() -> xr.DataArray:
             "Earth Engine support needs `pip install earthengine-api xee`"
         ) from exc
 
-    try:
-        ee.Initialize(
-            project=os.environ.get("EARTHENGINE_PROJECT"),
-            opt_url="https://earthengine-highvolume.googleapis.com",
-        )
-    except Exception as exc:  # noqa: BLE001 — not authenticated → skip
-        raise CaseSkipped(
-            f"Earth Engine not initialized ({exc}); run "
-            "`earthengine authenticate` and set EARTHENGINE_PROJECT"
-        ) from exc
+    ee = initialize_earth_engine()
 
     # fit_geometry builds the pixel grid (crs, crs_transform, shape_2d) Xee's
     # backend expects — here a geographic grid at _SRC_SCALE_DEG° over the AOI.

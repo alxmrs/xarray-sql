@@ -21,18 +21,57 @@ These helpers keep each case script short and uniform:
 from __future__ import annotations
 
 import contextlib
+import os
 import sys
 import time
 import tracemalloc
 from collections.abc import Callable, Iterator
+from typing import Any
 
 import xarray as xr
 
 _WIDTH = 72
 
+_EE_SCOPES = [
+    "https://www.googleapis.com/auth/earthengine",
+    "https://www.googleapis.com/auth/cloud-platform",
+]
+
 
 class CaseSkipped(Exception):
     """Raised by a case when it cannot run in this environment (e.g. offline)."""
+
+
+def initialize_earth_engine() -> Any:
+    """Initialize Earth Engine from Application Default Credentials, or skip.
+
+    Uses the credentials from ``gcloud auth application-default login`` (with the
+    Earth Engine scope) and the ADC project — so no separate ``earthengine
+    authenticate`` OAuth flow is needed, which also sidesteps the "this app is
+    blocked" error some org policies raise. Override the project with the
+    ``EARTHENGINE_PROJECT`` environment variable. Returns the initialized ``ee``
+    module; raises :class:`CaseSkipped` if EE is unavailable or unauthenticated.
+    """
+    try:
+        import ee
+        import google.auth
+    except ImportError as exc:  # pragma: no cover
+        raise CaseSkipped(
+            "Earth Engine support needs `pip install earthengine-api`"
+        ) from exc
+    try:
+        credentials, adc_project = google.auth.default(scopes=_EE_SCOPES)
+        ee.Initialize(
+            credentials,
+            project=os.environ.get("EARTHENGINE_PROJECT") or adc_project,
+            opt_url="https://earthengine-highvolume.googleapis.com",
+        )
+    except Exception as exc:  # noqa: BLE001 — not authenticated → skip
+        raise CaseSkipped(
+            f"Earth Engine not initialized ({exc}); run "
+            "`gcloud auth application-default login` (or set EARTHENGINE_PROJECT)"
+        ) from exc
+    return ee
 
 
 def banner(text: str) -> None:
