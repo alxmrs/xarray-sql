@@ -75,19 +75,25 @@ echo — live in [`_harness.py`](_harness.py).
 
 ## Profiling
 
-To capture a performance table, set `GEOBENCH_PROFILE` and point `GEOBENCH_CSV`
-at an output file. Each repeatable step — the SQL query and the xarray reference
-it's checked against — then runs a warmup plus `GEOBENCH_REPS` measured
-repetitions, and a row of summary statistics is appended to the CSV:
+For a performance table, use `run_perf.sh`. It runs each case **once per fresh
+process**, with no warmup, repeated `GEOBENCH_REPS` times, and aggregates the
+runs into one CSV (and a markdown table on stdout):
 
 ```shell
-GEOBENCH_PROFILE=1 GEOBENCH_REPS=5 GEOBENCH_CSV=perf.csv \
-  bash benchmarks/geospatial/run_all.sh
+GEOBENCH_REPS=5 benchmarks/geospatial/run_perf.sh perf.csv
 ```
 
-The columns are `case, title, step, reps, t_min_s, t_median_s, t_mean_s,
-t_stdev_s, t_max_s, peak_mb`. The warmup primes connections and caches, so the
-measured repetitions report steady-state cost — run it close to the data (a VM
-in the bucket's region) for representative, low-variance numbers. In the cases,
-a repeated step reads `for _ in measured(...)` rather than `with timed(...)`;
-everything else is the ordinary xarray/SQL.
+A fresh process per repetition is deliberate, and it's the only way the SQL and
+xarray sides compare fairly. `xr.open_zarr(chunks=None)` caches each variable in
+memory after its first read, so an in-process warm loop would let the xarray
+reference serve later repetitions from RAM while the SQL side re-reads the
+store — flattering the reference. One process per rep makes **both sides pay a
+cold read every time**. The columns are `case, title, step, reps, t_min_s,
+t_median_s, t_mean_s, t_stdev_s, t_max_s, peak_mb`. Run it close to the data (a
+VM in the bucket's region) against a release build of `xarray-sql`; pass
+`GEOBENCH_PYRUN="python"` to use an already-built venv instead of `uv run`.
+
+Under the hood each repeatable step is wrapped in `for _ in measured(...)`
+(rather than `with timed(...)`); with `GEOBENCH_PROFILE=1` set, `measured` times
+the step and, with `GEOBENCH_CSV`, records it. `run_perf.sh` drives that one cold
+run at a time; everything else in the cases is the ordinary xarray/SQL.
