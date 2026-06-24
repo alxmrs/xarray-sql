@@ -34,6 +34,8 @@ Dataset: full ARCO-ERA5 + a handful of continental-scale bounding boxes
 
 from __future__ import annotations
 
+import datetime
+
 import numpy as np
 import xarray as xr
 
@@ -43,6 +45,10 @@ from _harness import CaseSkipped, assert_grid_close, run_case, show_sql, timed
 
 _URL = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
 _DAY = "2020-06-01"
+_START, _END = (
+    datetime.datetime(2020, 6, 1, 0),
+    datetime.datetime(2020, 6, 1, 23),
+)
 
 # Continental-scale boxes (name, lat_min, lat_max, lon_min, lon_max), lon 0–360°E.
 _REGIONS = [
@@ -97,7 +103,7 @@ def main() -> None:
             "regions", _regions_dataset(), chunks={"region": len(_REGIONS)}
         )
 
-    sql = f"""
+    sql = """
         SELECT r.region AS region_id,
                AVG(a."2m_temperature") - 273.15 AS avg_c,
                COUNT(*) AS n_obs
@@ -105,15 +111,16 @@ def main() -> None:
         JOIN regions r
           ON  a.latitude  BETWEEN r.lat_min AND r.lat_max
           AND a.longitude BETWEEN r.lon_min AND r.lon_max
-        WHERE a.time BETWEEN TIMESTAMP '{_DAY}'
-                         AND TIMESTAMP '{_DAY} 23:00:00'
+        WHERE a.time BETWEEN $start AND $end
         GROUP BY r.region
         ORDER BY r.region
     """
     show_sql(sql)
 
     with timed("SQL zonal stats (raster × vector range JOIN, WHERE-pruned)"):
-        got = ctx.sql(sql).to_dataset(dims=["region_id"])
+        got = ctx.sql(
+            sql, param_values={"start": _START, "end": _END}
+        ).to_dataset(dims=["region_id"])
 
     # Array reference: load the same day once, mask each region in memory.
     with timed("xarray reference"):
