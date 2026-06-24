@@ -108,12 +108,6 @@ _(A runnable version of this example lives at
 Succinctly, we "pivot" Xarray Datasets to treat them like tables so we can run
 SQL queries against them. 
 
-For worked examples of common geospatial operations expressed in SQL — NDVI,
-climatology, anomalies, zonal statistics, forecast skill (Pangu-Weather and
-GraphCast vs ERA5), reprojection, and regridding, each checked against an xarray
-reference — see [`benchmarks/geospatial/`](benchmarks/geospatial/) and the
-[Geospatial operations are relational operations](docs/geospatial.md) write-up.
-
 ## Why build this?
 
 A few reasons:
@@ -147,6 +141,33 @@ into Arrow RecordBatches. We pass a Python callback into a DataFusion `TableProv
 that lets the DB engine translate the underlying Dataset arrays into DataFusion partitions.
 Ultimately, the initial insight of the `pivot()` function -- that any ndarray can be
 translated into a 2D table -- underlies this performant query mechanism. 
+
+## Does it work?
+
+Yes. The recurring worry is that the SQL interface is a toy — fine for `SELECT`s,
+but not for the operations geoscience actually runs. So we wrote a suite that
+takes the staples of geospatial and climate analysis — the ones we assume *need*
+an array library — and expresses each one in SQL, then **checks the SQL answer
+against an xarray/array reference** to floating-point tolerance:
+
+* **Spectral indices** (NDVI) — column arithmetic over a real Sentinel-2 scene.
+* **Climatology, anomalies, zonal means** — `GROUP BY` and self-`JOIN` over the
+  full 0.25° **ARCO-ERA5** archive (≈1.3M hourly steps), read lazily with
+  partition pruning and column pushdown.
+* **Forecast skill** — scoring the **Pangu-Weather** and **GraphCast** ML models
+  against ERA5 (WeatherBench 2) as a `JOIN` on `valid_time = init + lead`; it
+  reproduces the published result that GraphCast beats Pangu at every lead.
+* **Raster × vector zonal stats** — a range `JOIN` of the ERA5 grid against a
+  table of regions.
+* **Reprojection and regridding** — a scalar PROJ UDF (validated against Earth
+  Engine's own geodesy via [Xee](https://github.com/google/Xee)) and a
+  sparse-weight-table `JOIN` (regridding real SRTM terrain).
+
+Every case matches its array reference. The headline finding: these operations
+are not really "array" operations at all — they are `GROUP BY`, `JOIN`, window
+functions, and `CASE` in disguise, and a query engine runs them at scale. See
+[`benchmarks/geospatial/`](benchmarks/geospatial/) and the write-up,
+[Geospatial operations are relational operations](docs/geospatial.md).
 
 ## Why does this work?
 
