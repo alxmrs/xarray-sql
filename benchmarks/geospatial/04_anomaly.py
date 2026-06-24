@@ -42,7 +42,14 @@ import xarray as xr
 
 import xarray_sql as xql
 
-from _harness import CaseSkipped, assert_grid_close, run_case, show_sql, timed
+from _harness import (
+    CaseSkipped,
+    assert_grid_close,
+    run_case,
+    show_result,
+    show_sql,
+    timed,
+)
 
 _URL = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
 _START, _END = datetime.datetime(2020, 6, 1), datetime.datetime(2020, 6, 3, 23)
@@ -127,7 +134,7 @@ def main() -> None:
         atol=1e-2,
     )
 
-    print(f"\n  anomaly Dataset: {dict(got.sizes)}")
+    show_result(got)
 
 
 if __name__ == "__main__":

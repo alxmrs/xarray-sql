@@ -63,6 +63,7 @@ from _harness import (
     assert_grid_close,
     initialize_earth_engine,
     run_case,
+    show_result,
     show_sql,
     timed,
 )
@@ -180,6 +181,8 @@ def main() -> None:
     assert_grid_close(
         "reprojected latitude", got.lat, ds.latitude, rtol=0, atol=1e-5
     )
+
+    show_result(got)
 
     corner = got.isel(x=0, y=0)
     print(

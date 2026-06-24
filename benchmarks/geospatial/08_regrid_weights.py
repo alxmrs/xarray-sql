@@ -58,6 +58,7 @@ from _harness import (
     assert_grid_close,
     initialize_earth_engine,
     run_case,
+    show_result,
     show_sql,
     timed,
 )
@@ -205,6 +206,8 @@ def main() -> None:
         ref = src_da.interp(lat=tlat, lon=tlon, method="linear")
 
     assert_grid_close("bilinear regrid", got, ref, rtol=1e-9, atol=1e-9)
+
+    show_result(got)
 
     print(
         f"\n  {got.size:,} target cells regridded; "

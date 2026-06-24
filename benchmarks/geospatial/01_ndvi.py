@@ -51,6 +51,7 @@ from _harness import (
     CaseSkipped,
     assert_grid_close,
     run_case,
+    show_result,
     show_sql,
     timed,
 )
@@ -131,6 +132,8 @@ def main() -> None:
     # Compare the xarray way — aligned by coordinate label, so the ORDER BY
     # above is enough and neither side needs an explicit sort.
     assert_grid_close("NDVI (per-pixel)", got, ref, rtol=1e-6)
+
+    show_result(got)
 
     valid = ref.notnull()
     print(

@@ -38,7 +38,14 @@ import xarray as xr
 
 import xarray_sql as xql
 
-from _harness import CaseSkipped, assert_grid_close, run_case, show_sql, timed
+from _harness import (
+    CaseSkipped,
+    assert_grid_close,
+    run_case,
+    show_result,
+    show_sql,
+    timed,
+)
 
 _URL = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
 # One day of hourly data, global; the WHERE below prunes ERA5 to this window.
@@ -111,6 +118,8 @@ def main() -> None:
         rtol=1e-4,
         atol=1e-3,
     )
+
+    show_result(got)
 
     print("\n  Global temperature profile (every 72nd parallel, °C):")
     print(got.air_mean_c.isel(latitude=slice(None, None, 72)).to_series())
