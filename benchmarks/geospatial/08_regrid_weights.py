@@ -20,11 +20,11 @@ most associate with the *array* paradigm — xESMF/ESMF, ``apply_ufunc``,
 ``.interp()``. But every linear regridding scheme (bilinear, conservative,
 nearest) is mathematically a **sparse matrix–vector product**: each output cell
 is a weighted sum of a few input cells. And a sparse matrix is just a table of
-``(dst_id, src_id, weight)`` rows. So *applying* a regridding is::
+``(target, source, weight)`` rows. So *applying* a regridding is::
 
-    SELECT w.dst_id, SUM(s.value * w.weight) AS regridded
+    SELECT w.dst_lat, w.dst_lon, SUM(s.value * w.weight) AS regridded
     FROM   weights w JOIN src s ON s.cell_id = w.src_id
-    GROUP BY w.dst_id
+    GROUP BY w.dst_lat, w.dst_lon
 
 — a JOIN against the weight table plus a weighted GROUP BY. This is the most
 relational the "array" paradigm ever gets: the operation we reach for xESMF to
@@ -90,24 +90,28 @@ def _linear_weights(
 def _bilinear_weight_table(
     slat: np.ndarray, slon: np.ndarray, tlat: np.ndarray, tlon: np.ndarray
 ) -> xr.Dataset:
-    """Build the sparse bilinear weight matrix as a (dst_id, src_id, weight) table.
+    """Build the sparse bilinear weight matrix as a weight table.
 
-    The 2-D weight is the outer product of the 1-D lat and lon weights; src_id
-    and dst_id are row-major flattenings of the source and target grids.
+    The 2-D weight is the outer product of the 1-D lat and lon weights. Each
+    nonzero is one row: the target cell named by its ``(dst_lat, dst_lon)`` and
+    the source cell by its row-major ``src_id`` — so the regrid SQL can GROUP BY
+    the target coordinates and round-trip straight back to a (lat, lon) grid.
     """
-    nslon, ntlon = len(slon), len(tlon)
+    nslon = len(slon)
     lat_w = _linear_weights(slat, tlat)
     lon_w = _linear_weights(slon, tlon)
-    dst_ids, src_ids, weights = [], [], []
+    dst_lats, dst_lons, src_ids, weights = [], [], [], []
     for tj, si, wlat in lat_w:
         for tk, sj, wlon in lon_w:
-            dst_ids.append(tj * ntlon + tk)
+            dst_lats.append(tlat[tj])
+            dst_lons.append(tlon[tk])
             src_ids.append(si * nslon + sj)
             weights.append(wlat * wlon)
     n = len(weights)
     return xr.Dataset(
         {
-            "dst_id": (["pair"], np.array(dst_ids, dtype="int64")),
+            "dst_lat": (["pair"], np.array(dst_lats, dtype="float64")),
+            "dst_lon": (["pair"], np.array(dst_lons, dtype="float64")),
             "src_id": (["pair"], np.array(src_ids, dtype="int64")),
             "weight": (["pair"], np.array(weights, dtype="float64")),
         },
@@ -183,24 +187,20 @@ def main() -> None:
     ctx.from_dataset("weights", weights, chunks={"pair": weights.sizes["pair"]})
 
     sql = """
-        SELECT w.dst_id,
+        SELECT w.dst_lat AS lat,
+               w.dst_lon AS lon,
                SUM(s.value * w.weight) AS regridded
         FROM weights w
         JOIN src s ON s.cell_id = w.src_id
-        GROUP BY w.dst_id
-        ORDER BY w.dst_id
+        GROUP BY w.dst_lat, w.dst_lon
+        ORDER BY w.dst_lat, w.dst_lon
     """
     show_sql(sql)
 
-    # The result is keyed by dst_id (row-major over the target grid); reshape
-    # it back to the (lat, lon) field it represents.
+    # The weights name each target cell by its (lat, lon), so the result rounds
+    # straight back to the (lat, lon) field it represents — no reshape.
     for _ in measured("SQL regrid (weight-table JOIN + weighted SUM)"):
-        flat = ctx.sql(sql).to_dataset(dims=["dst_id"]).regridded
-        got = xr.DataArray(
-            flat.values.reshape(len(tlat), len(tlon)),
-            dims=["lat", "lon"],
-            coords={"lat": tlat, "lon": tlon},
-        )
+        got = ctx.sql(sql).to_dataset(dims=["lat", "lon"]).regridded
 
     # Array reference: xarray's own bilinear interpolation of the same field.
     for _ in measured("xarray .interp reference"):
