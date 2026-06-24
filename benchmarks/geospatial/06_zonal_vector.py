@@ -44,7 +44,14 @@ import xarray as xr
 
 import xarray_sql as xql
 
-from _harness import CaseSkipped, assert_grid_close, run_case, show_sql, timed
+from _harness import (
+    CaseSkipped,
+    assert_grid_close,
+    run_case,
+    show_result,
+    show_sql,
+    timed,
+)
 
 _URL = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
 _DAY = "2020-06-01"
@@ -153,6 +160,8 @@ def main() -> None:
     assert_grid_close(
         "zonal mean per region (°C)", got.avg_c, ref, rtol=1e-4, atol=1e-2
     )
+
+    show_result(got)
 
     print("\n  Region                 avg °C      n_obs")
     for (name, *_), avg, n in zip(_REGIONS, got.avg_c.values, got.n_obs.values):

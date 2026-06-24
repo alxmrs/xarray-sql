@@ -52,7 +52,14 @@ import xarray as xr
 
 import xarray_sql as xql
 
-from _harness import CaseSkipped, assert_grid_close, run_case, show_sql, timed
+from _harness import (
+    CaseSkipped,
+    assert_grid_close,
+    run_case,
+    show_result,
+    show_sql,
+    timed,
+)
 
 _SO = {"token": "anon"}
 _GRID = "64x32_equiangular_conservative"
@@ -159,6 +166,8 @@ def main() -> None:
         ref = _reference_rmse(forecasts, truth)
 
     assert_grid_close("RMSE(model, lead)", got, ref, rtol=1e-4, atol=1e-3)
+
+    show_result(got)
 
     # Headline table: error growth with forecast horizon, both models.
     lead_days = got["lead"].values / np.timedelta64(1, "D")

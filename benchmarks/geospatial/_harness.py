@@ -138,6 +138,18 @@ def assert_grid_close(
     )
 
 
+def show_result(
+    result: xr.DataArray | xr.Dataset, *, label: str = "Result (SQL → xarray)"
+) -> None:
+    """Print the SQL result as an xarray object, using its standard repr.
+
+    Called after the match is verified, so a run shows *what* it computed — the
+    gridded answer round-tripped back out of SQL as an ``xarray`` object.
+    """
+    print(f"\n  {label}:\n")
+    print(result)
+
+
 def run_case(main: Callable[[], None], title: str) -> int:
     """Run a case ``main()``; turn :class:`CaseSkipped` into a clean skip.
 
