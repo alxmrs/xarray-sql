@@ -50,8 +50,13 @@ interpolation weights — the geometry — which SQL applies but does not comput
   Pangu-Weather, GraphCast, and ERA5 datasets at a coarse 64×32 grid, scoring
   both ML models against ERA5 ground truth. Network-backed; runs in seconds
   because the grid is small.
-- **07–08** — small/synthetic grids plus precomputed regrid weights, so they run
-  without heavy geospatial dependencies (ESMF/ESMPy).
+- **07–08** — the **Earth Engine** catalog via [Xee](https://github.com/google/Xee).
+  07 reprojects a UTM grid and validates the SQL transform against Earth Engine's
+  *own* per-pixel lon/lat (`ee.Image.pixelLonLat()`) — an independent reprojection
+  reference, not PROJ-vs-PROJ. 08 regrids real **SRTM elevation** (Sierra Nevada)
+  and validates against xarray's bilinear `.interp()`. Both need EE access
+  (`earthengine authenticate` + an initialized project via `EARTHENGINE_PROJECT`)
+  and skip cleanly without it.
 
 ## Running
 

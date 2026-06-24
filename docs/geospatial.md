@@ -187,11 +187,15 @@ SELECT x, y, reproject(x, y)['lon'] AS lon, reproject(x, y)['lat'] AS lat
 FROM grid
 ```
 
-[`07_reproject_udf.py`](../benchmarks/geospatial/07_reproject_udf.py) matches
-pyproj to 1e-9. Two honest caveats, both documented in the script: PROJ's
-context is not thread-safe (so the UDF returns both coordinates from *one* call
-and runs on a single partition), and reprojection moves coordinates without
-resampling onto a grid — which is the next operation.
+[`07_reproject_udf.py`](../benchmarks/geospatial/07_reproject_udf.py) validates
+this against **Earth Engine itself**: it opens a UTM grid through
+[Xee](https://github.com/google/Xee) carrying `ee.Image.pixelLonLat()`, so EE's
+own geodesy engine reports the true lon/lat of every pixel — an *independent*
+reprojection reference, not PROJ-vs-PROJ. The SQL UDF and EE agree to sub-metre
+precision. Two honest caveats, both documented in the script: PROJ's context is
+not thread-safe (so the UDF returns both coordinates from *one* call and runs on
+a single partition), and reprojection moves coordinates without resampling onto
+a grid — which is the next operation.
 
 **Regridding is not** row-independent: each output cell is a weighted blend of
 several input cells. That is a *many-to-many* relationship — and a many-to-many
@@ -204,7 +208,9 @@ FROM weights w JOIN src s ON s.cell_id = w.src_id
 GROUP BY w.dst_id
 ```
 
-[`08_regrid_weights.py`](../benchmarks/geospatial/08_regrid_weights.py) matches
+[`08_regrid_weights.py`](../benchmarks/geospatial/08_regrid_weights.py) regrids
+real **SRTM elevation** (Sierra Nevada terrain, opened from the Earth Engine
+catalog through [Xee](https://github.com/google/Xee)) coarse → fine and matches
 xarray's bilinear `.interp()` exactly. So regridding does not weaken the thesis —
 it is the most relational operation of all.
 
