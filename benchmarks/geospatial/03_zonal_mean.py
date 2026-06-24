@@ -86,8 +86,8 @@ def main() -> None:
             },
         )
 
-    # The window bounds are passed as query parameters, not formatted into the
-    # SQL string; pruning still kicks in, so only one day is read.
+    # Pass the day's bounds as query parameters; the query still reads only that
+    # one day out of the whole archive.
     sql = """
         SELECT latitude,
                AVG("2m_temperature") - 273.15 AS air_mean_c
@@ -99,7 +99,7 @@ def main() -> None:
     show_sql(sql)
 
     # Round-trip the profile back to an xarray Dataset keyed by latitude.
-    with timed("SQL zonal mean (WHERE-pruned to one day)"):
+    with timed("SQL zonal mean (reads one day)"):
         got = ctx.sql(
             sql, param_values={"start": _START, "end": _END}
         ).to_dataset(dims=["latitude"])

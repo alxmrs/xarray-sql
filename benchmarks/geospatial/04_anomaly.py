@@ -27,11 +27,9 @@ climatology CTE joined back to the raw observations::
     FROM era5 a JOIN clim c
       ON (a.latitude, a.longitude, hour(a.time)) = (c.latitude, c.longitude, c.hour)
 
-The table is the *whole* lazily-opened ARCO-ERA5 archive — nothing loaded or
-column-selected up front. Both the climatology CTE and the outer scan read only
-``2m_temperature`` (projection pushdown) over only the window the parameterized
-``WHERE`` asks for (partition pruning). Bounds are query parameters, not
-string-formatted into the SQL.
+The table is the *whole* ARCO-ERA5 archive, opened lazily: both the climatology
+CTE and the outer scan read only ``2m_temperature``, and only over the window the
+``WHERE`` asks for.
 """
 
 from __future__ import annotations

@@ -11,14 +11,11 @@ The array paradigm (NumPy, Xarray, Dask) is a wonderful *interface* for these
 operations. But it is not the only one, and for a large and growing audience —
 the people fluent in SQL rather than in `apply_ufunc` and rechunking — it is not
 the most accessible one. [`xarray-sql`](../README.md) lets you pose these
-questions in SQL and answers them with a real query engine (DataFusion),
-complete with partition pruning and projection pushdown. The datasets are
-registered *lazily* — nothing is read or column-selected up front; each query
-pulls only the variable and the partitions it needs, and value filters are
-passed as bound **query parameters** rather than formatted into the SQL string.
-And because a gridded result is still gridded data, every query here round-trips
-its answer straight back to an `xarray.Dataset` (via `to_dataset`) — SQL in, an
-array out, ready to plot or save.
+questions in SQL and answers them with a real query engine (DataFusion). The
+datasets are opened *lazily*, so a query against the whole archive reads only the
+variable and the slice it actually needs. And because a gridded result is still
+gridded data, every query here round-trips its answer straight back to an
+`xarray.Dataset` — SQL in, an array out, ready to plot or save.
 
 This page makes the argument case by case. Every claim below is backed by a
 runnable script in [`benchmarks/geospatial/`](../benchmarks/geospatial/) that
@@ -131,10 +128,10 @@ JOIN era5 e
 GROUP BY f.model, f.prediction_timedelta
 ```
 
-Both models are stacked along a `model` dimension into one forecast table, so
-the query scores them together by grouping on a `model` *column* — no table name
-formatted into the SQL. The entire evaluation — temporal alignment across three
-time axes, spatial matching, and the score — is one JOIN and one aggregate.
+Both models are stacked along a `model` dimension into one forecast table, so a
+single query scores them together, grouped by the `model` column. The entire
+evaluation — temporal alignment across three time axes, spatial matching, and the
+score — is one JOIN and one aggregate.
 [`05_forecast_skill.py`](../benchmarks/geospatial/05_forecast_skill.py) runs it
 for both models, matches an xarray reference, and reproduces the published result
 that GraphCast edges out Pangu at every lead — the classic "error grows with
@@ -168,8 +165,8 @@ literal: the raster is the full ERA5 archive (the `WHERE` prunes it to a day),
 the regions are a second SQL table, and the spatial relationship is an ordinary
 `BETWEEN`. See [`06_zonal_vector.py`](../benchmarks/geospatial/06_zonal_vector.py)
 — it reports e.g. Sahara 33 °C vs Greenland −8 °C for a June day. (Rectangular
-regions keep the demo dependency-free; arbitrary polygons are the natural next
-step, via a point-in-polygon UDF — see below.)
+regions keep this simple; arbitrary polygons would follow the same shape, with a
+point-in-polygon test in the join.)
 
 ## 6. The hard cases: where a UDF fits, and where it doesn't
 
@@ -192,10 +189,10 @@ this against **Earth Engine itself**: it opens a UTM grid through
 [Xee](https://github.com/google/Xee) carrying `ee.Image.pixelLonLat()`, so EE's
 own geodesy engine reports the true lon/lat of every pixel — an *independent*
 reprojection reference, not PROJ-vs-PROJ. The SQL UDF and EE agree to sub-metre
-precision. Two caveats, both documented in the script: PROJ's context is not
-thread-safe (so the UDF returns both coordinates from *one* call and runs on a
-single partition), and reprojection moves coordinates without resampling onto a
-grid — which is the next operation.
+precision. The script flags one practical gotcha (PROJ is not thread-safe, so the
+UDF runs serially), but the caveat that matters here is conceptual: reprojection
+moves the coordinates without resampling the data onto a new grid — and *that* is
+the next operation.
 
 **Regridding is not** row-independent: each output cell is a weighted blend of
 several input cells. That is a *many-to-many* relationship — and a many-to-many

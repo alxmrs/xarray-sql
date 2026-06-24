@@ -4,9 +4,9 @@
 are, underneath, **relational** operations — `GROUP BY`, `JOIN`, window
 functions, and `CASE`. Each script here takes one such operation, expresses it
 in SQL against [`xarray-sql`](../../README.md), and **proves the SQL answer
-matches an xarray/array reference implementation** (`numpy.assert_allclose`).
-Wall-clock and peak memory are reported too, but the headline is correctness +
-clarity of the SQL.
+matches a plain-xarray reference** to floating-point tolerance. Wall-clock and
+peak memory are reported too, but the headline is correctness + clarity of the
+SQL.
 
 This suite is *expressibility-first*: the point is that the SQL reads like the
 plain-English definition of the operation, and computes the same numbers.
@@ -39,13 +39,10 @@ interpolation weights — the geometry — which SQL applies but does not comput
   (bands B04/B08). Requires network; skips cleanly if offline.
 - **02–06** — the full **[ARCO-ERA5](https://github.com/google-research/arco-era5)**
   archive (0.25° global, ~1.3M hourly timesteps, 273 variables) read anonymously
-  from a public GCS bucket. Every case registers the *whole* archive **lazily**
-  (nothing loaded or column-selected up front) and filters it with a
-  **parameterized** `WHERE` (bounds bound as query parameters, not formatted into
-  the SQL); projection pushdown reads only `2m_temperature` and partition pruning
-  reads only the window asked for. All require network (`gcsfs`); skip cleanly
-  offline. ERA5 cases take roughly one to a few minutes, dominated by the GCS
-  read (the lazy reference re-reads the same window).
+  from a public GCS bucket. Each case opens the *whole* archive lazily, so a query
+  reads only the variable and the window it asks for — never the other 272
+  variables or the rest of the timesteps. All require network (`gcsfs`) and skip
+  cleanly offline; each takes roughly one to a few minutes, dominated by the read.
 - **05 forecast skill** — the **[WeatherBench 2](https://weatherbench2.readthedocs.io/)**
   Pangu-Weather, GraphCast, and ERA5 datasets at a coarse 64×32 grid, scoring
   both ML models against ERA5 ground truth. Network-backed; runs in seconds
@@ -54,29 +51,24 @@ interpolation weights — the geometry — which SQL applies but does not comput
   07 reprojects a UTM grid and validates the SQL transform against Earth Engine's
   *own* per-pixel lon/lat (`ee.Image.pixelLonLat()`) — an independent reprojection
   reference, not PROJ-vs-PROJ. 08 regrids real **SRTM elevation** (Sierra Nevada)
-  and validates against xarray's bilinear `.interp()`. Both need EE access
-  (`earthengine authenticate` + an initialized project via `EARTHENGINE_PROJECT`)
-  and skip cleanly without it.
+  and validates against xarray's bilinear `.interp()`. Both run against Earth
+  Engine using your existing `gcloud` login, and skip cleanly without it.
 
 ## Running
 
-Inside the repo, use the project environment (so `import xarray_sql` resolves to
-the locally built native extension):
+Run a single case, or the whole suite, from any directory:
 
 ```shell
-python benchmarks/geospatial/03_zonal_mean.py
+uv run benchmarks/geospatial/03_zonal_mean.py   # one case
+benchmarks/geospatial/run_all.sh                # all of them
 ```
 
-Each script also carries [PEP 723 / `uv` inline metadata](https://docs.astral.sh/uv/guides/scripts/),
-so it can be run standalone against the published `xarray-sql` wheel:
+Each script carries [PEP 723 / `uv` inline metadata](https://docs.astral.sh/uv/guides/scripts/)
+and runs against the `xarray-sql` in this checkout.
 
-```shell
-uv run benchmarks/geospatial/03_zonal_mean.py
-```
+A passing case prints a `✅ … SQL matches xarray reference` line and the result
+as an xarray repr; a mismatch raises `AssertionError` and exits non-zero. Cases
+that need data or credentials you don't have print `⏭ SKIPPED` and exit 0.
 
-A passing case prints a `✅ … SQL matches array reference` line; a mismatch
-raises `AssertionError` and exits non-zero. Cases that need an unavailable
-dataset/dependency print `⏭ SKIPPED` and exit 0.
-
-Shared helpers (timing, peak memory, the `assert_allclose` wrapper, SQL echo)
-live in [`_harness.py`](_harness.py).
+Shared helpers — timing, peak memory, the result check and its printout, SQL
+echo — live in [`_harness.py`](_harness.py).

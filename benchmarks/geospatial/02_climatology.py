@@ -28,11 +28,9 @@ Group by location and time-of-cycle, average the rest — the same answer as
 ``da.groupby("time.hour").mean()``. ERA5 is hourly, so grouping by hour of day
 gives a clean 24-bin **diurnal cycle**, one sample per day in the window.
 
-The table is the *whole* lazily-opened ARCO-ERA5 archive — nothing is loaded or
-pre-selected up front. The query reads only the ``2m_temperature`` column
-(projection pushdown) for only the window the parameterized ``WHERE`` asks for
-(partition pruning). The bounds are passed as **query parameters**, not
-formatted into the SQL string.
+The table is the *whole* ARCO-ERA5 archive, opened lazily: the query reads only
+``2m_temperature``, and only over the window its ``WHERE`` asks for — the rest of
+the archive is never touched.
 """
 
 from __future__ import annotations
@@ -68,10 +66,10 @@ _PARAMS = {
 
 
 def main() -> None:
-    # Open the full ARCO-ERA5 archive lazily — dask off, nothing loaded or
-    # column-selected here. ERA5 mixes surface (time, lat, lon) and atmospheric
-    # (… level …) variables, so register it as two tables under an ``era5``
-    # schema; the query below touches only the surface table's 2m_temperature.
+    # Open the full ARCO-ERA5 archive lazily — no data is read here. ERA5 mixes
+    # surface (time, lat, lon) and atmospheric (… level …) variables, so register
+    # it as two tables under an ``era5`` schema; the query below touches only the
+    # surface table's 2m_temperature.
     try:
         import gcsfs  # noqa: F401 — required by the gs:// protocol
 
@@ -107,7 +105,7 @@ def main() -> None:
 
     # A climatology is a gridded product: round-trip the result back to an
     # xarray Dataset keyed by (latitude, longitude, hour) — how it is used.
-    with timed("SQL diurnal climatology (lazy read, pushdown + pruning)"):
+    with timed("SQL diurnal climatology (lazy read)"):
         got = ctx.sql(sql, param_values=_PARAMS).to_dataset(
             dims=["latitude", "longitude", "hour"]
         )
