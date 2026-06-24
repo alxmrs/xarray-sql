@@ -6,6 +6,9 @@
 #   "gcsfs",
 #   "zarr>=3",
 # ]
+#
+# [tool.uv.sources]
+# xarray-sql = { path = "../../", editable = true }
 # ///
 """Zonal mean — the array reduction that is secretly a GROUP BY.
 

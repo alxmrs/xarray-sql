@@ -8,6 +8,9 @@
 #   "gcsfs",
 #   "zarr>=3",
 # ]
+#
+# [tool.uv.sources]
+# xarray-sql = { path = "../../", editable = true }
 # ///
 """Forecast skill — scoring ML weather models against ERA5 is a JOIN + aggregate.
 

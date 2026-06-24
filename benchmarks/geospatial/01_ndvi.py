@@ -10,6 +10,9 @@
 #   "zarr>=3",
 #   "numpy",
 # ]
+#
+# [tool.uv.sources]
+# xarray-sql = { path = "../../", editable = true }
 # ///
 """NDVI — "apply_ufunc over a raster" is just column arithmetic.
 
@@ -68,8 +71,8 @@ def _load_scene() -> tuple[xr.Dataset, str]:
 
     Idiomatic end to end: ``pystac-client`` finds the product, ``open_datatree``
     opens the hierarchical EOPF Zarr, and the ``reflectance/r10m`` node already
-    carries B04/B08 scaled to reflectance (nodata decoded to NaN) with ``x``/``y``
-    coordinates — no manual scaling or coordinate reconstruction.
+    carries B04/B08 scaled to reflectance (nodata decoded to NaN) with
+    ``x``/``y`` coordinates — no manual scaling or coordinate reconstruction.
     """
     try:
         from pystac_client import Client

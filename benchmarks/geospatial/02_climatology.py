@@ -6,6 +6,9 @@
 #   "gcsfs",
 #   "zarr>=3",
 # ]
+#
+# [tool.uv.sources]
+# xarray-sql = { path = "../../", editable = true }
 # ///
 """Diurnal climatology — the "rechunk + grouped reduction" that is a GROUP BY.
 
