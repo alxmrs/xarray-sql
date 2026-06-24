@@ -15,13 +15,19 @@ These helpers keep each case script short and uniform:
   Raises ``AssertionError`` on mismatch (so a broken case fails loudly rather
   than silently "passing").
 * :func:`run_case` — run a case's ``main()``, turning a raised
-  :class:`CaseSkipped` (e.g. an offline dataset) into a clean skip.
+  :class:`CaseSkipped` (e.g. an offline dataset) into a clean skip. When
+  ``GEOBENCH_PROFILE`` is set it instead runs ``main()`` repeatedly (a warmup
+  plus ``GEOBENCH_REPS`` measured runs) and writes a statistical summary of
+  every :func:`timed` step to the ``GEOBENCH_CSV`` perf table — without the case
+  scripts changing at all.
 """
 
 from __future__ import annotations
 
 import contextlib
+import csv
 import os
+import statistics
 import sys
 import time
 import tracemalloc
@@ -31,6 +37,30 @@ from typing import Any
 import xarray as xr
 
 _WIDTH = 72
+
+# Performance profiling, opt-in via environment variables. With GEOBENCH_PROFILE
+# set, ``run_case`` runs a case's ``main()`` GEOBENCH_WARMUP + GEOBENCH_REPS
+# times and summarizes every timed step; GEOBENCH_CSV=<path> collects those
+# summaries into a shared CSV — the perf table. Without the flag, runs are
+# unchanged and the cases themselves never reference any of this.
+_CSV_HEADER = [
+    "case",
+    "title",
+    "step",
+    "reps",
+    "t_min_s",
+    "t_median_s",
+    "t_mean_s",
+    "t_stdev_s",
+    "t_max_s",
+    "peak_mb",
+]
+_current_case = ""
+_current_title = ""
+# During measured repetitions, ``timed`` appends (elapsed_s, peak_bytes) per step
+# label here, and ``run_case`` aggregates it into one CSV row per step.
+_samples: dict[str, list[tuple[float, int]]] = {}
+_recording = False
 
 _EE_SCOPES = [
     "https://www.googleapis.com/auth/earthengine",
@@ -107,6 +137,73 @@ def timed(label: str) -> Iterator[None]:
         _, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
         print(f"  ⏱  {label}: {elapsed:.3f}s  (peak {peak / 1e6:.1f} MB)")
+        if _recording:
+            _samples.setdefault(label, []).append((elapsed, peak))
+
+
+def _append_csv(step: str, times: list[float], peak_bytes: int) -> None:
+    """Append one step's summary stats to the GEOBENCH_CSV perf table, if set."""
+    path = os.environ.get("GEOBENCH_CSV", "")
+    if not path:
+        return
+    row = {
+        "case": _current_case,
+        "title": _current_title,
+        "step": step,
+        "reps": len(times),
+        "t_min_s": round(min(times), 6),
+        "t_median_s": round(statistics.median(times), 6),
+        "t_mean_s": round(statistics.fmean(times), 6),
+        "t_stdev_s": round(statistics.stdev(times), 6)
+        if len(times) > 1
+        else 0.0,
+        "t_max_s": round(max(times), 6),
+        "peak_mb": round(peak_bytes / 1e6, 1),
+    }
+    fresh = not os.path.exists(path) or os.path.getsize(path) == 0
+    with open(path, "a", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_CSV_HEADER)
+        if fresh:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def _emit_profile() -> None:
+    """Summarize the collected per-step samples to stdout and the perf table."""
+    for step, samples in _samples.items():
+        times = [elapsed for elapsed, _ in samples]
+        peak = max(peak for _, peak in samples)
+        _append_csv(step, times, peak)
+        print(
+            f"  📊 {step}: median {statistics.median(times):.3f}s "
+            f"[min {min(times):.3f}, max {max(times):.3f}, "
+            f"n={len(times)}, peak {peak / 1e6:.0f} MB]"
+        )
+
+
+def _profile(main: Callable[[], None]) -> None:
+    """Run ``main`` warmup + measured times, collecting each timed step.
+
+    Each ``main()`` is self-contained — it builds its own context and reads its
+    own data — so simply re-running it samples the operations without the case
+    needing to expose a repeatable callable. Output from the repeated runs is
+    suppressed (the cases print a lot); only the profile summary is shown.
+    """
+    global _recording, _samples
+    reps = max(1, int(os.environ.get("GEOBENCH_REPS", "5")))
+    warmup = max(0, int(os.environ.get("GEOBENCH_WARMUP", "1")))
+    print(f"  profiling: {warmup} warmup + {reps} measured run(s)…")
+    with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+        for _ in range(warmup):
+            main()
+        _samples = {}
+        _recording = True
+        try:
+            for _ in range(reps):
+                main()
+        finally:
+            _recording = False
+    _emit_profile()
 
 
 def assert_grid_close(
@@ -155,10 +252,18 @@ def run_case(main: Callable[[], None], title: str) -> int:
 
     Returns a process exit code: 0 on success or skip, 1 on failure. Use as
     ``if __name__ == '__main__': raise SystemExit(run_case(main, '...'))``.
+    With ``GEOBENCH_PROFILE`` set, runs ``main`` repeatedly and writes a per-step
+    timing summary instead (see the module docstring).
     """
+    global _current_case, _current_title
+    _current_title = title
+    _current_case = os.path.splitext(os.path.basename(sys.argv[0]))[0]
     banner(title)
     try:
-        main()
+        if os.environ.get("GEOBENCH_PROFILE"):
+            _profile(main)
+        else:
+            main()
     except CaseSkipped as exc:
         print(f"\n  ⏭  SKIPPED: {exc}")
         return 0
