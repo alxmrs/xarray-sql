@@ -39,11 +39,13 @@ interpolation weights — the geometry — which SQL applies but does not comput
   (bands B04/B08). Requires network; skips cleanly if offline.
 - **02–06** — the full **[ARCO-ERA5](https://github.com/google-research/arco-era5)**
   archive (0.25° global, ~1.3M hourly timesteps, 273 variables) read anonymously
-  from a public GCS bucket. Cases 03 and 06 register the *whole* archive and let
-  SQL `WHERE` prune it to a one-day window (the partition-pruning demo); cases
-  02/04 read a bounded region/time window into memory once and compare
-  SQL against the same array. All require network (`gcsfs`); skip cleanly
-  offline. Each ERA5 case takes roughly a minute, dominated by the GCS read.
+  from a public GCS bucket. Every case registers the *whole* archive **lazily**
+  (nothing loaded or column-selected up front) and filters it with a
+  **parameterized** `WHERE` (bounds bound as query parameters, not formatted into
+  the SQL); projection pushdown reads only `2m_temperature` and partition pruning
+  reads only the window asked for. All require network (`gcsfs`); skip cleanly
+  offline. ERA5 cases take roughly one to a few minutes, dominated by the GCS
+  read (the lazy reference re-reads the same window).
 - **05 forecast skill** — the **[WeatherBench 2](https://weatherbench2.readthedocs.io/)**
   Pangu-Weather, GraphCast, and ERA5 datasets at a coarse 64×32 grid, scoring
   both ML models against ERA5 ground truth. Network-backed; runs in seconds

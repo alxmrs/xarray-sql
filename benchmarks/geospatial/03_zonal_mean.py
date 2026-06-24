@@ -29,6 +29,8 @@ the GROUP BY produces a 721-point global temperature profile.
 
 from __future__ import annotations
 
+import datetime
+
 import xarray as xr
 
 import xarray_sql as xql
@@ -38,6 +40,10 @@ from _harness import CaseSkipped, assert_grid_close, run_case, show_sql, timed
 _URL = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
 # One day of hourly data, global; the WHERE below prunes ERA5 to this window.
 _DAY = "2020-06-01"
+_START, _END = (
+    datetime.datetime(2020, 6, 1, 0),
+    datetime.datetime(2020, 6, 1, 23),
+)
 
 
 def main() -> None:
@@ -70,12 +76,13 @@ def main() -> None:
             },
         )
 
-    sql = f"""
+    # The window bounds are passed as query parameters, not formatted into the
+    # SQL string; pruning still kicks in, so only one day is read.
+    sql = """
         SELECT latitude,
                AVG("2m_temperature") - 273.15 AS air_mean_c
         FROM era5.surface
-        WHERE time BETWEEN TIMESTAMP '{_DAY}'
-                       AND TIMESTAMP '{_DAY} 23:00:00'
+        WHERE time BETWEEN $start AND $end
         GROUP BY latitude
         ORDER BY latitude DESC
     """
@@ -83,7 +90,9 @@ def main() -> None:
 
     # Round-trip the profile back to an xarray Dataset keyed by latitude.
     with timed("SQL zonal mean (WHERE-pruned to one day)"):
-        got = ctx.sql(sql).to_dataset(dims=["latitude"])
+        got = ctx.sql(
+            sql, param_values={"start": _START, "end": _END}
+        ).to_dataset(dims=["latitude"])
 
     # Array reference: reduce the same day over the two un-grouped axes.
     with timed("xarray reference"):

@@ -25,11 +25,16 @@ Group by location and time-of-cycle, average the rest — the same answer as
 ``da.groupby("time.hour").mean()``. ERA5 is hourly, so grouping by hour of day
 gives a clean 24-bin **diurnal cycle**, one sample per day in the window.
 
-Dataset: **ARCO-ERA5** 2m-temperature over a North-American box for a few days,
-opened and sliced with a single fluent xarray chain.
+The table is the *whole* lazily-opened ARCO-ERA5 archive — nothing is loaded or
+pre-selected up front. The query reads only the ``2m_temperature`` column
+(projection pushdown) for only the window the parameterized ``WHERE`` asks for
+(partition pruning). The bounds are passed as **query parameters**, not
+formatted into the SQL string.
 """
 
 from __future__ import annotations
+
+import datetime
 
 import xarray as xr
 
@@ -39,55 +44,73 @@ from _harness import CaseSkipped, assert_grid_close, run_case, show_sql, timed
 
 _URL = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
 # A few days over a CONUS-ish box (ERA5 latitude descends; lon is 0–360°E).
-_TIME = slice("2020-06-01", "2020-06-03T23")
-_LAT = slice(50.0, 25.0)
-_LON = slice(235.0, 290.0)
+_START, _END = datetime.datetime(2020, 6, 1), datetime.datetime(2020, 6, 3, 23)
+_LAT_N, _LAT_S = 50.0, 25.0
+_LON_W, _LON_E = 235.0, 290.0
+_PARAMS = {
+    "start": _START,
+    "end": _END,
+    "lat_s": _LAT_S,
+    "lat_n": _LAT_N,
+    "lon_w": _LON_W,
+    "lon_e": _LON_E,
+}
 
 
 def main() -> None:
-    # Open the full ARCO-ERA5 archive and slice to the window in one chain:
-    # pick the variable, select the box and days, and read it into memory.
+    # Open the full ARCO-ERA5 archive lazily — dask off, nothing loaded or
+    # column-selected here. ERA5 mixes surface (time, lat, lon) and atmospheric
+    # (… level …) variables, so register it as two tables under an ``era5``
+    # schema; the query below touches only the surface table's 2m_temperature.
     try:
         import gcsfs  # noqa: F401 — required by the gs:// protocol
 
-        with timed("open + slice ERA5 window"):
-            ds = (
-                xr.open_zarr(
-                    _URL, chunks=None, storage_options={"token": "anon"}
-                )[["2m_temperature"]]
-                .sel(time=_TIME, latitude=_LAT, longitude=_LON)
-                .load()
-            )
+        ds = xr.open_zarr(_URL, chunks=None, storage_options={"token": "anon"})
     except Exception as exc:  # noqa: BLE001 — any failure → skip, not crash
         raise CaseSkipped(f"ARCO-ERA5 unavailable ({exc})") from exc
 
-    print(
-        f"  ERA5 2m_temperature window: {dict(ds.sizes)}  "
-        f"(diurnal climatology over {ds.sizes['latitude']}×{ds.sizes['longitude']} cells)"
-    )
-
     ctx = xql.XarrayContext()
-    ctx.from_dataset("era5", ds, chunks={"time": 24})
+    with timed("register full ERA5 (lazy)"):
+        ctx.from_dataset(
+            "era5",
+            ds,
+            chunks={"time": 6},
+            table_names={
+                ("time", "latitude", "longitude"): "surface",
+                ("time", "level", "latitude", "longitude"): "atmosphere",
+            },
+        )
 
     sql = """
         SELECT latitude,
                longitude,
                date_part('hour', time) AS hour,
                AVG("2m_temperature") - 273.15 AS clim_c
-        FROM era5
+        FROM era5.surface
+        WHERE time      BETWEEN $start AND $end
+          AND latitude  BETWEEN $lat_s AND $lat_n
+          AND longitude BETWEEN $lon_w AND $lon_e
         GROUP BY latitude, longitude, date_part('hour', time)
         ORDER BY latitude DESC, longitude, hour
     """
     show_sql(sql)
 
-    # A climatology is a gridded product, so round-trip the result back to an
+    # A climatology is a gridded product: round-trip the result back to an
     # xarray Dataset keyed by (latitude, longitude, hour) — how it is used.
-    with timed("SQL diurnal climatology"):
-        got = ctx.sql(sql).to_dataset(dims=["latitude", "longitude", "hour"])
+    with timed("SQL diurnal climatology (lazy read, pushdown + pruning)"):
+        got = ctx.sql(sql, param_values=_PARAMS).to_dataset(
+            dims=["latitude", "longitude", "hour"]
+        )
 
-    # Array reference: the textbook groupby-over-the-cycle reduction, in °C.
+    # Array reference: the textbook groupby-over-the-cycle reduction, in °C —
+    # the same lazy window, materialized only on demand.
     with timed("xarray reference"):
-        ref = ds["2m_temperature"].groupby("time.hour").mean("time") - 273.15
+        window = ds["2m_temperature"].sel(
+            time=slice(_START, _END),
+            latitude=slice(_LAT_N, _LAT_S),
+            longitude=slice(_LON_W, _LON_E),
+        )
+        ref = window.groupby("time.hour").mean("time") - 273.15
 
     assert_grid_close(
         "diurnal climatology (°C)", got.clim_c, ref, rtol=1e-4, atol=1e-2

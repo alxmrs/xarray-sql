@@ -11,8 +11,8 @@
 # ///
 """Forecast skill — scoring ML weather models against ERA5 is a JOIN + aggregate.
 
-This is the real thing: scoring the **Pangu-Weather** and **GraphCast** machine-
-learning forecast models against ERA5 ground truth, the headline workload of
+Scoring the **Pangu-Weather** and **GraphCast** machine-learning forecast models
+against ERA5 ground truth is the headline workload of
 [WeatherBench 2](https://weatherbench2.readthedocs.io/). A forecast is indexed by
 *initialization time* and *lead time* (``prediction_timedelta``); the truth is
 indexed by *valid time*. Evaluation aligns them by ``valid_time = init + lead``
@@ -22,18 +22,19 @@ with forecast horizon" curve.
 That alignment is a relational **JOIN**, and ``valid_time = init + lead`` is just
 timestamp + duration arithmetic the engine does natively::
 
-    SELECT f.prediction_timedelta AS lead,
+    SELECT f.model, f.prediction_timedelta AS lead,
            SQRT(AVG(POWER(f.t - e.t, 2))) AS rmse
-    FROM forecast f
+    FROM forecasts f
     JOIN era5 e
       ON  e.time = f.time + f.prediction_timedelta   -- valid_time = init + lead
       AND e.latitude  = f.latitude
       AND e.longitude = f.longitude
-    GROUP BY f.prediction_timedelta
+    GROUP BY f.model, f.prediction_timedelta
 
-The whole evaluation — temporal alignment, spatial matching, the score — is one
-JOIN and one aggregate. We run it for both models and check each against an
-xarray reference.
+We stack the two models along a ``model`` dimension into a single forecast
+table, so the query groups by a ``model`` *column* — no table name is formatted
+into the SQL. Nothing is loaded up front either: the forecasts and ERA5 are
+registered lazily, and the JOIN reads only what it needs at query time.
 
 Datasets: WeatherBench 2 **Pangu**, **GraphCast**, and **ERA5** at a coarse
 64×32 grid (so the demo is small and fast), read from the public ``gs://
@@ -48,13 +49,7 @@ import xarray as xr
 
 import xarray_sql as xql
 
-from _harness import (
-    CaseSkipped,
-    assert_grid_close,
-    run_case,
-    show_sql,
-    timed,
-)
+from _harness import CaseSkipped, assert_grid_close, run_case, show_sql, timed
 
 _SO = {"token": "anon"}
 _GRID = "64x32_equiangular_conservative"
@@ -81,105 +76,98 @@ def _open(url: str) -> xr.Dataset:
         raise CaseSkipped(f"WeatherBench2 unavailable ({exc})") from exc
 
 
-def _load_forecast(url: str, grid: xr.Dataset) -> xr.Dataset:
-    """Load a model's 2m-temperature over the init window, all lead times.
+def _reference_rmse(forecasts: xr.Dataset, truth: xr.Dataset) -> xr.DataArray:
+    """xarray reference: per (model, lead), align truth at valid_time, take RMSE.
 
-    Snaps lat/lon onto ERA5's exact coordinate arrays (identical 64×32 grid) so
-    the equality JOIN on coordinates is bit-safe across the two Zarr stores.
+    The 64×32 windows are tiny, so the reference loads them and reduces in
+    memory; the SQL side above stays lazy.
     """
-    da = _open(url)[_VAR].sel(time=_INIT)
-    da = da.assign_coords(
-        latitude=grid.latitude.values, longitude=grid.longitude.values
+    f = forecasts[_VAR].load()
+    e = truth[_VAR].load()
+    leads = f.prediction_timedelta.values
+    per_lead = []
+    for lead in leads:
+        e_at_valid = e.sel(time=f.time.values + lead)  # (init, lat, lon)
+        diff = f.sel(prediction_timedelta=lead) - e_at_valid.values
+        per_lead.append(
+            np.sqrt((diff**2).mean(["time", "latitude", "longitude"]))
+        )
+    return (
+        xr.concat(per_lead, dim="lead")
+        .assign_coords(lead=leads)
+        .transpose("model", "lead")
     )
-    return da.to_dataset().load()
 
 
-def _rmse_sql(table: str) -> str:
-    """The forecast↔truth JOIN + RMSE-per-lead query for one model ``table``."""
-    return f"""
-        SELECT f.prediction_timedelta AS lead,
+def main() -> None:
+    # Open everything lazily — no .load() here.
+    era5 = _open(_ERA5)
+
+    # The two models store different pressure-level sets (Pangu 13, GraphCast
+    # 37), so we keep the common surface field 2m_temperature and stack the
+    # models along a `model` dimension into one forecast table. Snap the grid
+    # onto ERA5's exact coordinates (same 64×32 grid) so the equality JOIN is
+    # bit-safe across the Zarr stores.
+    pangu = _open(_PANGU)[[_VAR]].sel(time=_INIT)
+    graphcast = _open(_GRAPHCAST)[[_VAR]].sel(time=_INIT)
+    forecasts = xr.concat([pangu, graphcast], dim="model").assign_coords(
+        model=["pangu", "graphcast"],
+        latitude=era5.latitude.values,
+        longitude=era5.longitude.values,
+    )
+
+    # ERA5 truth must span every valid time (last init + longest lead); bound it
+    # lazily so the JOIN does not scan the whole 1959–2023 record.
+    valid_max = (
+        pangu.time.values.max() + pangu.prediction_timedelta.values.max()
+    )
+    truth = era5[[_VAR]].sel(time=slice(_INIT.start, pd.Timestamp(valid_max)))
+
+    print(
+        f"  64×32 2m_temperature | init {_INIT.start}…{_INIT.stop} "
+        f"({pangu.sizes['time']} inits × {pangu.sizes['prediction_timedelta']} "
+        f"leads × 2 models)"
+    )
+
+    ctx = xql.XarrayContext()
+    ctx.from_dataset("forecasts", forecasts, chunks={"time": 6})
+    ctx.from_dataset("era5", truth, chunks={"time": 100})
+
+    sql = """
+        SELECT f.model,
+               f.prediction_timedelta AS lead,
                SQRT(AVG(POWER(
-                   CAST(f."{_VAR}" AS DOUBLE) - e."{_VAR}", 2))) AS rmse
-        FROM {table} f
+                   CAST(f."2m_temperature" AS DOUBLE) - e."2m_temperature", 2
+               ))) AS rmse
+        FROM forecasts f
         JOIN era5 e
           ON  e.time = f.time + f.prediction_timedelta  -- valid = init + lead
           AND e.latitude  = f.latitude
           AND e.longitude = f.longitude
-        GROUP BY f.prediction_timedelta
-        ORDER BY lead
+        GROUP BY f.model, f.prediction_timedelta
+        ORDER BY f.model, lead
     """
+    show_sql(sql)
 
+    with timed("SQL RMSE by (model, lead) — lazy JOIN"):
+        got = ctx.sql(sql).to_dataset(dims=["model", "lead"]).rmse
 
-def _rmse_by_lead(ctx: xql.XarrayContext, table: str) -> xr.DataArray:
-    """Run the RMSE query, returning the skill curve as a DataArray over lead."""
-    return ctx.sql(_rmse_sql(table)).to_dataset(dims=["lead"]).rmse
+    with timed("xarray reference"):
+        ref = _reference_rmse(forecasts, truth)
 
-
-def _reference_rmse(fc: xr.Dataset, truth: xr.Dataset) -> xr.DataArray:
-    """xarray reference: for each lead, align truth at valid_time and take RMSE."""
-    f = fc[_VAR]
-    e = truth[_VAR]
-    leads = f.prediction_timedelta
-    out = []
-    for lead in leads.values:
-        valid = f.time.values + lead  # valid_time = init + lead
-        e_at_valid = e.sel(time=valid)
-        diff = f.sel(prediction_timedelta=lead) - e_at_valid.values
-        out.append(float(np.sqrt((diff**2).mean())))
-    return xr.DataArray(out, coords={"lead": leads.values}, dims=["lead"])
-
-
-def main() -> None:
-    era5_full = _open(_ERA5)
-
-    # Load the forecasts first; snap their grid to ERA5's exact coordinates.
-    with timed("read Pangu + GraphCast forecasts"):
-        pangu = _load_forecast(_PANGU, era5_full)
-        graphcast = _load_forecast(_GRAPHCAST, era5_full)
-
-    # ERA5 truth must span every valid time: window start through the last
-    # init plus the longest lead, so the JOIN keeps every forecast pair.
-    valid_max = (
-        pangu.time.values.max() + pangu.prediction_timedelta.values.max()
-    )
-    with timed("read ERA5 truth window"):
-        truth = (
-            era5_full[[_VAR]]
-            .sel(time=slice(_INIT.start, pd.Timestamp(valid_max)))
-            .load()
-        )
-
-    print(
-        f"  64×32 2m_temperature | init {_INIT.start}…{_INIT.stop} "
-        f"({pangu.sizes['time']} inits × {pangu.sizes['prediction_timedelta']} leads)"
-    )
-
-    ctx = xql.XarrayContext()
-    ctx.from_dataset("era5", truth, chunks={"time": 100})
-    ctx.from_dataset("pangu", pangu, chunks={"time": 20})
-    ctx.from_dataset("graphcast", graphcast, chunks={"time": 20})
-
-    print("\n  Forecast↔ERA5 JOIN on valid_time = init + lead, RMSE per lead:")
-    show_sql(_rmse_sql("pangu"))
-
-    results = {}
-    for name, fc in [("pangu", pangu), ("graphcast", graphcast)]:
-        with timed(f"SQL RMSE-by-lead: {name}"):
-            got = _rmse_by_lead(ctx, name)
-        with timed(f"xarray reference: {name}"):
-            ref = _reference_rmse(fc, truth)
-        assert_grid_close(f"{name} RMSE(lead)", got, ref, rtol=1e-4, atol=1e-3)
-        results[name] = got
+    assert_grid_close("RMSE(model, lead)", got, ref, rtol=1e-4, atol=1e-3)
 
     # Headline table: error growth with forecast horizon, both models.
-    lead_days = results["pangu"]["lead"].values / np.timedelta64(1, "D")
+    lead_days = got["lead"].values / np.timedelta64(1, "D")
+    pangu_rmse = got.sel(model="pangu")
+    graphcast_rmse = got.sel(model="graphcast")
     print("\n  2m-temperature RMSE (K) vs lead time — lower is better:")
     print(f"  {'lead (days)':>12} {'Pangu':>9} {'GraphCast':>11}")
     for i in range(0, len(lead_days), 4):
         print(
             f"  {lead_days[i]:>12.2f} "
-            f"{float(results['pangu'][i]):>9.3f} "
-            f"{float(results['graphcast'][i]):>11.3f}"
+            f"{float(pangu_rmse.isel(lead=i)):>9.3f} "
+            f"{float(graphcast_rmse.isel(lead=i)):>11.3f}"
         )
 
 

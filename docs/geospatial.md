@@ -12,10 +12,13 @@ operations. But it is not the only one, and for a large and growing audience —
 the people fluent in SQL rather than in `apply_ufunc` and rechunking — it is not
 the most accessible one. [`xarray-sql`](../README.md) lets you pose these
 questions in SQL and answers them with a real query engine (DataFusion),
-complete with partition pruning and projection pushdown. And because a gridded
-result is still gridded data, every query here round-trips its answer straight
-back to an `xarray.Dataset` (via `to_dataset`) — SQL in, an array out, ready to
-plot or save.
+complete with partition pruning and projection pushdown. The datasets are
+registered *lazily* — nothing is read or column-selected up front; each query
+pulls only the variable and the partitions it needs, and value filters are
+passed as bound **query parameters** rather than formatted into the SQL string.
+And because a gridded result is still gridded data, every query here round-trips
+its answer straight back to an `xarray.Dataset` (via `to_dataset`) — SQL in, an
+array out, ready to plot or save.
 
 This page makes the argument case by case. Every claim below is backed by a
 runnable script in [`benchmarks/geospatial/`](../benchmarks/geospatial/) that
@@ -118,20 +121,22 @@ That alignment is a relational JOIN, and `valid_time = init + lead` is just
 timestamp + duration arithmetic the engine does natively:
 
 ```sql
-SELECT f.prediction_timedelta AS lead,
+SELECT f.model, f.prediction_timedelta AS lead,
        SQRT(AVG(POWER(f."2m_temperature" - e."2m_temperature", 2))) AS rmse
-FROM forecast f
+FROM forecasts f
 JOIN era5 e
   ON  e.time = f.time + f.prediction_timedelta   -- valid_time = init + lead
   AND e.latitude  = f.latitude
   AND e.longitude = f.longitude
-GROUP BY f.prediction_timedelta
+GROUP BY f.model, f.prediction_timedelta
 ```
 
-The entire evaluation — temporal alignment across three time axes, spatial
-matching, and the score — is one JOIN and one aggregate.
+Both models are stacked along a `model` dimension into one forecast table, so
+the query scores them together by grouping on a `model` *column* — no table name
+formatted into the SQL. The entire evaluation — temporal alignment across three
+time axes, spatial matching, and the score — is one JOIN and one aggregate.
 [`05_forecast_skill.py`](../benchmarks/geospatial/05_forecast_skill.py) runs it
-for both models, matches a NumPy reference, and reproduces the published result
+for both models, matches an xarray reference, and reproduces the published result
 that GraphCast edges out Pangu at every lead — the classic "error grows with
 horizon" curve (≈0.3 K at 6 h rising to ≈2.5 K at 9 days):
 
