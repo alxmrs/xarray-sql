@@ -192,10 +192,10 @@ this against **Earth Engine itself**: it opens a UTM grid through
 [Xee](https://github.com/google/Xee) carrying `ee.Image.pixelLonLat()`, so EE's
 own geodesy engine reports the true lon/lat of every pixel — an *independent*
 reprojection reference, not PROJ-vs-PROJ. The SQL UDF and EE agree to sub-metre
-precision. Two honest caveats, both documented in the script: PROJ's context is
-not thread-safe (so the UDF returns both coordinates from *one* call and runs on
-a single partition), and reprojection moves coordinates without resampling onto
-a grid — which is the next operation.
+precision. Two caveats, both documented in the script: PROJ's context is not
+thread-safe (so the UDF returns both coordinates from *one* call and runs on a
+single partition), and reprojection moves coordinates without resampling onto a
+grid — which is the next operation.
 
 **Regridding is not** row-independent: each output cell is a weighted blend of
 several input cells. That is a *many-to-many* relationship — and a many-to-many
@@ -216,7 +216,7 @@ it is the most relational operation of all.
 
 ## Where the array paradigm still earns its keep
 
-The honest boundary is **weight generation**. Applying a regridding is a join;
+The boundary is **weight generation**. Applying a regridding is a join;
 *computing* the weights — cell overlaps for conservative remapping, stencils and
 spherical geometry for bilinear, the whole machinery of xESMF/ESMF — is genuinely
 geometric work that arrays (and specialized libraries) do well. The relational
