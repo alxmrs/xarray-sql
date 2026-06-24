@@ -24,6 +24,30 @@ reference** to floating-point tolerance. The point is not that "SQL is faster";
 the point is that the SQL reads like the *definition* of the operation and
 computes the same numbers — at ERA5's real 0.25° global resolution.
 
+## Where this list comes from
+
+The operations here aren't a set we hand-picked to suit SQL. They're taken from
+[**Large Scale Geospatial Benchmarks**](https://github.com/coiled/benchmarks/discussions/1545)
+(coiled/benchmarks #1545), a discussion James Bourbeau opened in 2024 asking the
+geospatial and climate community a pointed question: what are the *end-to-end
+workflows* the Xarray/Dask ecosystem needs to handle smoothly at the
+100-terabyte scale? The replies are a representative survey of what geoscience
+actually runs — and this suite works through nearly all of it:
+
+| #1545 workflow | Covered by |
+|----------------|------------|
+| Remote-sensing indices (NDVI/NDWI/NDSI over Sentinel-2 or Landsat) | case 01 |
+| Vectorized functions (`apply_ufunc`-style per-cell math) | case 01 |
+| Climatology (average weather for a time of year/day, per location) | case 02 |
+| Transformed Eulerian Mean (circulation diagnostics — zonal means and anomalies) | cases 03, 04 |
+| Forecast evaluation (scoring forecasts against ground truth) | case 05 |
+| Regridding and reprojection (resolution and CRS changes) | cases 07, 08 |
+| Spatial joins (large polygon-to-polygon joins) | *not covered* — a vector-data problem; the closest analogue here is the raster × vector join in case 06 |
+
+So the claim isn't that a few cherry-picked operations happen to be relational.
+It's that an independent survey of the operations geoscience runs at scale, run
+through SQL one by one, turns out to be — almost entirely — queries.
+
 ## The mapping
 
 | Operation | The "array" framing | The relational reality | Script |
