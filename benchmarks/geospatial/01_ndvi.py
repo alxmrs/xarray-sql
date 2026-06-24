@@ -4,6 +4,8 @@
 # dependencies = [
 #   "xarray-sql",
 #   "xarray",
+#   "aiohttp",
+#   "requests",
 #   "pystac-client",
 #   "zarr>=3",
 #   "numpy",
