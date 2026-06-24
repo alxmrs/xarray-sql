@@ -47,6 +47,7 @@ import xarray_sql as xql
 from _harness import (
     CaseSkipped,
     assert_grid_close,
+    measured,
     run_case,
     show_result,
     show_sql,
@@ -127,13 +128,13 @@ def main() -> None:
     """
     show_sql(sql)
 
-    with timed("SQL zonal stats (raster × vector range JOIN)"):
+    for _ in measured("SQL zonal stats (raster × vector range JOIN)"):
         got = ctx.sql(
             sql, param_values={"start": _START, "end": _END}
         ).to_dataset(dims=["region_id"])
 
     # Array reference: load the same day once, mask each region in memory.
-    with timed("xarray reference"):
+    for _ in measured("xarray reference"):
         day = (
             xr.open_zarr(_URL, chunks=None, storage_options={"token": "anon"})[
                 "2m_temperature"

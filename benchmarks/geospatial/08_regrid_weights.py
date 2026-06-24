@@ -57,6 +57,7 @@ from _harness import (
     CaseSkipped,
     assert_grid_close,
     initialize_earth_engine,
+    measured,
     run_case,
     show_result,
     show_sql,
@@ -193,7 +194,7 @@ def main() -> None:
 
     # The result is keyed by dst_id (row-major over the target grid); reshape
     # it back to the (lat, lon) field it represents.
-    with timed("SQL regrid (weight-table JOIN + weighted SUM)"):
+    for _ in measured("SQL regrid (weight-table JOIN + weighted SUM)"):
         flat = ctx.sql(sql).to_dataset(dims=["dst_id"]).regridded
         got = xr.DataArray(
             flat.values.reshape(len(tlat), len(tlon)),
@@ -202,7 +203,7 @@ def main() -> None:
         )
 
     # Array reference: xarray's own bilinear interpolation of the same field.
-    with timed("xarray .interp reference"):
+    for _ in measured("xarray .interp reference"):
         ref = src_da.interp(lat=tlat, lon=tlon, method="linear")
 
     assert_grid_close("bilinear regrid", got, ref, rtol=1e-9, atol=1e-9)

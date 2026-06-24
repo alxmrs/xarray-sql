@@ -54,10 +54,10 @@ import xarray_sql as xql
 from _harness import (
     CaseSkipped,
     assert_grid_close,
+    measured,
     run_case,
     show_result,
     show_sql,
-    timed,
 )
 
 _SO = {"token": "anon"}
@@ -158,10 +158,10 @@ def main() -> None:
     """
     show_sql(sql)
 
-    with timed("SQL RMSE by (model, lead) — lazy JOIN"):
+    for _ in measured("SQL RMSE by (model, lead) — lazy JOIN"):
         got = ctx.sql(sql).to_dataset(dims=["model", "lead"]).rmse
 
-    with timed("xarray reference"):
+    for _ in measured("xarray reference"):
         ref = _reference_rmse(forecasts, truth)
 
     assert_grid_close("RMSE(model, lead)", got, ref, rtol=1e-4, atol=1e-3)

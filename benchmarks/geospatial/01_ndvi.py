@@ -50,10 +50,10 @@ import xarray_sql as xql
 from _harness import (
     CaseSkipped,
     assert_grid_close,
+    measured,
     run_case,
     show_result,
     show_sql,
-    timed,
 )
 
 # EOPF sample-service STAC catalog; an agricultural AOI near Torino, Italy, in
@@ -122,11 +122,11 @@ def main() -> None:
     """
     show_sql(sql)
 
-    with timed("SQL NDVI"):
+    for _ in measured("SQL NDVI"):
         got = ctx.sql(sql).to_dataset(dims=["y", "x"]).ndvi
 
     # Array reference: the same formula in pure xarray.
-    with timed("xarray reference"):
+    for _ in measured("xarray reference"):
         ref = (scene.nir - scene.red) / (scene.nir + scene.red)
 
     # Compare the xarray way — aligned by coordinate label, so the ORDER BY

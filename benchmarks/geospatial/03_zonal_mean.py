@@ -41,6 +41,7 @@ import xarray_sql as xql
 from _harness import (
     CaseSkipped,
     assert_grid_close,
+    measured,
     run_case,
     show_result,
     show_sql,
@@ -99,13 +100,13 @@ def main() -> None:
     show_sql(sql)
 
     # Round-trip the profile back to an xarray Dataset keyed by latitude.
-    with timed("SQL zonal mean (reads one day)"):
+    for _ in measured("SQL zonal mean (reads one day)"):
         got = ctx.sql(
             sql, param_values={"start": _START, "end": _END}
         ).to_dataset(dims=["latitude"])
 
     # Array reference: reduce the same day over the two un-grouped axes.
-    with timed("xarray reference"):
+    for _ in measured("xarray reference"):
         ref = (
             ds["2m_temperature"].sel(time=_DAY).mean(["longitude", "time"])
             - 273.15
