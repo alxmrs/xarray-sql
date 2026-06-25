@@ -28,9 +28,12 @@ Group by location and time-of-cycle, average the rest — the same answer as
 ``da.groupby("time.hour").mean()``. ERA5 is hourly, so grouping by hour of day
 gives a clean 24-bin **diurnal cycle**, one sample per day in the window.
 
-The table is the *whole* ARCO-ERA5 archive, opened lazily: the query reads only
-``2m_temperature``, and only over the window its ``WHERE`` asks for — the rest of
-the archive is never touched.
+We register the full ARCO-ERA5 archive as a lazy table, but the climatology here
+is computed over a *bounded window* — a few summer days over a CONUS-ish box. The
+``WHERE`` prunes the read, so the query touches only ``2m_temperature`` over that
+window and never scans the rest of the archive. The point is not that we reduce
+the whole record; it is that you can aim a query at a multi-decade archive and pay
+only for the slice it asks for.
 """
 
 from __future__ import annotations

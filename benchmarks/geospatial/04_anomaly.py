@@ -27,9 +27,11 @@ climatology CTE joined back to the raw observations::
     FROM era5 a JOIN clim c
       ON (a.latitude, a.longitude, hour(a.time)) = (c.latitude, c.longitude, c.hour)
 
-The table is the *whole* ARCO-ERA5 archive, opened lazily: both the climatology
-CTE and the outer scan read only ``2m_temperature``, and only over the window the
-``WHERE`` asks for.
+We register the full ARCO-ERA5 archive as a lazy table, but the anomaly here is
+computed over a *bounded window* (a few summer days over a CONUS-ish box): both
+the climatology CTE and the outer scan read only ``2m_temperature``, and only
+over the window the ``WHERE`` asks for — never the rest of the archive. You can
+aim a query at the whole archive and pay only for the slice it asks for.
 """
 
 from __future__ import annotations
