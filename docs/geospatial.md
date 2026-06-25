@@ -304,31 +304,38 @@ speeds up neither — the SQL query and the reference do not warm each other.
 
 | Case | Step | median (s) | stdev (s) | min (s) | max (s) | peak (MB) |
 |---|---|--:|--:|--:|--:|--:|
-| 01 · NDVI (per-pixel arithmetic) | SQL | 3.575 | 0.597 | 3.430 | 4.863 | 105.0 |
-|  | xarray reference | 0.342 | 0.005 | 0.339 | 0.349 | 42.0 |
-| 02 · Climatology (`GROUP BY` lat, lon, hour) | SQL | 6.281 | 0.568 | 5.375 | 6.975 | 507.2 |
-|  | xarray reference | 2.908 | 0.933 | 2.102 | 4.412 | 43.5 |
-| 03 · Zonal mean (`GROUP BY` latitude) | SQL | 3.978 | 0.747 | 3.219 | 5.028 | 224.0 |
-|  | xarray reference | 0.416 | 0.047 | 0.384 | 0.501 | 249.5 |
-| 04 · Anomaly (climatology self-`JOIN`) | SQL | 9.645 | 1.486 | 7.812 | 11.124 | 520.6 |
-|  | xarray reference | 3.136 | 1.813 | 2.550 | 6.996 | 76.6 |
-| 05 · Forecast skill (forecast↔truth `JOIN`) | SQL | 11.784 | 0.057 | 11.737 | 11.871 | 34.2 |
-|  | xarray reference | 0.221 | 0.011 | 0.216 | 0.242 | 2.2 |
-| 06 · Zonal stats (raster × vector `JOIN`) | SQL | 5.233 | 0.385 | 4.736 | 5.643 | 510.7 |
-|  | xarray reference | 1.487 | 0.119 | 1.395 | 1.674 | 359.9 |
+| 01 · NDVI (per-pixel arithmetic) | SQL | 3.093 | 0.050 | 2.998 | 3.128 | 98.5 |
+|  | xarray reference | 0.402 | 0.060 | 0.372 | 0.507 | 42.0 |
+| 02 · Climatology (`GROUP BY` lat, lon, hour) | SQL | 5.987 | 1.328 | 5.901 | 8.942 | 513.8 |
+|  | xarray reference | 2.449 | 0.401 | 2.332 | 3.312 | 43.7 |
+| 03 · Zonal mean (`GROUP BY` latitude) | SQL | 3.224 | 0.048 | 3.175 | 3.288 | 245.3 |
+|  | xarray reference | 0.552 | 0.020 | 0.529 | 0.576 | 249.5 |
+| 04 · Anomaly (climatology self-`JOIN`) | SQL | 9.479 | 0.413 | 9.382 | 10.280 | 524.4 |
+|  | xarray reference | 3.013 | 0.584 | 2.875 | 4.199 | 80.5 |
+| 05 · Forecast skill (forecast↔truth `JOIN`) | SQL | 23.241 | 0.101 | 23.114 | 23.348 | 34.2 |
+|  | xarray reference | 0.336 | 0.014 | 0.314 | 0.352 | 2.2 |
+| 06 · Zonal stats (raster × vector `JOIN`) | SQL | 6.285 | 0.052 | 6.191 | 6.317 | 509.9 |
+|  | xarray reference | 2.235 | 0.216 | 2.195 | 2.703 | 359.9 |
 | 07 · Reprojection (PROJ scalar UDF) | SQL | 0.039 | 0.000 | 0.039 | 0.039 | 0.3 |
 | 08 · Regridding (weight-table `JOIN`) | SQL | 0.061 | 0.001 | 0.060 | 0.063 | 0.8 |
 |  | xarray reference | 0.018 | 0.001 | 0.018 | 0.020 | 0.2 |
 
 Two patterns are visible before any analysis. SQL is slower on wall-clock in every
-case — by ~2× on the plain `GROUP BY`s and up to ~50× on the smallest `JOIN` — and
-its peak memory is markedly higher on the join/group-by cases (≈0.5 GB on 02, 04,
-06). Both follow from the same cause, and the next section pins it down. (Case 01
-reads Sentinel-2 from Europe, the only non-US source, so its SQL time includes a
-cross-region read. Cases 07–08 load their Earth Engine inputs into memory once and
-then compute, so they are methodology-agnostic; case 07 times only the SQL
-transform — its correctness is checked against Earth Engine's own `pixelLonLat` —
-and runs `reps=1` because PROJ is not re-entrant in-process.)
+case — by ~2–6× on the plain `GROUP BY`s, and ~70× on case 05, the smallest grid
+but the largest `JOIN` — and its peak memory is markedly higher on the
+join/group-by cases (≈0.5 GB on 02, 04, 06). Both follow from the same cause, and
+the next section pins it down. (Case 01 reads Sentinel-2 from Europe, the only
+non-US source, so its SQL time includes a cross-region read. Cases 07–08 load their
+Earth Engine inputs into memory once and then compute, so they are
+methodology-agnostic; case 07 times only the SQL transform — its correctness is
+checked against Earth Engine's own `pixelLonLat` — and runs `reps=1` because PROJ
+is not re-entrant in-process.)
+
+Case 05 is also the suite's most hardware-sensitive number: its SQL time is
+CPU-bound on the join and the (GIL-held) row production that feeds it, so it swings
+with the machine — a second `e2-standard-8` run measured ≈12 s rather than ≈23 s.
+The *reference*, by contrast, is read-bound and stable. So read the 05 ratio as
+"the relational form costs real CPU here," not as a fixed multiplier.
 
 ## Analysis: how a relational operation spends its time
 
@@ -382,7 +389,7 @@ contiguous typed buffers and treats the chunk grid as its unit of parallelism. T
 array model has the lowest overhead here, and the lead is structural, not
 incidental: there are no rows to materialize and nothing to shuffle. NDVI (case 01)
 is the tell — column arithmetic expresses cleanly in SQL, but the array side is
-~10× faster because per-pixel math is exactly what arrays are for.
+~8× faster because per-pixel math is exactly what arrays are for.
 
 **Reach for SQL when the work is relationally shaped, or the audience is.** Joins,
 group-bys, alignment across data with different indexes (case 05's three time
