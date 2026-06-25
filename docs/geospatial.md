@@ -28,7 +28,8 @@ computes the same numbers — at ERA5's real 0.25° global resolution.
 
 The operations here aren't a set we hand-picked to suit SQL. They're taken from
 [**Large Scale Geospatial Benchmarks**](https://github.com/coiled/benchmarks/discussions/1545)
-(coiled/benchmarks #1545), a discussion James Bourbeau opened in 2024 asking the
+(coiled/benchmarks #1545), a discussion [James Bourbeau](https://github.com/jrbourbeau)
+opened in 2024 asking the
 geospatial and climate community a pointed question: what are the *end-to-end
 workflows* the Xarray/Dask ecosystem needs to handle smoothly at the
 100-terabyte scale? The replies are a representative survey of what geoscience
@@ -161,11 +162,22 @@ for both models, matches an xarray reference, and reproduces the published resul
 that GraphCast edges out Pangu at every lead — the classic "error grows with
 horizon" curve (≈0.3 K at 6 h rising to ≈2.5 K at 9 days):
 
+The result round-trips to a `pandas` table directly (`got.to_pandas()`), RMSE in
+kelvin by lead time:
+
 ```
-  lead (days)     Pangu   GraphCast
-         0.25     0.336       0.296
-         5.25     1.469       1.228
-         9.25     2.814       2.380
+model        graphcast  pangu
+lead (days)
+0.25             0.296  0.336
+1.25             0.464  0.554
+2.25             0.608  0.734
+3.25             0.780  0.936
+4.25             0.988  1.191
+5.25             1.228  1.469
+6.25             1.470  1.747
+7.25             1.763  2.096
+8.25             2.092  2.489
+9.25             2.380  2.814
 ```
 
 ## 5. Raster × vector zonal statistics is a range `JOIN`
@@ -252,6 +264,22 @@ a weight matrix. `xarray-sql` sits downstream of all that as a query front-end:
 once the data is openable as an `xarray.Dataset`, these everyday operations are
 expressible — and accessible — as SQL.
 
+That is the qualitative boundary; the rest of this page puts numbers to it. The
+**Results** below report what each operation costs in SQL versus the array
+reference, **Analysis** explains *why* the relational form is slower and where the
+time goes, and the **Conclusion** turns the whole thing into a when-to-use-which.
+
+## Running the suite
+
+```shell
+python benchmarks/geospatial/02_climatology.py   # inside the repo
+uv run benchmarks/geospatial/02_climatology.py   # standalone (PEP 723 deps)
+```
+
+Each script prints its SQL, runs the array reference, and asserts the two agree.
+See [`benchmarks/geospatial/README.md`](../benchmarks/geospatial/README.md) for
+the full list and dataset notes.
+
 ## Results
 
 Correctness is the headline, but every case is also profiled. The numbers below
@@ -259,11 +287,20 @@ come from [`run_perf.sh`](../benchmarks/geospatial/run_perf.sh) on a Google Comp
 Engine `e2-standard-8` (8 vCPU, 32 GB) in `us-central1` — in-region with the
 ARCO-ERA5 and WeatherBench 2 buckets, so the cloud read is fast. Each case runs
 **once per fresh process**, with no warmup, repeated five times: the SQL operation
-*and* the xarray reference each pay a **cold** read on every measurement. (A warm
-in-process loop would flatter the array side — `xr.open_zarr(chunks=None)` caches
-each variable after its first read, so the reference would serve later repetitions
-from RAM while the SQL side re-reads the store. One process per repetition makes
-both sides pay the read every time.)
+*and* the xarray reference each pay a **cold** read on every measurement.
+
+Fairness here took some care, because the obvious trap is caching. A reference
+that calls `.load()` caches its data *in place* on the very object the SQL table
+also reads from, so a later read — even just running the reference after the SQL
+query in the same process — could be served warm. We close that two ways. The one
+case that loads shared objects (05, forecast skill) uses `.compute()` instead,
+which returns a fresh array and leaves the inputs lazy, caching nothing; the other
+references either reopen their data or recompute their reduction eagerly on every
+read (`chunks=None` is NumPy, not Dask, so there is no graph to keep warm). And
+`run_perf.sh` runs each case in a fresh process per repetition, ruling out any
+carryover between reps. We verified the result directly: reading a window
+repeatedly in one process stays flat, and running either side after the other
+speeds up neither — the SQL query and the reference do not warm each other.
 
 | Case | Step | median (s) | stdev (s) | min (s) | max (s) | peak (MB) |
 |---|---|--:|--:|--:|--:|--:|
@@ -376,14 +413,3 @@ scale. The point of this suite is not to crown a winner but to show that the lin
 between the two is exactly where the operation is dense versus where it is
 relational, and that for a surprising share of geoscience, the operation is
 relational.
-
-## Running the suite
-
-```shell
-python benchmarks/geospatial/02_climatology.py   # inside the repo
-uv run benchmarks/geospatial/02_climatology.py   # standalone (PEP 723 deps)
-```
-
-Each script prints its SQL, runs the array reference, and asserts the two agree.
-See [`benchmarks/geospatial/README.md`](../benchmarks/geospatial/README.md) for
-the full list and dataset notes.

@@ -90,11 +90,15 @@ def _open(url: str) -> xr.Dataset:
 def _reference_rmse(forecasts: xr.Dataset, truth: xr.Dataset) -> xr.DataArray:
     """xarray reference: per (model, lead), align truth at valid_time, take RMSE.
 
-    The 64×32 windows are tiny, so the reference loads them and reduces in
-    memory; the SQL side above stays lazy.
+    The 64×32 windows are tiny, so the reference reads them into memory and
+    reduces there; the SQL side above stays lazy. We use ``.compute()`` rather
+    than ``.load()`` deliberately: ``.load()`` caches the data *in place* on the
+    shared ``forecasts``/``truth`` objects (which the SQL table also reads from),
+    which would let a profiled reference serve a warm read — ``.compute()``
+    returns a fresh array and leaves the inputs lazy, so each measurement is cold.
     """
-    f = forecasts[_VAR].load()
-    e = truth[_VAR].load()
+    f = forecasts[_VAR].compute()
+    e = truth[_VAR].compute()
     leads = f.prediction_timedelta.values
     per_lead = []
     for lead in leads:
@@ -141,6 +145,9 @@ def main() -> None:
     )
 
     ctx = xql.XarrayContext()
+    # chunks here is the Arrow batch (partition) size the table streams in, not a
+    # filter — no data is dropped. truth spans only the valid-time window, so
+    # time:100 makes it a single partition; forecasts stream a few inits at a time.
     ctx.from_dataset("forecasts", forecasts, chunks={"time": 6})
     ctx.from_dataset("era5", truth, chunks={"time": 100})
 
@@ -170,18 +177,17 @@ def main() -> None:
 
     show_result(got)
 
-    # Headline table: error growth with forecast horizon, both models.
-    lead_days = got["lead"].values / np.timedelta64(1, "D")
-    pangu_rmse = got.sel(model="pangu")
-    graphcast_rmse = got.sel(model="graphcast")
-    print("\n  2m-temperature RMSE (K) vs lead time — lower is better:")
-    print(f"  {'lead (days)':>12} {'Pangu':>9} {'GraphCast':>11}")
-    for i in range(0, len(lead_days), 4):
-        print(
-            f"  {lead_days[i]:>12.2f} "
-            f"{float(pangu_rmse.isel(lead=i)):>9.3f} "
-            f"{float(graphcast_rmse.isel(lead=i)):>11.3f}"
-        )
+    # Headline: error growth with forecast horizon, both models. The gridded SQL
+    # result round-trips to a pandas table directly — index is lead (in days),
+    # one column per model.
+    table = (
+        got.assign_coords(lead=got["lead"].values / np.timedelta64(1, "D"))
+        .to_pandas()
+        .T
+    )
+    table.index.name = "lead (days)"
+    print("\n  2m-temperature RMSE (K) vs lead — lower is better:\n")
+    print(table.iloc[::4].round(3).to_string())
 
 
 if __name__ == "__main__":
