@@ -31,8 +31,10 @@ made concrete: the raster is the full **ARCO-ERA5** archive (``WHERE time …``
 prunes it to one day), the regions are a second SQL table, and the spatial
 relationship is an ordinary ``BETWEEN``.
 
-Dataset: full ARCO-ERA5 + a handful of continental-scale bounding boxes
-(longitudes in ERA5's 0–360°E convention).
+Dataset: the full ARCO-ERA5 archive opened *lazily* — the table spans the whole
+record, but the query aggregates only one day's window (the ``WHERE`` prunes the
+read; it is not a scan of the full archive) — plus a handful of continental-scale
+bounding boxes (longitudes in ERA5's 0–360°E convention).
 """
 
 from __future__ import annotations

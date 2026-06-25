@@ -29,16 +29,15 @@ So we register a PROJ-backed scalar UDF and reproject in SQL::
     SELECT x, y, reproject(x, y)['lon'] AS lon, reproject(x, y)['lat'] AS lat
     FROM grid
 
-**The reference is Earth Engine itself.** We open a UTM grid through
-[Xee](https://github.com/google/Xee) carrying ``ee.Image.pixelLonLat()`` — Earth
-Engine's *own* geodesy engine computes the true lon/lat of every UTM pixel
-centre. So this case validates our PROJ-in-SQL transform against a fully
-**independent** reprojection implementation (EE), not against PROJ again. They
-agree to sub-metre precision.
-
-The UDF (built on ``pyproj``, vectorized over each Arrow batch) mirrors the
-``cftime()`` UDF already shipped in xarray-sql (see ``xarray_sql/cftime.py``);
-it could graduate into the package as ``xql.register_reproject_udf``.
+**The reference is Earth Engine itself.** There is *one* dataset: a single UTM
+grid opened through [Xee](https://github.com/google/Xee) carrying
+``ee.Image.pixelLonLat()``. Each pixel arrives with two things — its UTM ``x``/
+``y`` (the grid coordinates, our SQL input) and Earth Engine's *own* per-pixel
+``longitude``/``latitude`` (data variables, the reference). So we are not
+opening the same image twice in two CRS; we feed the UTM coordinates to the PROJ
+UDF and check the lon/lat it returns against EE's independently-computed lon/lat
+for the *same* pixels. The reference is a different geodesy engine, not PROJ
+again, and they agree to sub-metre precision.
 
 PROJ's context is not thread-safe and DataFusion evaluates projection
 expressions concurrently, so we return *both* coordinates from one
