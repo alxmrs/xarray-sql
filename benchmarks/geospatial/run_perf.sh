@@ -39,49 +39,6 @@ for f in "$DIR"/0[1-8]_*.py; do
 done
 
 # Aggregate the per-process cold runs (one row each) into a per-step summary and
-# a markdown table. Each raw row is one cold sample (reps=1), so we collect the
-# samples per (case, title, step) and report median/spread/peak across them.
-python3 - "$RAW" "$SUMMARY" <<'PY'
-import csv, statistics, sys
-
-raw, summary = sys.argv[1], sys.argv[2]
-rows = list(csv.DictReader(open(raw, newline="")))
-groups: dict = {}
-for r in rows:
-    groups.setdefault((r["case"], r["title"], r["step"]), []).append(
-        (float(r["t_median_s"]), float(r["peak_mb"]))
-    )
-
-header = ["case", "title", "step", "reps", "t_min_s", "t_median_s",
-          "t_mean_s", "t_stdev_s", "t_max_s", "peak_mb"]
-out = []
-for (case, title, step), vals in groups.items():
-    ts = [t for t, _ in vals]
-    out.append({
-        "case": case, "title": title, "step": step, "reps": len(ts),
-        "t_min_s": round(min(ts), 6),
-        "t_median_s": round(statistics.median(ts), 6),
-        "t_mean_s": round(statistics.fmean(ts), 6),
-        "t_stdev_s": round(statistics.stdev(ts), 6) if len(ts) > 1 else 0.0,
-        "t_max_s": round(max(ts), 6),
-        "peak_mb": round(max(p for _, p in vals), 1),
-    })
-out.sort(key=lambda r: (r["case"], 0 if r["step"].upper().startswith("SQL") else 1))
-
-with open(summary, "w", newline="") as fh:
-    w = csv.DictWriter(fh, fieldnames=header)
-    w.writeheader()
-    w.writerows(out)
-
-print("| Case | Step | reps | median (s) | stdev (s) | min (s) | max (s) | peak (MB) |")
-print("|---|---|--:|--:|--:|--:|--:|--:|")
-seen = set()
-for r in out:
-    cell = r["title"] if r["case"] not in seen else ""
-    seen.add(r["case"])
-    step = "SQL" if r["step"].upper().startswith("SQL") else "xarray reference"
-    print(f"| {cell} | {step} | {r['reps']} | {r['t_median_s']:.3f} | "
-          f"{r['t_stdev_s']:.3f} | {r['t_min_s']:.3f} | {r['t_max_s']:.3f} | "
-          f"{r['peak_mb']:.1f} |")
-PY
+# a markdown table.
+python3 "$DIR/perf_summary.py" "$RAW" "$SUMMARY"
 echo "wrote $SUMMARY"
