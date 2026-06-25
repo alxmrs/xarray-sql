@@ -332,7 +332,7 @@ closes; on an in-region VM with modest cores it widens. The underlying cause is
 constant — materialize rows, hash-join, aggregate — but which resource you are
 waiting on is not.
 
-## Conclusion: when SQL, when arrays
+## Conclusion
 
 None of this is an argument that SQL is *faster*. On a single node, for these
 operations, it is not — it pays a real per-operation overhead to express an array
