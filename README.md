@@ -151,9 +151,11 @@ an array library — and expresses each one in SQL, then **checks the SQL answer
 against an xarray/array reference** to floating-point tolerance:
 
 * **Spectral indices** (NDVI) — column arithmetic over a real Sentinel-2 scene.
-* **Climatology, anomalies, zonal means** — `GROUP BY` and self-`JOIN` over the
-  full 0.25° **ARCO-ERA5** archive (≈1.3M hourly steps), read lazily so each
-  query touches only the data it needs.
+* **Climatology, anomalies, zonal means** — `GROUP BY` and self-`JOIN` against
+  the 0.25° **ARCO-ERA5** archive registered as a lazy table. Each query is
+  bounded to a small window (a few days over a region) and reads only that
+  slice — the point is that you can aim a query at a multi-decade archive and
+  pay only for the data it asks for, not that the query scans the whole record.
 * **Forecast skill** — scoring the **Pangu-Weather** and **GraphCast** ML models
   against ERA5 (WeatherBench 2) as a `JOIN` on `valid_time = init + lead`; it
   reproduces the published result that GraphCast beats Pangu at every lead.
