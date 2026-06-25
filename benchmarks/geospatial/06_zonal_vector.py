@@ -135,30 +135,28 @@ def main() -> None:
             sql, param_values={"start": _START, "end": _END}
         ).to_dataset(dims=["region_id"])
 
-    # Array reference: load the same day once, mask each region in memory.
+    # Array reference: one lazy pass — stack the region masks and reduce. No
+    # .load(): the day's field is read inside this timed block (exactly like the
+    # SQL side), and reading it once for all regions is a single masked reduction
+    # rather than a Python loop that would re-read the field per region.
     for _ in measured("xarray reference"):
-        day = (
-            xr.open_zarr(_URL, chunks=None, storage_options={"token": "anon"})[
-                "2m_temperature"
-            ]
-            .sel(time=_DAY)
-            .load()
+        day = xr.open_zarr(
+            _URL, chunks=None, storage_options={"token": "anon"}
+        )["2m_temperature"].sel(time=_DAY)
+        in_region = xr.concat(
+            [
+                (day.latitude >= lat_min)
+                & (day.latitude <= lat_max)
+                & (day.longitude >= lon_min)
+                & (day.longitude <= lon_max)
+                for _, lat_min, lat_max, lon_min, lon_max in _REGIONS
+            ],
+            dim="region_id",
         )
-        avg_c = [
-            float(
-                day.where(
-                    (day.latitude >= lat_min)
-                    & (day.latitude <= lat_max)
-                    & (day.longitude >= lon_min)
-                    & (day.longitude <= lon_max)
-                ).mean()
-            )
+        ref = (
+            day.where(in_region).mean(["time", "latitude", "longitude"])
             - 273.15
-            for _, lat_min, lat_max, lon_min, lon_max in _REGIONS
-        ]
-        ref = xr.DataArray(
-            avg_c, dims=["region_id"], coords={"region_id": got.region_id}
-        )
+        ).assign_coords(region_id=got.region_id)
 
     assert_grid_close(
         "zonal mean per region (°C)", got.avg_c, ref, rtol=1e-4, atol=1e-2
