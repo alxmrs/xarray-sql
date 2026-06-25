@@ -310,11 +310,13 @@ the full list and dataset notes.
 ## Results
 
 Correctness is the headline, but every case is also profiled. The numbers below
-come from [`run_perf.sh`](../benchmarks/geospatial/run_perf.sh) on a Google Compute
-Engine `e2-standard-8` (8 vCPU, 32 GB) in `us-central1` — in-region with the
-ARCO-ERA5 and WeatherBench 2 buckets, so the cloud read is fast. Each case runs
-**once per fresh process**, with no warmup, repeated five times: the SQL operation
-*and* the xarray reference each pay a **cold** read on every measurement.
+come from [`run_perf.sh`](../benchmarks/geospatial/run_perf.sh) on a single Google
+Compute Engine `e2-standard-8` (8 vCPU, 32 GB) in `us-central1` — in-region with the
+ARCO-ERA5 and WeatherBench 2 buckets, so the cloud read is fast — with Earth Engine
+reached from the same VM, so all nine cases share one machine and one release build.
+Each case runs **once per fresh process**, with no warmup, repeated five times: the
+SQL operation *and* the xarray reference each pay a **cold** read on every
+measurement.
 
 Fairness here took some care, because the obvious trap is caching. A reference
 that calls `.load()` caches its data *in place* on the very object the SQL table
@@ -331,45 +333,56 @@ speeds up neither — the SQL query and the reference do not warm each other.
 
 | Case | Step | median (s) | stdev (s) | min (s) | max (s) | peak (MB) |
 |---|---|--:|--:|--:|--:|--:|
-| 01 · NDVI (per-pixel arithmetic) | SQL | 3.093 | 0.050 | 2.998 | 3.128 | 98.5 |
-|  | xarray reference | 0.402 | 0.060 | 0.372 | 0.507 | 42.0 |
-| 02 · Climatology (`GROUP BY` lat, lon, hour) | SQL | 5.987 | 1.328 | 5.901 | 8.942 | 513.8 |
-|  | xarray reference | 2.449 | 0.401 | 2.332 | 3.312 | 43.7 |
-| 03 · Zonal mean (`GROUP BY` latitude) | SQL | 3.224 | 0.048 | 3.175 | 3.288 | 245.3 |
-|  | xarray reference | 0.552 | 0.020 | 0.529 | 0.576 | 249.5 |
-| 04 · Anomaly (climatology self-`JOIN`) | SQL | 9.479 | 0.413 | 9.382 | 10.280 | 524.4 |
-|  | xarray reference | 3.013 | 0.584 | 2.875 | 4.199 | 80.5 |
-| 05 · Forecast skill (forecast↔truth `JOIN`) | SQL | 23.241 | 0.101 | 23.114 | 23.348 | 34.2 |
-|  | xarray reference | 0.336 | 0.014 | 0.314 | 0.352 | 2.2 |
-| 06 · Zonal stats (raster × vector `JOIN`) | SQL | 6.285 | 0.052 | 6.191 | 6.317 | 509.9 |
-|  | xarray reference | 2.235 | 0.216 | 2.195 | 2.703 | 359.9 |
-| 07 · Reprojection (PROJ scalar UDF) | SQL | 0.039 | 0.000 | 0.039 | 0.039 | 0.3 |
-| 08 · Regridding (weight-table `JOIN`) | SQL | 0.061 | 0.001 | 0.060 | 0.063 | 0.8 |
-|  | xarray reference | 0.018 | 0.001 | 0.018 | 0.020 | 0.2 |
+| 01 · NDVI (per-pixel arithmetic) | SQL | 3.528 | 0.803 | 2.861 | 5.024 | 114.0 |
+|  | xarray reference | 0.304 | 0.104 | 0.282 | 0.496 | 42.0 |
+| 02 · Climatology (`GROUP BY` lat, lon, hour) | SQL | 4.443 | 0.383 | 4.216 | 5.198 | 490.2 |
+|  | xarray reference | 1.867 | 0.106 | 1.844 | 2.053 | 43.7 |
+| 03 · Zonal mean (`GROUP BY` latitude) | SQL | 2.406 | 0.122 | 2.333 | 2.631 | 236.9 |
+|  | xarray reference | 0.385 | 0.006 | 0.381 | 0.395 | 249.5 |
+| 04 · Anomaly (climatology self-`JOIN`) | SQL | 7.027 | 0.123 | 6.950 | 7.239 | 511.5 |
+|  | xarray reference | 2.549 | 0.219 | 2.126 | 2.657 | 72.1 |
+| 05 · Forecast skill (forecast↔truth `JOIN`) | SQL | 10.714 | 0.093 | 10.663 | 10.891 | 6.6 |
+|  | xarray reference | 0.248 | 0.013 | 0.220 | 0.254 | 2.2 |
+| 06 · Zonal stats (raster × vector `JOIN`) | SQL | 4.308 | 0.053 | 4.299 | 4.401 | 509.1 |
+|  | xarray reference | 1.557 | 0.029 | 1.499 | 1.567 | 1262.1 |
+| 07 · Reprojection (PROJ scalar UDF) | SQL | 0.029 | 0.003 | 0.024 | 0.031 | 0.3 |
+| 08 · Regridding (weight-table `JOIN`) | SQL | 0.875 | 0.037 | 0.845 | 0.933 | 11.9 |
+|  | xarray reference | 0.850 | 0.658 | 0.809 | 2.310 | 13.3 |
+| 09 · Warp (reproject UDF → regrid `JOIN`) | SQL | 0.281 | 0.038 | 0.250 | 0.353 | 0.8 |
+|  | xarray reference | 0.817 | 0.030 | 0.764 | 0.828 | 11.2 |
 
-Two patterns are visible before any analysis. SQL is slower on wall-clock in every
-case — by ~2–6× on the plain `GROUP BY`s, and ~70× on case 05, the smallest grid
-but the largest `JOIN` — and its peak memory is markedly higher on the
-join/group-by cases (≈0.5 GB on 02, 04, 06). Both follow from the same cause, and
-the next section pins it down. (Case 01 reads Sentinel-2 from Europe, the only
-non-US source, so its SQL time includes a cross-region read. Cases 07–09 load their
-Earth Engine inputs into memory once and then compute, so they are
-methodology-agnostic; cases 07 and 09 time only the SQL transform — checked against
-Earth Engine's own `pixelLonLat`/SRTM — and run `reps=1` because PROJ is not
-re-entrant in-process.)
+Two patterns are visible before any analysis. SQL is slower on wall-clock wherever
+a cloud read or a large relational expansion dominates — by ~2.5–6× on the
+`GROUP BY` and `JOIN` cases against ARCO-ERA5, and ~43× on case 05, the smallest
+grid but the biggest blow-up into rows — and its peak memory is highest on those
+join/group-by cases (≈0.5 GB on 02, 04, 06). But the pattern is **not** universal.
+On cases 08 and 09, where the interpolation *weights* are precomputed and SQL just
+applies them, SQL is at parity with the array reference (08: 0.875 vs 0.850 s) or
+**faster** (09: 0.281 vs 0.817 s — the reference pays for `pyproj` + `.interp`,
+while SQL streams the prebuilt weight `JOIN`). The slow and the fast cases follow
+from the same cause, which the next section pins down. (Case 01 reads Sentinel-2
+from Europe, the only non-US source, so its SQL time includes a cross-region read.
+Cases 07–09 run against Earth Engine from the same VM: 07 times only the SQL
+reproject transform, checked against Earth Engine's own `pixelLonLat`; 08 and 09
+read SRTM lazily on **both** the SQL and reference sides, so that comparison is
+symmetric.)
 
-Case 05 is also the suite's most hardware-sensitive number: its SQL time is
-CPU-bound on the join and the (GIL-held) row production that feeds it, so it swings
-with the machine — a second `e2-standard-8` run measured ≈12 s rather than ≈23 s.
-The *reference*, by contrast, is read-bound and stable. So read the 05 ratio as
+Case 05 is the suite's most hardware-sensitive number: its SQL time is CPU-bound on
+the join and the (GIL-held) row production that feeds it, so it swings with the
+machine — across three `e2-standard-8` runs it has measured ≈10.7 s, ≈12 s, and
+≈23 s, while the read-bound *reference* stays near 0.25 s. So read the 05 ratio as
 "the relational form costs real CPU here," not as a fixed multiplier.
 
 ## Analysis: how a relational operation spends its time
 
 Why is SQL slower, and where does the time actually go? Profiling case 05 — the
-forecast-skill `JOIN`, the widest gap — with `cProfile`, one path per fresh
-process, run cold then warm so that `cold − warm` isolates the cloud read and the
-warm floor is ≈pure compute, decomposes it cleanly:
+forecast-skill `JOIN`, the widest gap — with `cProfile`, run cold then warm so that
+`cold − warm` isolates the cloud read and the warm floor is ≈pure compute,
+decomposes it cleanly. (These are single-process numbers from a laptop with a slow
+cross-region read — a *different* machine from the in-region table above, on
+purpose: it puts both sides' reads on equal, slow footing so the compute gap shows
+through. The absolute seconds therefore differ from the table; the decomposition,
+not the totals, is the point.)
 
 | | read (I/O) | compute | total (cold) |
 |---|--:|--:|--:|
@@ -393,22 +406,33 @@ round-trip that turns the query result back into a gridded `Dataset`
 relational engine doing row-oriented work, not the array reconstruction. The
 paradigm itself is the price, paid where the relational algebra runs.
 
-This explains the shape of the whole table. The `JOIN` cases (04, 05, 06) show the
-widest gaps because a hash join is the heaviest relational construct; the plain
-`GROUP BY` cases (02, 03) are closest to parity because a partitioned aggregate is
-cheap. And the SQL-to-reference *ratio* shifts with hardware: SQL is CPU-bound on
-the join, while the array reference is read-bound, so the two are gated by
-different resources. On a fast laptop with a slow cross-region read the gap nearly
-closes; on an in-region VM with modest cores it widens. The underlying cause is
+This explains the shape of the whole table. Case 05 stands alone at ~43× not
+because its join is exotic but because its *reference* is nearly free — a 64×32×20×2
+grid reduces in-memory in a quarter-second — while SQL still has to explode that
+grid into rows and hash-join them; a huge ratio over a tiny denominator. The
+ARCO-ERA5 cases (02, 03, 04, 06) instead cluster at ~2.5–6×, because there a large
+cloud read is a cost *both* sides pay, compressing the ratio. And cases 08 and 09
+invert it entirely: once the geometry — the interpolation weights — is precomputed,
+applying it is a `JOIN` that streams about as fast as (or faster than) the array
+reference's `pyproj`/`.interp`. The relational *overhead* is constant; the *ratio*
+you observe depends on how much non-relational work (the cloud read, the weight
+generation) sits on the other side of the comparison. And it shifts with hardware
+too: SQL is CPU-bound on the join while the array reference is read-bound, so the
+two are gated by different resources. On a fast laptop with a slow cross-region
+read the gap nearly closes; on an in-region VM with modest cores it widens. The
+underlying cause is
 constant — materialize rows, hash-join, aggregate — but which resource you are
 waiting on is not.
 
 ## Conclusion
 
-None of this is an argument that SQL is *faster*. On a single node, for these
-operations, it is not — it pays a real per-operation overhead to express an array
-reduction as relational algebra. The honest tradeoff is about which property you
-are optimizing for.
+None of this is an argument that SQL is *faster*. On a single node, for the
+reduction-shaped operations, it is not — it pays a real per-operation overhead to
+express an array reduction as relational algebra. (The exceptions, cases 08 and 09,
+prove the rule: once the array work — generating the weights — is already done, the
+relational half that remains is competitive, because there is no dense reduction
+left for arrays to win.) The honest tradeoff is about which property you are
+optimizing for.
 
 **Reach for the array paradigm when the work is dense and grid-aligned.** Per-pixel
 formulas, stencils, convolutions, FFTs, linear algebra — anything that stays in
@@ -416,7 +440,8 @@ contiguous typed buffers and treats the chunk grid as its unit of parallelism. T
 array model has the lowest overhead here, and the lead is structural, not
 incidental: there are no rows to materialize and nothing to shuffle. NDVI (case 01)
 is the tell — column arithmetic expresses cleanly in SQL, but the array side is
-~8× faster because per-pixel math is exactly what arrays are for.
+~10× faster (part of which is case 01's cross-region read; the rest is that
+per-pixel math is exactly what arrays are for).
 
 **Reach for SQL when the work is relationally shaped, or the audience is.** Joins,
 group-bys, alignment across data with different indexes (case 05's three time
