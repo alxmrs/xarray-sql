@@ -26,7 +26,7 @@ SUMMARY="${1:-$DIR/perf.csv}"
 RAW="$(mktemp)"
 read -r -a PYRUN <<<"${GEOBENCH_PYRUN:-uv run}"
 
-for f in "$DIR"/0[1-8]_*.py; do
+for f in "$DIR"/0[1-9]_*.py; do
   name="$(basename "$f")"
   for i in $(seq 1 "$REPS"); do
     if GEOBENCH_PROFILE=1 GEOBENCH_WARMUP=0 GEOBENCH_REPS=1 GEOBENCH_CSV="$RAW" \

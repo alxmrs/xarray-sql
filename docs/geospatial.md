@@ -42,7 +42,7 @@ actually runs — and this suite works through nearly all of it:
 | Climatology (average weather for a time of year/day, per location) | case 02 |
 | Transformed Eulerian Mean (circulation diagnostics — zonal means and anomalies) | cases 03, 04 |
 | Forecast evaluation (scoring forecasts against ground truth) | case 05 |
-| Regridding and reprojection (resolution and CRS changes) | cases 07, 08 |
+| Regridding and reprojection (resolution and CRS changes) | cases 07, 08, 09 |
 | Spatial joins (large polygon-to-polygon joins) | *not covered* — a vector-data problem; the closest analogue here is the raster × vector join in case 06 |
 
 So the claim isn't that a few cherry-picked operations happen to be relational.
@@ -61,6 +61,7 @@ through SQL one by one, turns out to be — almost entirely — queries.
 | Zonal stats over regions | rasterize polygons + mask | raster × vector range `JOIN` | [`06_zonal_vector.py`](../benchmarks/geospatial/06_zonal_vector.py) |
 | Reprojection | per-pixel CRS transform | scalar **UDF** (`ST_Transform`-style) | [`07_reproject_udf.py`](../benchmarks/geospatial/07_reproject_udf.py) |
 | Regridding | interpolation to a new grid | sparse-weight table `JOIN` | [`08_regrid_weights.py`](../benchmarks/geospatial/08_regrid_weights.py) |
+| Warp (reproject + resample) | CRS transform *and* interpolation | reproject **UDF** → weight-table `JOIN` | [`09_warp.py`](../benchmarks/geospatial/09_warp.py) |
 
 ## 1. A pixel-wise formula is a column expression
 
@@ -247,6 +248,32 @@ catalog through [Xee](https://github.com/google/Xee)) coarse → fine and matche
 xarray's bilinear `.interp()` exactly. So regridding does not weaken the thesis —
 it is the most relational operation of all.
 
+**A warp is just the two composed.** The full operation a GIS calls *warp* (GDAL
+and rasterio's `reproject`) does both at once: change the CRS *and* resample onto
+the new grid. [`09_warp.py`](../benchmarks/geospatial/09_warp.py) writes it as the
+two cases above run back to back — the 07 reproject UDF carries the target
+lon/lat grid back into the source UTM space, arrays turn those reprojected points
+into bilinear weights, and the 08 `JOIN` applies them:
+
+```sql
+-- 1. reproject the target grid into source coordinates (the 07 UDF)
+SELECT dst_lat, dst_lon, reproject(dst_lon, dst_lat)['x'] AS sx,
+                         reproject(dst_lon, dst_lat)['y'] AS sy
+FROM target
+-- 2. apply the bilinear weights built from those points (the 08 JOIN)
+SELECT w.dst_lat AS lat, w.dst_lon AS lon, SUM(s.value * w.weight) AS warped
+FROM weights w JOIN src s ON s.x = w.src_x AND s.y = w.src_y
+GROUP BY w.dst_lat, w.dst_lon
+```
+
+It warps SRTM from a UTM grid onto a lon/lat grid and matches xarray's `.interp()`
+at the reprojected points exactly, with Earth Engine's own lon/lat SRTM as a
+second, cross-CRS sanity check (a loose match — EE resamples its native 30 m data,
+we resample the 2 km source — so it is a corroboration, not the assertion). The
+warp lands exactly where the split predicts: the row-independent half is a UDF,
+the many-to-many half is a `JOIN`, and the only genuinely geometric step — turning
+the reprojected points into weights — is the array work the next section is about.
+
 ## Where the array paradigm still earns its keep
 
 The boundary is **weight generation**. Applying a regridding is a join;
@@ -325,11 +352,11 @@ case — by ~2–6× on the plain `GROUP BY`s, and ~70× on case 05, the smalles
 but the largest `JOIN` — and its peak memory is markedly higher on the
 join/group-by cases (≈0.5 GB on 02, 04, 06). Both follow from the same cause, and
 the next section pins it down. (Case 01 reads Sentinel-2 from Europe, the only
-non-US source, so its SQL time includes a cross-region read. Cases 07–08 load their
+non-US source, so its SQL time includes a cross-region read. Cases 07–09 load their
 Earth Engine inputs into memory once and then compute, so they are
-methodology-agnostic; case 07 times only the SQL transform — its correctness is
-checked against Earth Engine's own `pixelLonLat` — and runs `reps=1` because PROJ
-is not re-entrant in-process.)
+methodology-agnostic; cases 07 and 09 time only the SQL transform — checked against
+Earth Engine's own `pixelLonLat`/SRTM — and run `reps=1` because PROJ is not
+re-entrant in-process.)
 
 Case 05 is also the suite's most hardware-sensitive number: its SQL time is
 CPU-bound on the join and the (GIL-held) row production that feeds it, so it swings
