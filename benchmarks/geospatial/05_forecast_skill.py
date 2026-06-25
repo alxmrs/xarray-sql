@@ -145,10 +145,14 @@ def main() -> None:
     )
 
     ctx = xql.XarrayContext()
-    # chunks here is the Arrow batch (partition) size the table streams in, not a
-    # filter — no data is dropped. truth spans only the valid-time window, so
-    # time:100 makes it a single partition; forecasts stream a few inits at a time.
-    ctx.from_dataset("forecasts", forecasts, chunks={"time": 6})
+    # chunks here is the Arrow batch (partition) size each table streams in, not a
+    # filter — no data is dropped. Both windows are small, so one partition each is
+    # fastest (fewer partitions = fewer Python→Arrow round-trips for the same
+    # rows); time:100 covers both the ~40 forecast inits and the ~79 truth steps.
+    # Empirically the truth chunk is what matters — splitting it small costs ~3×,
+    # while the forecasts chunk is in the noise — and a chunk *mismatch* costs
+    # nothing, so there is no need to keep them different.
+    ctx.from_dataset("forecasts", forecasts, chunks={"time": 100})
     ctx.from_dataset("era5", truth, chunks={"time": 100})
 
     sql = """
