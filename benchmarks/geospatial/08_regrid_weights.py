@@ -23,7 +23,7 @@ is a weighted sum of a few input cells. And a sparse matrix is just a table of
 ``(target, source, weight)`` rows. So *applying* a regridding is::
 
     SELECT w.dst_lat, w.dst_lon, SUM(s.value * w.weight) AS regridded
-    FROM   weights w JOIN src s ON s.cell_id = w.src_id
+    FROM   weights w JOIN src s ON s.lat = w.src_lat AND s.lon = w.src_lon
     GROUP BY w.dst_lat, w.dst_lon
 
 — a JOIN against the weight table plus a weighted GROUP BY. This is the most
@@ -93,26 +93,28 @@ def _bilinear_weight_table(
     """Build the sparse bilinear weight matrix as a weight table.
 
     The 2-D weight is the outer product of the 1-D lat and lon weights. Each
-    nonzero is one row: the target cell named by its ``(dst_lat, dst_lon)`` and
-    the source cell by its row-major ``src_id`` — so the regrid SQL can GROUP BY
-    the target coordinates and round-trip straight back to a (lat, lon) grid.
+    nonzero is one row naming the target cell by its ``(dst_lat, dst_lon)`` and
+    the source cell by its ``(src_lat, src_lon)`` — so the regrid SQL joins the
+    source grid on its coordinates (no pre-raveled cell id), lets the engine read
+    the source lazily, and rounds the result straight back to a (lat, lon) grid.
     """
-    nslon = len(slon)
     lat_w = _linear_weights(slat, tlat)
     lon_w = _linear_weights(slon, tlon)
-    dst_lats, dst_lons, src_ids, weights = [], [], [], []
+    dst_lats, dst_lons, src_lats, src_lons, weights = [], [], [], [], []
     for tj, si, wlat in lat_w:
         for tk, sj, wlon in lon_w:
             dst_lats.append(tlat[tj])
             dst_lons.append(tlon[tk])
-            src_ids.append(si * nslon + sj)
+            src_lats.append(slat[si])
+            src_lons.append(slon[sj])
             weights.append(wlat * wlon)
     n = len(weights)
     return xr.Dataset(
         {
             "dst_lat": (["pair"], np.array(dst_lats, dtype="float64")),
             "dst_lon": (["pair"], np.array(dst_lons, dtype="float64")),
-            "src_id": (["pair"], np.array(src_ids, dtype="int64")),
+            "src_lat": (["pair"], np.array(src_lats, dtype="float64")),
+            "src_lon": (["pair"], np.array(src_lons, dtype="float64")),
             "weight": (["pair"], np.array(weights, dtype="float64")),
         },
         coords={"pair": np.arange(n)},
@@ -150,19 +152,22 @@ def _open_srtm() -> xr.DataArray:
             rename[d] = "lat"
         elif dl in ("x", "lon", "longitude"):
             rename[d] = "lon"
-    return da.rename(rename).sortby("lat").sortby("lon").load()
+    da = da.rename(rename).sortby("lat").sortby("lon")
+    # Stay lazy (no .load()): the source is read on demand by both the SQL table
+    # and the .interp reference, so each pays its own read. Force float64 coords
+    # so the weight table's src lat/lon match the source grid's exactly in the
+    # join.
+    return da.assign_coords(
+        lat=da.lat.astype("float64"), lon=da.lon.astype("float64")
+    )
 
 
 def main() -> None:
-    with timed("open SRTM via Xee"):
+    with timed("open SRTM via Xee (lazy)"):
         src_da = _open_srtm()
     slat = src_da.lat.values
     slon = src_da.lon.values
-    field = src_da.values.astype("float64")
-    print(
-        f"  SRTM elevation source grid {len(slat)}×{len(slon)} "
-        f"({float(np.nanmin(field)):.0f}–{float(np.nanmax(field)):.0f} m)"
-    )
+    print(f"  SRTM elevation source grid {len(slat)}×{len(slon)} (read lazily)")
 
     # Finer target grid strictly inside the source extent (bilinear upsampling).
     tlat = np.linspace(slat[1], slat[-2], 60)
@@ -171,11 +176,6 @@ def main() -> None:
         f"  regrid {len(slat)}×{len(slon)} → {len(tlat)}×{len(tlon)} (bilinear)"
     )
 
-    # Source field as a flat (cell_id, value) table.
-    src_table = xr.Dataset(
-        {"value": (["cell_id"], field.ravel())},
-        coords={"cell_id": np.arange(field.size)},
-    ).chunk({"cell_id": field.size})
     weights = _bilinear_weight_table(slat, slon, tlat, tlon)
     print(
         f"  weight matrix: {weights.sizes['pair']:,} nonzeros "
@@ -183,7 +183,13 @@ def main() -> None:
     )
 
     ctx = xql.XarrayContext()
-    ctx.from_dataset("src", src_table, chunks={"cell_id": field.size})
+    # Register the source grid itself (lazy) — the join reads it on demand, the
+    # same source the .interp reference reads, so both pay an equal lazy read.
+    ctx.from_dataset(
+        "src",
+        src_da.to_dataset(name="value"),
+        chunks={"lat": len(slat), "lon": len(slon)},
+    )
     ctx.from_dataset("weights", weights, chunks={"pair": weights.sizes["pair"]})
 
     sql = """
@@ -191,7 +197,7 @@ def main() -> None:
                w.dst_lon AS lon,
                SUM(s.value * w.weight) AS regridded
         FROM weights w
-        JOIN src s ON s.cell_id = w.src_id
+        JOIN src s ON s.lat = w.src_lat AND s.lon = w.src_lon
         GROUP BY w.dst_lat, w.dst_lon
         ORDER BY w.dst_lat, w.dst_lon
     """
@@ -202,7 +208,7 @@ def main() -> None:
     for _ in measured("SQL regrid (weight-table JOIN + weighted SUM)"):
         got = ctx.sql(sql).to_dataset(dims=["lat", "lon"]).regridded
 
-    # Array reference: xarray's own bilinear interpolation of the same field.
+    # Array reference: xarray's own bilinear interpolation of the same lazy field.
     for _ in measured("xarray .interp reference"):
         ref = src_da.interp(lat=tlat, lon=tlon, method="linear")
 
