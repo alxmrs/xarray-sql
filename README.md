@@ -19,27 +19,48 @@ SQL queries against them.
 
 ## Quickstart
 
-Open any Xarray Dataset, register it as a table with `from_dataset`, then query
-it with `sql`:
+Open a Dataset, register it as a table with `from_dataset`, compute a
+climatology in SQL, then write the result back to Xarray and plot it:
+
+> **Note:** this example also needs `pooch` and a netCDF backend (for the
+> tutorial download) and `matplotlib` (for the plot):
+> `pip install pooch netCDF4 matplotlib`.
 
 ```python
 import xarray as xr
 import xarray_sql as xql
 
-# A small tutorial dataset, downloaded once via `pooch`.
+# 4x-daily surface air temperature on a lat/lon grid, 2013-2014.
 ds = xr.tutorial.open_dataset('air_temperature')
 
 ctx = xql.XarrayContext()
-ctx.from_dataset('air', ds, chunks=dict(time=10))
+ctx.from_dataset('air', ds, chunks=dict(time=100))
 
-ctx.sql('SELECT MAX(air) FROM air')
-# max(air.air)
-# --
-# 317.40000000000003
+# A climatology — the long-term mean at each grid cell — computed in SQL.
+clim = ctx.sql('''
+  SELECT "lat", "lon", AVG("air") AS air
+  FROM "air"
+  GROUP BY "lat", "lon"
+''')
+
+# Write the SQL result back to an Xarray Dataset. Because `time` was
+# aggregated away, name the remaining dimensions explicitly. The variable's
+# source metadata (e.g. its units) is recovered from the registered table.
+clim_ds = clim.to_dataset(dims=["lat", "lon"])
+# <xarray.Dataset>
+# Dimensions:  (lat: 25, lon: 53)
+# Coordinates:
+#   * lat      (lat) float32 75.0 72.5 70.0 ... 20.0 17.5 15.0
+#   * lon      (lon) float32 200.0 202.5 205.0 ... 325.0 327.5 330.0
+# Data variables:
+#     air      (lat, lon) float64 ...
+
+# Plot the climatology like any other Dataset.
+clim_ds["air"].plot()  # in a script, call matplotlib.pyplot.show() to display
 ```
 
-That's the whole loop. Everything below is the same three steps —
-`XarrayContext`, `from_dataset`, `sql` — at a larger scale.
+That's the round trip — Xarray in, SQL in the middle, Xarray (and a plot) back
+out.
 
 ## A bigger example: ARCO-ERA5
 

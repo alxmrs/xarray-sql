@@ -1,5 +1,13 @@
 # Examples
 
+A query result can be consumed two ways: as a flat pandas DataFrame
+(`to_pandas`) or written back to an Xarray Dataset (`to_dataset`). This computes
+a climatology — the long-term mean at each grid cell — and shows both.
+
+> **Note:** this example also needs `pooch` and a netCDF backend (for the
+> tutorial download) and `matplotlib` (for the plot):
+> `pip install pooch netCDF4 matplotlib`.
+
 ```python
 import xarray as xr
 import xarray_sql as xql
@@ -7,19 +15,25 @@ import xarray_sql as xql
 ds = xr.tutorial.open_dataset('air_temperature')
 
 ctx = xql.XarrayContext()
-ctx.from_dataset('air', ds, chunks=dict(time=24))
+ctx.from_dataset('air', ds, chunks=dict(time=100))
 
-result = ctx.sql('''
+clim = ctx.sql('''
   SELECT
-    "lat", "lon", AVG("air") as air_avg
+    "lat", "lon", AVG("air") AS air
   FROM
     "air"
   GROUP BY
-   "lat", "lon"
+    "lat", "lon"
 ''')
 
-df = result.to_pandas()
-df.head()
+# Option 1: a flat pandas DataFrame.
+clim.to_pandas().head()
+
+# Option 2: round-trip back to an Xarray Dataset and plot it. `time` was
+# aggregated away, so name the remaining dimensions explicitly; the variable's
+# units are recovered from the registered table.
+clim_ds = clim.to_dataset(dims=["lat", "lon"])
+clim_ds["air"].plot()
 ```
 
 ## Mixed-dimension datasets: ARCO-ERA5
