@@ -14,6 +14,39 @@ pip install xarray-sql
 ## What is this?
 
 This is an experiment to provide a SQL interface for array datasets.
+Succinctly, we "pivot" Xarray Datasets to treat them like tables so we can run
+SQL queries against them.
+
+## Quickstart
+
+Open any Xarray Dataset, register it as a table with `from_dataset`, then query
+it with `sql`:
+
+```python
+import xarray as xr
+import xarray_sql as xql
+
+# A small tutorial dataset, downloaded once via `pooch`.
+ds = xr.tutorial.open_dataset('air_temperature')
+
+ctx = xql.XarrayContext()
+ctx.from_dataset('air', ds, chunks=dict(time=10))
+
+ctx.sql('SELECT MAX(air) FROM air')
+# max(air.air)
+# --
+# 317.40000000000003
+```
+
+That's the whole loop. Everything below is the same three steps —
+`XarrayContext`, `from_dataset`, `sql` — at a larger scale.
+
+## A bigger example: ARCO-ERA5
+
+The same interface scales to cloud-native datasets with hundreds of variables,
+like [ARCO-ERA5](https://github.com/google-research/arco-era5).
+
+> **Note:** reading from `gs://` requires `gcsfs` (`pip install gcsfs`).
 
 ```python
 import xarray as xr
@@ -104,9 +137,6 @@ ctx.sql('''
 
 _(A runnable version of this example lives at
 [`perf_tests/era5_temp_profile.py`](perf_tests/era5_temp_profile.py).)_
-
-Succinctly, we "pivot" Xarray Datasets to treat them like tables so we can run
-SQL queries against them. 
 
 ## Why build this?
 

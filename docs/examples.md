@@ -35,6 +35,8 @@ Open a year of ARCO-ERA5 and let SQL `WHERE` clauses do the filtering — the
 library prunes time partitions and pushes dimension-column filters down. Use
 the `table_names` kwarg to give each dimension group a friendly name:
 
+> **Note:** reading from `gs://` requires `gcsfs` (`pip install gcsfs`).
+
 ```python
 import xarray as xr
 import xarray_sql as xql
