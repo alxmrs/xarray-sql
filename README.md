@@ -36,26 +36,23 @@ ds = xr.tutorial.open_dataset('air_temperature')
 ctx = xql.XarrayContext()
 ctx.from_dataset('air', ds, chunks=dict(time=100))
 
-# A climatology — the long-term mean at each grid cell — computed in SQL.
+# A climatology — the mean annual cycle — computed in SQL: average air
+# temperature for each month of the year, over all grid cells and years.
 clim = ctx.sql('''
-  SELECT "lat", "lon", AVG("air") AS air
+  SELECT
+    CAST(date_part('month', "time") AS INTEGER) AS month,
+    AVG("air") AS air
   FROM "air"
-  GROUP BY "lat", "lon"
+  GROUP BY CAST(date_part('month', "time") AS INTEGER)
+  ORDER BY month
 ''')
 
-# Write the SQL result back to an Xarray Dataset. Because `time` was
-# aggregated away, name the remaining dimensions explicitly. The variable's
-# source metadata (e.g. its units) is recovered from the registered table.
-clim_ds = clim.to_dataset(dims=["lat", "lon"])
-# <xarray.Dataset>
-# Dimensions:  (lat: 25, lon: 53)
-# Coordinates:
-#   * lat      (lat) float32 75.0 72.5 70.0 ... 20.0 17.5 15.0
-#   * lon      (lon) float32 200.0 202.5 205.0 ... 325.0 327.5 330.0
-# Data variables:
-#     air      (lat, lon) float64 ...
+# Write the SQL result back to an Xarray Dataset. `month` is a derived
+# column, so name it as the dimension; the variable's units are recovered
+# from the registered table. The result is one value per month: air(month).
+clim_ds = clim.to_dataset(dims=["month"])
 
-# Plot the climatology like any other Dataset.
+# Plot the annual cycle as a time series.
 clim_ds["air"].plot()  # in a script, call matplotlib.pyplot.show() to display
 ```
 

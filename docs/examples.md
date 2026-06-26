@@ -2,7 +2,8 @@
 
 A query result can be consumed two ways: as a flat pandas DataFrame
 (`to_pandas`) or written back to an Xarray Dataset (`to_dataset`). This computes
-a climatology — the long-term mean at each grid cell — and shows both.
+a climatology — the mean annual cycle, one value per month of the year — and
+shows both.
 
 > **Note:** this example also needs `pooch` and a netCDF backend (for the
 > tutorial download) and `matplotlib` (for the plot):
@@ -19,20 +20,23 @@ ctx.from_dataset('air', ds, chunks=dict(time=100))
 
 clim = ctx.sql('''
   SELECT
-    "lat", "lon", AVG("air") AS air
+    CAST(date_part('month', "time") AS INTEGER) AS month,
+    AVG("air") AS air
   FROM
     "air"
   GROUP BY
-    "lat", "lon"
+    CAST(date_part('month', "time") AS INTEGER)
+  ORDER BY
+    month
 ''')
 
 # Option 1: a flat pandas DataFrame.
 clim.to_pandas().head()
 
-# Option 2: round-trip back to an Xarray Dataset and plot it. `time` was
-# aggregated away, so name the remaining dimensions explicitly; the variable's
-# units are recovered from the registered table.
-clim_ds = clim.to_dataset(dims=["lat", "lon"])
+# Option 2: round-trip back to an Xarray Dataset and plot the annual cycle as
+# a time series. `month` is a derived column, so name it as the dimension; the
+# variable's units are recovered from the registered table.
+clim_ds = clim.to_dataset(dims=["month"])
 clim_ds["air"].plot()
 ```
 
