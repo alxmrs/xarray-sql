@@ -14,6 +14,57 @@ pip install xarray-sql
 ## What is this?
 
 This is an experiment to provide a SQL interface for array datasets.
+Succinctly, we "pivot" Xarray Datasets to treat them like tables so we can run
+SQL queries against them.
+
+## Quickstart
+
+Open a Dataset, register it as a table with `from_dataset`, compute a
+climatology in SQL, then write the result back to Xarray and plot it:
+
+> **Note:** this example also needs `pooch` and a netCDF backend (for the
+> tutorial download) and `matplotlib` (for the plot):
+> `pip install pooch netCDF4 matplotlib`.
+
+```python
+import xarray as xr
+import xarray_sql as xql
+
+# 4x-daily surface air temperature on a lat/lon grid, 2013-2014.
+ds = xr.tutorial.open_dataset('air_temperature')
+
+ctx = xql.XarrayContext()
+ctx.from_dataset('air', ds, chunks=dict(time=100))
+
+# A climatology — the mean annual cycle — computed in SQL: average air
+# temperature for each month of the year, over all grid cells and years.
+clim = ctx.sql('''
+  SELECT
+    CAST(date_part('month', "time") AS INTEGER) AS month,
+    AVG("air") AS air
+  FROM "air"
+  GROUP BY CAST(date_part('month', "time") AS INTEGER)
+  ORDER BY month
+''')
+
+# Write the SQL result back to an Xarray Dataset. `month` is a derived
+# column, so name it as the dimension; the variable's units are recovered
+# from the registered table. The result is one value per month: air(month).
+clim_ds = clim.to_dataset(dims=["month"])
+
+# Plot the annual cycle as a time series.
+clim_ds["air"].plot()  # in a script, call matplotlib.pyplot.show() to display
+```
+
+That's the round trip — Xarray in, SQL in the middle, Xarray (and a plot) back
+out.
+
+## A bigger example: ARCO-ERA5
+
+The same interface scales to cloud-native datasets with hundreds of variables,
+like [ARCO-ERA5](https://github.com/google-research/arco-era5).
+
+> **Note:** reading from `gs://` requires `gcsfs` (`pip install gcsfs`).
 
 ```python
 import xarray as xr
@@ -104,9 +155,6 @@ ctx.sql('''
 
 _(A runnable version of this example lives at
 [`perf_tests/era5_temp_profile.py`](perf_tests/era5_temp_profile.py).)_
-
-Succinctly, we "pivot" Xarray Datasets to treat them like tables so we can run
-SQL queries against them. 
 
 ## Why build this?
 

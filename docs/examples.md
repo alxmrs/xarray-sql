@@ -1,5 +1,14 @@
 # Examples
 
+A query result can be consumed two ways: as a flat pandas DataFrame
+(`to_pandas`) or written back to an Xarray Dataset (`to_dataset`). This computes
+a climatology — the mean annual cycle, one value per month of the year — and
+shows both.
+
+> **Note:** this example also needs `pooch` and a netCDF backend (for the
+> tutorial download) and `matplotlib` (for the plot):
+> `pip install pooch netCDF4 matplotlib`.
+
 ```python
 import xarray as xr
 import xarray_sql as xql
@@ -7,19 +16,28 @@ import xarray_sql as xql
 ds = xr.tutorial.open_dataset('air_temperature')
 
 ctx = xql.XarrayContext()
-ctx.from_dataset('air', ds, chunks=dict(time=24))
+ctx.from_dataset('air', ds, chunks=dict(time=100))
 
-result = ctx.sql('''
+clim = ctx.sql('''
   SELECT
-    "lat", "lon", AVG("air") as air_avg
+    CAST(date_part('month', "time") AS INTEGER) AS month,
+    AVG("air") AS air
   FROM
     "air"
   GROUP BY
-   "lat", "lon"
+    CAST(date_part('month', "time") AS INTEGER)
+  ORDER BY
+    month
 ''')
 
-df = result.to_pandas()
-df.head()
+# Option 1: a flat pandas DataFrame.
+clim.to_pandas().head()
+
+# Option 2: round-trip back to an Xarray Dataset and plot the annual cycle as
+# a time series. `month` is a derived column, so name it as the dimension; the
+# variable's units are recovered from the registered table.
+clim_ds = clim.to_dataset(dims=["month"])
+clim_ds["air"].plot()
 ```
 
 ## Mixed-dimension datasets: ARCO-ERA5
@@ -34,6 +52,8 @@ variables are surface fields and 11 are atmospheric.
 Open a year of ARCO-ERA5 and let SQL `WHERE` clauses do the filtering — the
 library prunes time partitions and pushes dimension-column filters down. Use
 the `table_names` kwarg to give each dimension group a friendly name:
+
+> **Note:** reading from `gs://` requires `gcsfs` (`pip install gcsfs`).
 
 ```python
 import xarray as xr
