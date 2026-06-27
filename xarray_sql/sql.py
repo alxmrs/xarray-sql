@@ -4,7 +4,7 @@ from datafusion.catalog import Schema
 from collections import defaultdict
 
 from . import cftime as cft
-from .df import Chunks
+from .df import Chunks, DEFAULT_TARGET_PARTITIONS
 from .ds import XarrayDataFrame
 from .reader import read_xarray_table
 
@@ -29,6 +29,7 @@ class XarrayContext(SessionContext):
         *,
         table_names: dict[tuple[str, ...], str] | None = None,
         chunks: Chunks = None,
+        target_partitions: int | None = DEFAULT_TARGET_PARTITIONS,
     ):
         """Register an xarray Dataset as one or more queryable SQL tables.
 
@@ -83,6 +84,12 @@ class XarrayContext(SessionContext):
                 variables with differing dimensions.
             chunks: Xarray-like chunks specification. If not provided, uses
                 the Dataset's existing chunks.
+            target_partitions: Upper bound on scan partitions per table.
+                Native chunks are coalesced so registration stays tractable on
+                finely chunked stores (see ``read_xarray_table``). The bound is
+                applied per table, so a dataset split into N dimension-group
+                tables may register up to ``N * target_partitions`` partitions.
+                Pass ``None`` to disable coalescing.
 
         Returns:
             self, to allow chaining.
@@ -99,7 +106,11 @@ class XarrayContext(SessionContext):
         if len(groups) <= 1:
             self._registered_datasets[name] = input_table
             return self._from_dataset(
-                name, input_table, chunks, coord_arrays=coord_arrays
+                name,
+                input_table,
+                chunks,
+                coord_arrays=coord_arrays,
+                target_partitions=target_partitions,
             )
 
         table_names = table_names or {}
@@ -117,6 +128,7 @@ class XarrayContext(SessionContext):
                 chunks,
                 schema=schema,
                 coord_arrays=coord_arrays,
+                target_partitions=target_partitions,
             )
             # Track the fully-qualified name so XarrayDataFrame metadata
             # recovery can find this Dataset on round-trip.
@@ -130,7 +142,9 @@ class XarrayContext(SessionContext):
         input_table: xr.Dataset,
         chunks: Chunks = None,
         schema: Schema | None = None,
+        *,
         coord_arrays: dict | None = None,
+        target_partitions: int | None = DEFAULT_TARGET_PARTITIONS,
     ):
         """Register a Dataset as a single SQL table.
 
@@ -142,7 +156,12 @@ class XarrayContext(SessionContext):
         )
         register(
             table_name,
-            read_xarray_table(input_table, chunks, coord_arrays=coord_arrays),
+            read_xarray_table(
+                input_table,
+                chunks,
+                coord_arrays=coord_arrays,
+                target_partitions=target_partitions,
+            ),
         )
         self._maybe_register_cftime_udf(input_table)
         return self
