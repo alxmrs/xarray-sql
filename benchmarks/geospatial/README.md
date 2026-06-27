@@ -24,6 +24,7 @@ plain-English definition of the operation, and computes the same numbers.
 | 07 | `07_reproject_udf.py` | per-pixel CRS transform | scalar **UDF** (`reproject()`), à la PostGIS `ST_Transform` |
 | 08 | `08_regrid_weights.py` | interpolation to a new grid | sparse-weight table `JOIN` + weighted `GROUP BY` |
 | 09 | `09_warp.py` | reproject **and** resample (warp) | reproject **UDF** (07) → weight table `JOIN` (08) |
+| 10 | `10_tem.py` | zonal means + eddy fluxes (TEM diagnostic) | `GROUP BY (time, level, lat)` + covariance `AVG(u*v) - AVG(u)*AVG(v)` |
 
 Cases 01–06 show operations that are *natively* relational. Cases 07–08 are the
 "hardest" array operations — reprojection and regridding — and show where a UDF
@@ -31,6 +32,9 @@ fits (a per-row coordinate transform) versus where the operation is really a
 sparse matrix multiply expressed as a `JOIN`. Case 09 composes the two into a full
 **warp** (GDAL/rasterio `reproject`): the 07 UDF reprojects the target grid, arrays
 turn the reprojected points into bilinear weights, and the 08 `JOIN` applies them.
+Case 10 returns to a pure reduction: the Transformed Eulerian Mean, where the
+zonal means and the eddy momentum and heat fluxes fall out of a single grouped
+aggregate via the covariance identity.
 See
 [`docs/geospatial.md`](../../docs/geospatial.md) for the full narrative,
 including *where the array paradigm still earns its keep* (generating the
@@ -60,6 +64,9 @@ interpolation weights — the geometry — which SQL applies but does not comput
   validates against xarray's `.interp()` at the reprojected points, with Earth
   Engine's own lon/lat SRTM as a second, cross-CRS check. All three run against
   Earth Engine using your existing `gcloud` login, and skip cleanly without it.
+- **10 TEM** uses the same **ARCO-ERA5** archive as 02-06, reading the atmospheric
+  wind and temperature fields (u, v, T, w) on a few pressure levels for one
+  timestep. Network-backed; skips cleanly offline.
 
 ## Running
 
