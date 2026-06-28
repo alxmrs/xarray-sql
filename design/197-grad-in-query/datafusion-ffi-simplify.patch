@@ -1,0 +1,299 @@
+--- a/datafusion/ffi/src/udf/mod.rs
++++ b/datafusion/ffi/src/udf/mod.rs
+@@ -28,14 +28,20 @@
+ use arrow_schema::FieldRef;
+ use datafusion_common::config::ConfigOptions;
+ use datafusion_common::{DataFusionError, Result, internal_err};
++use datafusion_expr::execution_props::ExecutionProps;
++use datafusion_expr::registry::FunctionRegistry;
++use datafusion_expr::simplify::{ExprSimplifyResult, SimplifyContext, SimplifyInfo};
+ use datafusion_expr::type_coercion::functions::fields_with_udf;
+ use datafusion_expr::{
+-    ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl,
+-    Signature,
++    AggregateUDF, ColumnarValue, Expr, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDF,
++    ScalarUDFImpl, Signature, WindowUDF,
+ };
++use datafusion_proto::bytes::Serializeable;
+ use return_type_args::{
+     FFI_ReturnFieldArgs, ForeignReturnFieldArgs, ForeignReturnFieldArgsOwned,
+ };
++use std::collections::HashSet;
++use std::sync::OnceLock;
+ 
+ use crate::arrow_wrappers::{WrappedArray, WrappedSchema};
+ use crate::util::{
+@@ -87,6 +93,23 @@
+         arg_types: RVec<WrappedSchema>,
+     ) -> FFIResult<RVec<WrappedSchema>>,
+ 
++    /// FFI equivalent to [`ScalarUDFImpl::simplify`].
++    ///
++    /// The argument `Expr`s cannot cross the C ABI directly, so they are passed
++    /// as datafusion-proto bytes (`encode_exprs`); the provider deserializes
++    /// them, calls the underlying [`ScalarUDF::simplify`], and returns the
++    /// result (a `Simplified` expression or `Original`) encoded the same way
++    /// (`encode_simplify_result`). This lets a foreign UDF rewrite itself
++    /// during the `SimplifyExpressions` optimizer pass, which runs for every
++    /// plan shape (including recursive CTEs and DML) — see
++    /// <https://github.com/alxmrs/xarray-sql/issues/197>.
++    ///
++    /// Note: `SimplifyInfo` is not forwarded; the provider is given a
++    /// schema-less [`SimplifyContext`]. UDFs whose `simplify` needs schema or
++    /// execution-props information are not supported across FFI yet.
++    pub simplify:
++        unsafe extern "C" fn(udf: &Self, args: RVec<u8>) -> FFIResult<RVec<u8>>,
++
+     /// Used to create a clone on the provider of the udf. This should
+     /// only need to be called by the receiver of the udf.
+     pub clone: unsafe extern "C" fn(udf: &Self) -> Self,
+@@ -153,6 +176,141 @@
+     rresult!(vec_datatype_to_rvec_wrapped(&return_types))
+ }
+ 
++// ---------------------------------------------------------------------------
++// simplify forwarding (see the `simplify` field on `FFI_ScalarUDF`)
++//
++// `Expr`s cannot cross the C ABI as Rust values, so they travel as
++// datafusion-proto bytes. Resolving a deserialized `Expr` that references
++// built-in scalar functions (e.g. `sin`, `power`) needs a `FunctionRegistry`
++// populated with those functions, on *both* sides of the boundary; both the
++// provider (this wrapper) and the consumer (`ForeignScalarUDF::simplify`) build
++// one from datafusion's default functions.
++// ---------------------------------------------------------------------------
++
++/// A minimal [`FunctionRegistry`] holding datafusion's default scalar
++/// functions, used only to resolve function names while deserializing `Expr`s
++/// that cross the FFI boundary.
++struct DefaultFunctionRegistry {
++    udfs: std::collections::HashMap<String, Arc<ScalarUDF>>,
++}
++
++impl DefaultFunctionRegistry {
++    fn new() -> Self {
++        let udfs = datafusion_functions::all_default_functions()
++            .into_iter()
++            .map(|f| (f.name().to_string(), f))
++            .collect();
++        Self { udfs }
++    }
++}
++
++impl FunctionRegistry for DefaultFunctionRegistry {
++    fn udfs(&self) -> HashSet<String> {
++        self.udfs.keys().cloned().collect()
++    }
++    fn udafs(&self) -> HashSet<String> {
++        HashSet::new()
++    }
++    fn udwfs(&self) -> HashSet<String> {
++        HashSet::new()
++    }
++    fn udf(&self, name: &str) -> Result<Arc<ScalarUDF>> {
++        self.udfs
++            .get(name)
++            .cloned()
++            .ok_or_else(|| DataFusionError::Plan(format!("Function '{name}' not found")))
++    }
++    fn udaf(&self, name: &str) -> Result<Arc<AggregateUDF>> {
++        Err(DataFusionError::Plan(format!(
++            "Aggregate '{name}' not available across the FFI simplify boundary"
++        )))
++    }
++    fn udwf(&self, name: &str) -> Result<Arc<WindowUDF>> {
++        Err(DataFusionError::Plan(format!(
++            "Window function '{name}' not available across the FFI simplify boundary"
++        )))
++    }
++    fn expr_planners(&self) -> Vec<Arc<dyn datafusion_expr::planner::ExprPlanner>> {
++        Vec::new()
++    }
++}
++
++fn default_registry() -> &'static DefaultFunctionRegistry {
++    static REGISTRY: OnceLock<DefaultFunctionRegistry> = OnceLock::new();
++    REGISTRY.get_or_init(DefaultFunctionRegistry::new)
++}
++
++/// Encode a list of `Expr`s as length-prefixed datafusion-proto blobs:
++/// `count:u32` then, per expr, `len:u32` + bytes.
++pub(crate) fn encode_exprs(exprs: &[Expr]) -> Result<Vec<u8>> {
++    let mut out = Vec::new();
++    out.extend_from_slice(&(exprs.len() as u32).to_le_bytes());
++    for expr in exprs {
++        let bytes = expr.to_bytes()?;
++        out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
++        out.extend_from_slice(&bytes);
++    }
++    Ok(out)
++}
++
++fn read_u32(buf: &[u8], pos: &mut usize) -> Result<u32> {
++    let end = *pos + 4;
++    let slice = buf
++        .get(*pos..end)
++        .ok_or_else(|| DataFusionError::Internal("truncated FFI expr buffer".into()))?;
++    *pos = end;
++    Ok(u32::from_le_bytes(slice.try_into().unwrap()))
++}
++
++/// Inverse of [`encode_exprs`].
++pub(crate) fn decode_exprs(
++    buf: &[u8],
++    registry: &dyn FunctionRegistry,
++) -> Result<Vec<Expr>> {
++    let mut pos = 0usize;
++    let count = read_u32(buf, &mut pos)? as usize;
++    let mut exprs = Vec::with_capacity(count);
++    for _ in 0..count {
++        let len = read_u32(buf, &mut pos)? as usize;
++        let end = pos + len;
++        let slice = buf
++            .get(pos..end)
++            .ok_or_else(|| DataFusionError::Internal("truncated FFI expr buffer".into()))?;
++        exprs.push(Expr::from_bytes_with_registry(slice, registry)?);
++        pos = end;
++    }
++    Ok(exprs)
++}
++
++/// Encode an [`ExprSimplifyResult`]: tag byte `1` + the simplified expr's
++/// bytes, or tag byte `0` for `Original` (the consumer keeps its own args).
++fn encode_simplify_result(result: &ExprSimplifyResult) -> Result<Vec<u8>> {
++    match result {
++        ExprSimplifyResult::Simplified(expr) => {
++            let mut out = vec![1u8];
++            out.extend_from_slice(&expr.to_bytes()?);
++            Ok(out)
++        }
++        ExprSimplifyResult::Original(_) => Ok(vec![0u8]),
++    }
++}
++
++unsafe extern "C" fn simplify_fn_wrapper(
++    udf: &FFI_ScalarUDF,
++    args: RVec<u8>,
++) -> FFIResult<RVec<u8>> {
++    let registry = default_registry();
++    let exprs = rresult_return!(decode_exprs(args.as_slice(), registry));
++
++    // SimplifyInfo is not forwarded across FFI; give the UDF a schema-less
++    // context. UDFs that consult schema/execution-props will not see them.
++    let props = ExecutionProps::new();
++    let info = SimplifyContext::new(&props);
++
++    let result = rresult_return!(udf.inner().simplify(exprs, &info));
++    rresult!(encode_simplify_result(&result).map(RVec::from))
++}
++
+ unsafe extern "C" fn invoke_with_args_fn_wrapper(
+     udf: &FFI_ScalarUDF,
+     args: RVec<WrappedArray>,
+@@ -247,6 +405,7 @@
+             invoke_with_args: invoke_with_args_fn_wrapper,
+             return_field_from_args: return_field_from_args_fn_wrapper,
+             coerce_types: coerce_types_fn_wrapper,
++            simplify: simplify_fn_wrapper,
+             clone: clone_fn_wrapper,
+             release: release_fn_wrapper,
+             private_data: Box::into_raw(private_data) as *mut c_void,
+@@ -428,6 +587,28 @@
+             Ok(rvec_wrapped_to_vec_datatype(&result_types)?)
+         }
+     }
++
++    fn simplify(
++        &self,
++        args: Vec<Expr>,
++        _info: &dyn SimplifyInfo,
++    ) -> Result<ExprSimplifyResult> {
++        let encoded = encode_exprs(&args)?;
++        let result = unsafe { (self.udf.simplify)(&self.udf, encoded.into()) };
++        let result_bytes = df_result!(result)?;
++
++        // Tag byte: 1 => Simplified(expr), 0 => Original (keep our own args).
++        match result_bytes.first() {
++            Some(1) => {
++                let expr = Expr::from_bytes_with_registry(
++                    &result_bytes[1..],
++                    default_registry(),
++                )?;
++                Ok(ExprSimplifyResult::Simplified(expr))
++            }
++            _ => Ok(ExprSimplifyResult::Original(args)),
++        }
++    }
+ }
+ 
+ #[cfg(test)]
+@@ -473,4 +654,70 @@
+ 
+         Ok(())
+     }
++
++    /// A UDF whose `simplify` rewrites `deriv(u)` to `cos(u)`. Both the input
++    /// arg (`sin(x)`) and the output (`cos(...)`) reference built-in functions,
++    /// so resolving them exercises the proto/registry round-trip on both sides.
++    #[derive(Debug, PartialEq, Eq, Hash)]
++    struct DerivUdf {
++        signature: Signature,
++    }
++
++    impl ScalarUDFImpl for DerivUdf {
++        fn as_any(&self) -> &dyn std::any::Any {
++            self
++        }
++        fn name(&self) -> &str {
++            "deriv"
++        }
++        fn signature(&self) -> &Signature {
++            &self.signature
++        }
++        fn return_type(&self, _: &[DataType]) -> Result<DataType> {
++            Ok(DataType::Float64)
++        }
++        fn simplify(
++            &self,
++            args: Vec<Expr>,
++            _info: &dyn SimplifyInfo,
++        ) -> Result<ExprSimplifyResult> {
++            Ok(ExprSimplifyResult::Simplified(
++                datafusion_functions::expr_fn::cos(args[0].clone()),
++            ))
++        }
++        fn invoke_with_args(&self, _: ScalarFunctionArgs) -> Result<ColumnarValue> {
++            internal_err!("deriv marker should have been simplified away")
++        }
++    }
++
++    #[test]
++    fn test_ffi_udf_simplify_forwarding() -> Result<()> {
++        use datafusion_expr::{Volatility, col};
++        use datafusion_functions::expr_fn::{cos, sin};
++
++        let udf = Arc::new(ScalarUDF::from(DerivUdf {
++            signature: Signature::any(1, Volatility::Immutable),
++        }));
++
++        // Force the foreign path so simplify travels through the FFI vtable
++        // rather than the local-bypass shortcut.
++        let mut ffi_udf = FFI_ScalarUDF::from(udf);
++        ffi_udf.library_marker_id = crate::mock_foreign_marker_id;
++        let foreign: Arc<dyn ScalarUDFImpl> = (&ffi_udf).into();
++        assert!(foreign.as_any().downcast_ref::<ForeignScalarUDF>().is_some());
++
++        let props = ExecutionProps::new();
++        let info = SimplifyContext::new(&props);
++        let result = foreign.simplify(vec![sin(col("x"))], &info)?;
++
++        match result {
++            ExprSimplifyResult::Simplified(expr) => {
++                assert_eq!(expr, cos(sin(col("x"))));
++            }
++            ExprSimplifyResult::Original(_) => {
++                panic!("expected the foreign UDF's simplify to fire across FFI")
++            }
++        }
++        Ok(())
++    }
+ }
