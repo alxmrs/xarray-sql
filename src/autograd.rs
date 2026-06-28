@@ -651,3 +651,180 @@ mod tests {
         assert_eq!(fwd, rev);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Proof of concept for issue #197: `simplify`-based in-planner rewrite
+//
+// This validates the central assumption behind making `grad()` a self-
+// rewriting UDF (Option 1 in #197): that `ScalarUDFImpl::simplify` fires
+// during optimization for *every* plan shape, including the recursive term of
+// a `RecursiveQuery` — the shape Substrait cannot carry, which is what blocks
+// `grad()` inside a fully-declarative training loop today.
+//
+// These tests use no FFI: in-process, both sides share one DataFusion, so a
+// UDF can carry `simplify` directly. The FFI plumbing (forwarding `simplify`
+// across the C ABI) is the *next* step; this only answers "does simplify run
+// where we need it to?". The grad marker's `invoke` errors, so a query that
+// returns a correct answer proves `simplify` rewrote it away before execution.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod simplify_poc {
+    use std::sync::Arc;
+
+    use datafusion::arrow::array::{ArrayRef, Float64Array};
+    use datafusion::arrow::datatypes::{Field, Schema};
+    use datafusion::arrow::record_batch::RecordBatch;
+    use datafusion::datasource::MemTable;
+    use datafusion::logical_expr::simplify::{ExprSimplifyResult, SimplifyInfo};
+    use datafusion::prelude::SessionContext;
+
+    use super::*;
+
+    /// A `grad(expr, column)` UDF that rewrites itself during the optimizer's
+    /// `SimplifyExpressions` pass, rather than via the Substrait plan round-trip.
+    ///
+    /// This is the shape the FFI fork in #197 would expose: identical to
+    /// [`MarkerUdf`] except it implements `simplify` to differentiate its
+    /// argument. `invoke_with_args` deliberately errors so any code path that
+    /// reaches execution without simplifying is caught loudly.
+    #[derive(Debug, PartialEq, Eq, Hash)]
+    struct SimplifyingGrad {
+        signature: Signature,
+    }
+
+    impl SimplifyingGrad {
+        fn new() -> Self {
+            Self {
+                signature: Signature::any(2, Volatility::Immutable),
+            }
+        }
+    }
+
+    impl ScalarUDFImpl for SimplifyingGrad {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn name(&self) -> &str {
+            "grad"
+        }
+        fn signature(&self) -> &Signature {
+            &self.signature
+        }
+        fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+            Ok(DataType::Float64)
+        }
+
+        /// The whole point: differentiate the call away during optimization.
+        fn simplify(
+            &self,
+            args: Vec<Expr>,
+            _info: &dyn SimplifyInfo,
+        ) -> Result<ExprSimplifyResult> {
+            Ok(ExprSimplifyResult::Simplified(rewrite_grad(&args)?))
+        }
+
+        fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+            Err(DataFusionError::Execution(
+                "grad() reached execution: simplify did NOT fire for this plan shape".to_string(),
+            ))
+        }
+    }
+
+    /// Build a context with the self-simplifying `grad` registered and a table
+    /// `d(x, y)` of points exactly on the line `y = 2x - 1`.
+    fn ctx_with_line() -> SessionContext {
+        let ctx = SessionContext::new();
+        ctx.register_udf(ScalarUDF::from(SimplifyingGrad::new()));
+
+        let n = 32usize;
+        let x: Vec<f64> = (0..n).map(|i| i as f64 / n as f64).collect();
+        let y: Vec<f64> = x.iter().map(|xi| 2.0 * xi - 1.0).collect();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Float64Array::from(x)) as ArrayRef,
+                Arc::new(Float64Array::from(y)) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let table = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+        ctx.register_table("d", Arc::new(table)).unwrap();
+        ctx
+    }
+
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(fut)
+    }
+
+    /// Read column `name` from a single-row batch result as f64.
+    fn scalar(batches: &[RecordBatch], name: &str) -> f64 {
+        let batch = batches.iter().find(|b| b.num_rows() > 0).unwrap();
+        let idx = batch.schema().index_of(name).unwrap();
+        batch
+            .column(idx)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .value(0)
+    }
+
+    #[test]
+    fn simplify_fires_in_plain_select() {
+        // Baseline: confirm the simplify path rewrites grad() in an ordinary
+        // query at all. d/dx (x*x) summed = sum(2x).
+        let ctx = ctx_with_line();
+        let batches = block_on(async {
+            ctx.sql("SELECT SUM(grad(x * x, x)) AS s FROM d")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap()
+        });
+        let expected: f64 = {
+            let n = 32usize;
+            (0..n).map(|i| 2.0 * (i as f64 / n as f64)).sum()
+        };
+        assert!((scalar(&batches, "s") - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn simplify_fires_inside_recursive_cte() {
+        // The load-bearing test for #197: grad() *inside* the recursive term of
+        // a RecursiveQuery — the plan shape Substrait rejects. If simplify did
+        // not run here, grad's invoke would error and this query would fail.
+        //
+        // Fit y = a*x + b by gradient descent on MSE, the entire loop as one
+        // recursive CTE with grad in the update rule. The data lies exactly on
+        // y = 2x - 1, so the optimum is a = 2, b = -1.
+        let ctx = ctx_with_line();
+        let sql = "
+            WITH RECURSIVE params(step, a, b) AS (
+              SELECT 0 AS step,
+                     CAST(0.0 AS DOUBLE) AS a,
+                     CAST(0.0 AS DOUBLE) AS b
+              UNION ALL
+              SELECT params.step + 1 AS step,
+                     params.a - 0.5 * AVG(grad((y - (a * x + b)) * (y - (a * x + b)), a)) AS a,
+                     params.b - 0.5 * AVG(grad((y - (a * x + b)) * (y - (a * x + b)), b)) AS b
+              FROM params CROSS JOIN d
+              WHERE params.step < 400
+              GROUP BY params.step, params.a, params.b
+            )
+            SELECT a, b FROM params ORDER BY step DESC LIMIT 1
+        ";
+        let batches = block_on(async { ctx.sql(sql).await.unwrap().collect().await.unwrap() });
+        let a = scalar(&batches, "a");
+        let b = scalar(&batches, "b");
+        assert!((a - 2.0).abs() < 0.02, "a = {a}, expected ~2.0");
+        assert!((b + 1.0).abs() < 0.02, "b = {b}, expected ~-1.0");
+    }
+}
