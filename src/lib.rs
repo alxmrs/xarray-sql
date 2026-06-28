@@ -62,7 +62,7 @@ use datafusion::datasource::TableProvider;
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::expr::InList;
 use datafusion::logical_expr::{
-    BinaryExpr, Expr, Operator, ScalarUDF, TableProviderFilterPushDown, TableType,
+    BinaryExpr, Expr, Operator, TableProviderFilterPushDown, TableType,
 };
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream;
@@ -1026,7 +1026,8 @@ fn grad_rewrite<'py>(
     // marker UDF (so the consumer can resolve the function) and an empty table
     // per referenced name (so the consumer can resolve table scans).
     let ctx = SessionContext::new();
-    ctx.register_udf(ScalarUDF::from(autograd::GradMarker::new()));
+    ctx.register_udf(autograd::grad_marker());
+    ctx.register_udf(autograd::jacobian_marker());
 
     for (name, schema_obj) in &tables {
         let schema = Schema::from_pyarrow_bound(schema_obj).map_err(|e| {
