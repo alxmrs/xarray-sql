@@ -828,3 +828,88 @@ mod simplify_poc {
         assert!((b + 1.0).abs() < 0.02, "b = {b}, expected ~-1.0");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Proof of concept for issue #197: the `Expr`-across-the-C-ABI representation
+//
+// Option 1 in #197 forwards `simplify` to a foreign (FFI) UDF, but `simplify`'s
+// argument `Expr`s cannot cross the C ABI as Rust types. The plan is to ship
+// them as datafusion-proto bytes: the host (datafusion-python) serializes the
+// `grad(...)` args, our cdylib deserializes them, differentiates, and serializes
+// the derivative back. Both sides are DataFusion 52, so the proto encoding
+// matches — the same by-name compatibility that made the Substrait bridge work.
+//
+// These tests prove the round-trip end to end *within one build*: a built-in-
+// function `Expr` survives `to_bytes`/`from_bytes` and the deserialized form
+// differentiates to exactly the same derivative as the original. That is the
+// real technical risk; the cross-build half is already evidenced by the working
+// Substrait bridge. No fork needed to run this.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod proto_abi_poc {
+    use datafusion::execution::FunctionRegistry;
+    use datafusion::logical_expr::col;
+    use datafusion::prelude::SessionContext;
+    use datafusion_proto::bytes::Serializeable;
+
+    use super::*;
+
+    /// Round-trip a single expression through datafusion-proto bytes, resolving
+    /// any function references against a context with the default functions.
+    fn round_trip(expr: &Expr, registry: &dyn FunctionRegistry) -> Expr {
+        let bytes = expr.to_bytes().expect("serialize Expr to proto bytes");
+        Expr::from_bytes_with_registry(&bytes, registry).expect("deserialize Expr from proto bytes")
+    }
+
+    #[test]
+    fn builtin_function_expr_survives_proto_round_trip() {
+        // The args of a typical grad() call: a composite built-in-function
+        // expression and the bare column to differentiate with respect to.
+        let ctx = SessionContext::new();
+        let registry = ctx.state();
+
+        let f = binary(expr_fn::sin(col("x")), Operator::Multiply, col("x"));
+        let wrt = col("x");
+
+        let f2 = round_trip(&f, &registry);
+        let wrt2 = round_trip(&wrt, &registry);
+
+        // Structurally identical after the round trip.
+        assert_eq!(f, f2);
+        assert_eq!(wrt, wrt2);
+    }
+
+    #[test]
+    fn deserialized_args_differentiate_identically() {
+        // The end-to-end ABI claim: feeding the *deserialized* args to the same
+        // `rewrite_grad` the cdylib would call yields exactly the derivative we
+        // get from the originals. d/dx (sin(x)*x) = cos(x)*x + sin(x).
+        let ctx = SessionContext::new();
+        let registry = ctx.state();
+
+        let f = binary(expr_fn::sin(col("x")), Operator::Multiply, col("x"));
+        let wrt = col("x");
+        let original_args = [f.clone(), wrt.clone()];
+        let round_tripped = [round_trip(&f, &registry), round_trip(&wrt, &registry)];
+
+        let want = rewrite_grad(&original_args).unwrap();
+        let got = rewrite_grad(&round_tripped).unwrap();
+
+        assert_eq!(want, got);
+        assert_eq!(got.to_string(), "cos(x) * x + sin(x)");
+    }
+
+    #[test]
+    fn derivative_expr_survives_round_trip_back() {
+        // The reverse direction: the cdylib serializes the *result* derivative
+        // back to the host. A derivative containing power()/built-ins must
+        // round-trip too. d/dx power(x, 3) -> 3 * power(x, 3 - 1).
+        let ctx = SessionContext::new();
+        let registry = ctx.state();
+
+        let derivative = rewrite_grad(&[expr_fn::power(col("x"), lit(3.0_f64)), col("x")]).unwrap();
+        let back = round_trip(&derivative, &registry);
+        assert_eq!(derivative, back);
+    }
+}

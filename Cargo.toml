@@ -23,6 +23,7 @@ async-stream = "0.3"
 async-trait = "0.1"
 datafusion = { version = "52.0.0" }
 datafusion-ffi = { version = "52.0.0" }
+datafusion-proto = { version = "52.0.0" }
 datafusion-substrait = { version = "52.0.0" }
 prost = "0.14"
 futures = { version = "0.3" }
