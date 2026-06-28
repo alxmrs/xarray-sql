@@ -55,8 +55,8 @@ use arrow::pyarrow::FromPyArrow;
 use async_stream::try_stream;
 use async_trait::async_trait;
 use datafusion::catalog::streaming::StreamingTable;
-use datafusion::catalog::Session;
-use datafusion::common::{DataFusionError, Result as DFResult, ScalarValue};
+use datafusion::catalog::{MemorySchemaProvider, Session};
+use datafusion::common::{DataFusionError, Result as DFResult, ScalarValue, TableReference};
 use datafusion::datasource::empty::EmptyTable;
 use datafusion::datasource::TableProvider;
 use datafusion::execution::TaskContext;
@@ -993,6 +993,22 @@ impl LazyArrowStreamTable {
 // Autograd: Substrait-level grad() rewrite
 // ============================================================================
 
+/// Ensure a schema (namespace) exists in the context's catalog, creating an
+/// empty in-memory one if needed. Used so the rewrite context can register
+/// schema-qualified tables (e.g. `era5.surface`) that mixed-dimension datasets
+/// produce.
+fn ensure_schema(ctx: &SessionContext, catalog: Option<&str>, schema: &str) -> DFResult<()> {
+    // A bare TableReference has no catalog; fall back to DataFusion's default.
+    let catalog_name = catalog.unwrap_or("datafusion");
+    let catalog = ctx
+        .catalog(catalog_name)
+        .ok_or_else(|| DataFusionError::Plan(format!("catalog '{catalog_name}' not found")))?;
+    if catalog.schema(schema).is_none() {
+        catalog.register_schema(schema, Arc::new(MemorySchemaProvider::new()))?;
+    }
+    Ok(())
+}
+
 /// Rewrite `grad(expr, column)` calls in a Substrait plan into their symbolic
 /// derivatives.
 ///
@@ -1037,7 +1053,20 @@ fn grad_rewrite<'py>(
             ))
         })?;
         let provider = Arc::new(EmptyTable::new(Arc::new(schema)));
-        ctx.register_table(name.as_str(), provider).map_err(|e| {
+
+        // Schema-qualified names (e.g. "era5.surface", from a mixed-dimension
+        // dataset) need their namespace to exist before the table can be
+        // registered into this throwaway context.
+        let table_ref = TableReference::from(name.as_str());
+        if let Some(schema_name) = table_ref.schema() {
+            ensure_schema(&ctx, table_ref.catalog(), schema_name).map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "grad_rewrite: failed to create schema for table '{name}': {e}"
+                ))
+            })?;
+        }
+
+        ctx.register_table(table_ref, provider).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!(
                 "grad_rewrite: failed to register table '{name}': {e}"
             ))
