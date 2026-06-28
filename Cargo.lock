@@ -3652,6 +3652,7 @@ dependencies = [
  "async-trait",
  "datafusion",
  "datafusion-ffi",
+ "datafusion-proto",
  "datafusion-substrait",
  "futures",
  "prost",
