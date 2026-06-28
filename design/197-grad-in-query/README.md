@@ -24,6 +24,9 @@ forward `name`, `signature`, `return_field_from_args`, `coerce_types`, and
   (`datafusion/ffi/src/udf/mod.rs`) that adds a `simplify` slot to the
   `FFI_ScalarUDF` vtable and forwards it. Generated against **datafusion-ffi
   52.2.0**.
+- `datafusion-54-migration.md` — this branch's Rust code is bumped to
+  **datafusion 54**; the file records the 52→54 API changes (incl. the deltas
+  the ffi patch needs when regenerated against 54).
 
 ## How the patch works
 

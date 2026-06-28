@@ -43,7 +43,6 @@
 
 mod autograd;
 
-use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fmt::Debug;
@@ -533,10 +532,6 @@ impl Debug for PrunableStreamingTable {
 
 #[async_trait]
 impl TableProvider for PrunableStreamingTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         Arc::clone(&self.schema)
     }
@@ -821,27 +816,24 @@ fn ffi_logical_codec_from_pycapsule(
         session
     };
 
-    let capsule = capsule.downcast::<PyCapsule>().map_err(|e| {
+    let capsule = capsule.cast::<PyCapsule>().map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!(
             "session did not produce a PyCapsule for the logical extension codec: {e}"
         ))
     })?;
 
-    let capsule_name = capsule.name()?.ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(
-            "datafusion_logical_extension_codec PyCapsule has no name set",
-        )
+    // pyo3 0.28: validate the capsule name with `pointer_checked`, which both
+    // checks the name matches and returns the payload pointer.
+    const CODEC_NAME: &std::ffi::CStr = c"datafusion_logical_extension_codec";
+    let ptr = capsule.pointer_checked(Some(CODEC_NAME)).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "expected capsule name 'datafusion_logical_extension_codec': {e}"
+        ))
     })?;
-    let capsule_name = capsule_name.to_str()?;
-    if capsule_name != "datafusion_logical_extension_codec" {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "expected capsule name 'datafusion_logical_extension_codec', got '{capsule_name}'"
-        )));
-    }
 
     // SAFETY: The capsule was produced by datafusion-python and contains a
     // valid FFI_LogicalExtensionCodec (#[repr(C)] StableAbi struct).
-    let codec = unsafe { capsule.reference::<FFI_LogicalExtensionCodec>() };
+    let codec = unsafe { &*(ptr.as_ptr() as *const FFI_LogicalExtensionCodec) };
     Ok(codec.clone())
 }
 

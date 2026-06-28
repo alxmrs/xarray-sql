@@ -51,7 +51,6 @@
 
 #![allow(dead_code)]
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::f64::consts::{LN_10, LN_2};
 
@@ -213,7 +212,11 @@ fn linearize(expr: &Expr, leaf: &Leaf) -> Result<Expr> {
         // A numeric cast is (locally) linear: tangent of cast(u) = cast(du).
         Expr::Cast(c) => {
             let du = linearize(&c.expr, leaf)?;
-            Ok(Expr::Cast(Cast::new(Box::new(du), c.data_type.clone())))
+            // DataFusion 54 stores the target type as a `FieldRef`.
+            Ok(Expr::Cast(Cast::new(
+                Box::new(du),
+                c.field.data_type().clone(),
+            )))
         }
 
         // tangent of -u = -(du).
@@ -395,10 +398,6 @@ impl MarkerUdf {
 }
 
 impl ScalarUDFImpl for MarkerUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         &self.name
     }
@@ -676,7 +675,7 @@ mod simplify_poc {
     use datafusion::arrow::datatypes::{Field, Schema};
     use datafusion::arrow::record_batch::RecordBatch;
     use datafusion::datasource::MemTable;
-    use datafusion::logical_expr::simplify::{ExprSimplifyResult, SimplifyInfo};
+    use datafusion::logical_expr::simplify::{ExprSimplifyResult, SimplifyContext};
     use datafusion::prelude::SessionContext;
 
     use super::*;
@@ -702,9 +701,6 @@ mod simplify_poc {
     }
 
     impl ScalarUDFImpl for SimplifyingGrad {
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
         fn name(&self) -> &str {
             "grad"
         }
@@ -716,11 +712,7 @@ mod simplify_poc {
         }
 
         /// The whole point: differentiate the call away during optimization.
-        fn simplify(
-            &self,
-            args: Vec<Expr>,
-            _info: &dyn SimplifyInfo,
-        ) -> Result<ExprSimplifyResult> {
+        fn simplify(&self, args: Vec<Expr>, _info: &SimplifyContext) -> Result<ExprSimplifyResult> {
             Ok(ExprSimplifyResult::Simplified(rewrite_grad(&args)?))
         }
 
@@ -848,7 +840,7 @@ mod simplify_poc {
 
 #[cfg(test)]
 mod proto_abi_poc {
-    use datafusion::execution::FunctionRegistry;
+    use datafusion::execution::TaskContext;
     use datafusion::logical_expr::col;
     use datafusion::prelude::SessionContext;
     use datafusion_proto::bytes::Serializeable;
@@ -857,23 +849,25 @@ mod proto_abi_poc {
 
     /// Round-trip a single expression through datafusion-proto bytes, resolving
     /// any function references against a context with the default functions.
-    fn round_trip(expr: &Expr, registry: &dyn FunctionRegistry) -> Expr {
+    ///
+    /// DataFusion 54 resolves functions during deserialization via a
+    /// [`TaskContext`] (was `from_bytes_with_registry` in 52).
+    fn round_trip(expr: &Expr, ctx: &TaskContext) -> Expr {
         let bytes = expr.to_bytes().expect("serialize Expr to proto bytes");
-        Expr::from_bytes_with_registry(&bytes, registry).expect("deserialize Expr from proto bytes")
+        Expr::from_bytes_with_ctx(&bytes, ctx).expect("deserialize Expr from proto bytes")
     }
 
     #[test]
     fn builtin_function_expr_survives_proto_round_trip() {
         // The args of a typical grad() call: a composite built-in-function
         // expression and the bare column to differentiate with respect to.
-        let ctx = SessionContext::new();
-        let registry = ctx.state();
+        let ctx = SessionContext::new().task_ctx();
 
         let f = binary(expr_fn::sin(col("x")), Operator::Multiply, col("x"));
         let wrt = col("x");
 
-        let f2 = round_trip(&f, &registry);
-        let wrt2 = round_trip(&wrt, &registry);
+        let f2 = round_trip(&f, &ctx);
+        let wrt2 = round_trip(&wrt, &ctx);
 
         // Structurally identical after the round trip.
         assert_eq!(f, f2);
@@ -885,13 +879,12 @@ mod proto_abi_poc {
         // The end-to-end ABI claim: feeding the *deserialized* args to the same
         // `rewrite_grad` the cdylib would call yields exactly the derivative we
         // get from the originals. d/dx (sin(x)*x) = cos(x)*x + sin(x).
-        let ctx = SessionContext::new();
-        let registry = ctx.state();
+        let ctx = SessionContext::new().task_ctx();
 
         let f = binary(expr_fn::sin(col("x")), Operator::Multiply, col("x"));
         let wrt = col("x");
         let original_args = [f.clone(), wrt.clone()];
-        let round_tripped = [round_trip(&f, &registry), round_trip(&wrt, &registry)];
+        let round_tripped = [round_trip(&f, &ctx), round_trip(&wrt, &ctx)];
 
         let want = rewrite_grad(&original_args).unwrap();
         let got = rewrite_grad(&round_tripped).unwrap();
@@ -905,11 +898,10 @@ mod proto_abi_poc {
         // The reverse direction: the cdylib serializes the *result* derivative
         // back to the host. A derivative containing power()/built-ins must
         // round-trip too. d/dx power(x, 3) -> 3 * power(x, 3 - 1).
-        let ctx = SessionContext::new();
-        let registry = ctx.state();
+        let ctx = SessionContext::new().task_ctx();
 
         let derivative = rewrite_grad(&[expr_fn::power(col("x"), lit(3.0_f64)), col("x")]).unwrap();
-        let back = round_trip(&derivative, &registry);
+        let back = round_trip(&derivative, &ctx);
         assert_eq!(derivative, back);
     }
 }

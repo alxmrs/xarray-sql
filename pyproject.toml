@@ -31,7 +31,12 @@ classifiers = [
 ]
 dependencies = [
     "dask>=2024.8.0",
-    "datafusion==52.0.0", # This needs to match the cargo datafusion version!!
+    # This needs to match the cargo datafusion version!! On this #197 FFI branch
+    # the Rust side is on datafusion 54, but PyPI has no datafusion-python 54
+    # yet — the matching Python wheel must be built from the fork (see
+    # design/197-grad-in-query/README.md). Until then the Python test job can't
+    # install a matching wheel; `cargo test` is the green signal on this branch.
+    "datafusion==54.0.0", # see note above (fork-built wheel required)
     "xarray>=2024.7.0",
 ]
 
