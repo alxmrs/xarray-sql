@@ -91,7 +91,9 @@ jobs:
           manylinux: 2_28
           rustup-components: rust-std rustfmt
           sccache: 'true'
-          args: --release --strip --out dist -i python3.10 python3.11 python3.12 python3.13
+          # abi3 (see Cargo.toml) produces one wheel for all CPython >= 3.10,
+          # so a single interpreter is enough to build it.
+          args: --release --strip --out dist -i python3.10
 
       - uses: actions/upload-artifact@v6
         with:
@@ -113,7 +115,9 @@ jobs:
           manylinux: 2_28
           rustup-components: rust-std rustfmt
           sccache: 'true'
-          args: --release --strip --out dist -i python3.10 python3.11 python3.12 python3.13
+          # abi3 (see Cargo.toml) produces one wheel for all CPython >= 3.10,
+          # so a single interpreter is enough to build it.
+          args: --release --strip --out dist -i python3.10
 
       - uses: actions/upload-artifact@v6
         with:
@@ -191,6 +195,10 @@ jobs:
   upload-to-pypi:
     needs: verify-built-dist
     runs-on: ubuntu-latest
+    # Only publish for real releases. `workflow_dispatch` runs build and
+    # verify the wheels (uploaded as artifacts) without pushing to PyPI, so
+    # the workflow can be exercised manually without cutting a release.
+    if: github.event_name == 'release'
     steps:
       - uses: actions/download-artifact@v6
         with:
