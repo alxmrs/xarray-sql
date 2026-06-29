@@ -1,0 +1,18 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 0f3236e..6bd9521 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -72,3 +72,13 @@ codegen-units = 2
+ # We cannot publish to crates.io with any patches in the below section. Developers
+ # must remove any entries in this section before creating a release candidate.
+ [patch.crates-io]
++datafusion = { git = "https://github.com/alxmrs/datafusion", branch = "claude/xarray-sql-grad-patch-0hdbqm" }
++datafusion-substrait = { git = "https://github.com/alxmrs/datafusion", branch = "claude/xarray-sql-grad-patch-0hdbqm" }
++datafusion-proto = { git = "https://github.com/alxmrs/datafusion", branch = "claude/xarray-sql-grad-patch-0hdbqm" }
++datafusion-ffi = { git = "https://github.com/alxmrs/datafusion", branch = "claude/xarray-sql-grad-patch-0hdbqm" }
++datafusion-catalog = { git = "https://github.com/alxmrs/datafusion", branch = "claude/xarray-sql-grad-patch-0hdbqm" }
++datafusion-common = { git = "https://github.com/alxmrs/datafusion", branch = "claude/xarray-sql-grad-patch-0hdbqm" }
++datafusion-functions-aggregate = { git = "https://github.com/alxmrs/datafusion", branch = "claude/xarray-sql-grad-patch-0hdbqm" }
++datafusion-functions-window = { git = "https://github.com/alxmrs/datafusion", branch = "claude/xarray-sql-grad-patch-0hdbqm" }
++datafusion-spark = { git = "https://github.com/alxmrs/datafusion", branch = "claude/xarray-sql-grad-patch-0hdbqm" }
++datafusion-expr = { git = "https://github.com/alxmrs/datafusion", branch = "claude/xarray-sql-grad-patch-0hdbqm" }
