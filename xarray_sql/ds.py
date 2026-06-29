@@ -432,33 +432,115 @@ def _materialize(
     return xr.Dataset(data_vars=data_vars, coords=coords_arg)
 
 
+_PURE_SCAN_NODES = {"Projection", "Sort", "TableScan", "SubqueryAlias"}
+
+
+def _unfiltered_scan_table(inner_df: Any) -> str | None:
+    """Return the scanned table name iff the query is a pure unfiltered scan.
+
+    A pure scan only contains ``Projection``, ``Sort``, ``TableScan``,
+    ``SubqueryAlias`` nodes and exactly one ``TableScan``. Anything else
+    (``Filter``, ``Aggregate``, ``Join``, ``Union``, ``Limit``, multi-table
+    joins, ...) returns ``None`` so the caller falls back to per-dim
+    discovery. The returned name is the registered table the caller can
+    look up to source coord arrays from.
+    """
+    try:
+        lp = inner_df.logical_plan()
+    except Exception:
+        return None
+    table_name: str | None = None
+    stack = [lp]
+    while stack:
+        node = stack.pop()
+        try:
+            variant = node.to_variant()
+        except Exception:
+            return None
+        cls = type(variant).__name__
+        if cls not in _PURE_SCAN_NODES:
+            return None
+        if cls == "TableScan":
+            try:
+                this = variant.table_name()
+            except (AttributeError, TypeError):
+                return None
+            if not isinstance(this, str):
+                return None
+            if table_name is not None and table_name != this:
+                return None  # multi-table scan; not a single source
+            table_name = this
+        stack.extend(node.inputs())
+    return table_name
+
+
+def _maybe_template_coords(
+    templates: dict[str, xr.Dataset] | None,
+    dimension_columns: list[str],
+    inner_df: Any,
+) -> dict[str, np.ndarray] | None:
+    """Use the scanned table's registered coord arrays directly when safe.
+
+    Returns coord arrays sourced from the registered Dataset for the
+    scanned table iff the query is an unfiltered scan over that single
+    table and the registered Dataset carries all requested dims. Returns
+    ``None`` otherwise so the caller falls back to per-dim discovery.
+    Skipping discovery avoids one full plan execution per dim and
+    preserves the source's coordinate order (xarray-sql#171).
+
+    Coord values come from the **scanned** registered Dataset, not from
+    any user-supplied ``template=`` (which is for metadata recovery
+    only). That keeps the fast path correct when a user with multiple
+    registered Datasets passes a metadata template that differs from
+    the query's source.
+    """
+    if not templates:
+        return None
+    table = _unfiltered_scan_table(inner_df)
+    if table is None or table not in templates:
+        return None
+    source = templates[table]
+    if not all(d in source.coords for d in dimension_columns):
+        return None
+    return {d: np.asarray(source.coords[d].values) for d in dimension_columns}
+
+
 def _build_lazy_scan(
     inner_df: Any,
     dimension_columns: list[str],
     field_names: list[str],
     field_types: dict[str, Any],
+    templates: dict[str, xr.Dataset] | None = None,
 ) -> xr.Dataset:
     """Build a lazy Dataset whose data vars are :class:`SQLBackendArray`.
 
     Used when output chunking is requested: each data variable stays lazy and,
     once wrapped by ``Dataset.chunk``, every chunk reads its coordinate range via
-    a pushdown filter on first access. Coordinates are discovered per dim via
+    a pushdown filter on first access. Coordinates come either from the
+    scanned table's registered Dataset (fast path, for unfiltered scans -- see
+    :func:`_maybe_template_coords`) or from per-dim
     ``inner_df.select(col(d)).distinct().sort(...).execute_stream()``; the table
     provider projects to that single coordinate column and skips data variables,
     so discovery reads coordinate values only (no data-variable I/O).
     """
-    coord_arrays: dict[str, np.ndarray] = {}
-    for d in dimension_columns:
-        dim_only = (
-            inner_df.select(col(f'"{d}"')).distinct().sort(col(f'"{d}"').sort())
-        )
-        chunks = [b.to_pyarrow() for b in dim_only.execute_stream()]
-        if not chunks:
-            coord_arrays[d] = np.asarray([])
-            continue
-        coord_arrays[d] = np.concatenate(
-            [c.column(0).to_numpy(zero_copy_only=False) for c in chunks]
-        )
+    coord_arrays = _maybe_template_coords(
+        templates, dimension_columns, inner_df
+    )
+    if coord_arrays is None:
+        coord_arrays = {}
+        for d in dimension_columns:
+            dim_only = (
+                inner_df.select(col(f'"{d}"'))
+                .distinct()
+                .sort(col(f'"{d}"').sort())
+            )
+            chunks = [b.to_pyarrow() for b in dim_only.execute_stream()]
+            if not chunks:
+                coord_arrays[d] = np.asarray([])
+                continue
+            coord_arrays[d] = np.concatenate(
+                [c.column(0).to_numpy(zero_copy_only=False) for c in chunks]
+            )
     shape = tuple(len(coord_arrays[d]) for d in dimension_columns)
 
     data_vars: dict[str, xr.Variable] = {}
@@ -550,6 +632,7 @@ def _result_to_xarray(
     sparsity: Sparsity,
     fill_value: Any,
     chunks: Mapping[str, int] | str | None,
+    templates: dict[str, xr.Dataset] | None = None,
 ) -> xr.Dataset:
     """Reconstruct an ``xr.Dataset`` from a SQL result.
 
@@ -583,7 +666,11 @@ def _result_to_xarray(
         ds = _materialize(inner_df, dimension_columns, field_names, field_types)
     else:
         ds = _build_lazy_scan(
-            inner_df, dimension_columns, field_names, field_types
+            inner_df,
+            dimension_columns,
+            field_names,
+            field_types,
+            templates=templates,
         )
 
     if sparsity == "template":
@@ -730,6 +817,7 @@ class XarrayDataFrame:
             sparsity=sparsity,
             fill_value=fill_value,
             chunks=resolved_chunks,
+            templates=self._templates,
         )
 
     # ------------------------------------------------------------------

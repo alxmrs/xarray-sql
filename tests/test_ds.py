@@ -202,6 +202,110 @@ def test_order_by_direction_sets_dim_order(air_dataset_small):
     np.testing.assert_allclose(out["air_avg"].values, expected.values)
 
 
+def test_unfiltered_scan_skips_dim_discovery(air_dataset_small):
+    """``SELECT * FROM <registered>`` does no per-dim discovery scans.
+
+    The pre-fix :func:`_build_lazy_scan` ran one full source scan per dim
+    via ``inner_df.select(col(d)).distinct().sort(...)`` -- a single-column
+    projection per dim, multiplied across the dim count. With a registered
+    template and an unfiltered plan, :func:`_maybe_template_coords` returns
+    the template's coord arrays directly and the discovery loop is skipped
+    entirely. Verified by the iteration callback's projection list: no read
+    where the projection is a single dim column.
+    """
+    from xarray_sql.reader import read_xarray_table
+
+    reads: list = []
+    table = read_xarray_table(
+        air_dataset_small,
+        chunks={"time": 6},
+        _iteration_callback=lambda block, proj: reads.append(list(proj)),
+    )
+    ctx = XarrayContext()
+    ctx.register_table("air", table)
+    ctx._registered_datasets["air"] = air_dataset_small
+
+    reads.clear()
+    out = ctx.sql('SELECT * FROM "air"').to_dataset()
+    single_dim_reads = [
+        proj for proj in reads if set(proj) <= {"time", "lat", "lon"}
+    ]
+    assert not single_dim_reads, (
+        f"fast path should skip per-dim discovery scans, got "
+        f"{single_dim_reads!r}"
+    )
+    # The fast path must not break correctness on first access.
+    out.compute()  # safety: the Dataset still resolves
+
+
+def test_filtered_scan_still_uses_dim_discovery(air_dataset_small):
+    """A ``WHERE`` clause forbids the template-coord fast path.
+
+    With a filter the result's coord extent is a subset of the source, so
+    reusing template coords would silently widen the output. The dispatch
+    in :func:`_maybe_template_coords` falls back to per-dim discovery in
+    that case, which is observable as a positive read count on the source.
+    """
+    from xarray_sql.reader import read_xarray_table
+
+    reads: list = []
+    table = read_xarray_table(
+        air_dataset_small,
+        chunks={"time": 6},
+        _iteration_callback=lambda block, proj: reads.append(block),
+    )
+    ctx = XarrayContext()
+    ctx.register_table("air", table)
+    ctx._registered_datasets["air"] = air_dataset_small
+
+    reads.clear()
+    ctx.sql('SELECT * FROM "air" WHERE lat > 30').to_dataset()
+    assert reads, "filtered scan must hit the source to discover coord extent"
+
+
+def test_fast_path_uses_scanned_tables_coords_not_user_template(
+    air_dataset_small,
+):
+    """Fast path sources coord values from the scanned table, not ``template=``.
+
+    With multiple registered Datasets, a user may pass ``template=other``
+    for metadata recovery while the query scans a different registered
+    table. The coord values must come from the **scanned** table's
+    registered Dataset; using ``other``'s coords would silently widen the
+    output if their coord ranges differ.
+    """
+    other = air_dataset_small.isel(lat=slice(0, 5))
+    assert other.sizes["lat"] != air_dataset_small.sizes["lat"]
+    ctx = XarrayContext()
+    ctx.from_dataset("air", air_dataset_small, chunks={"time": 24})
+    ctx.from_dataset("other", other, chunks={"time": 24})
+    out = ctx.sql('SELECT * FROM "air"').to_dataset(
+        dims=["time", "lat", "lon"], template=other
+    )
+    # Scanned table is "air", so lat must match air's full lat axis.
+    np.testing.assert_array_equal(
+        out["lat"].values, air_dataset_small["lat"].values
+    )
+
+
+def test_round_trip_preserves_descending_lat_on_lazy_path(air_dataset_small):
+    """Lazy round-trip preserves source dim order (xarray-sql#171).
+
+    NCEP ``air_temperature`` ships descending lat (75.0 -> 15.0). The
+    discovery path's ``.distinct().sort()`` previously flipped lat to
+    ascending on the lazy result. The template-coord fast path returns the
+    source's coord arrays as-is, so the descending order survives.
+    """
+    ds = air_dataset_small
+    assert (np.diff(ds["lat"].values) < 0).all(), (
+        "test relies on a descending-lat fixture"
+    )
+    ctx = XarrayContext()
+    ctx.from_dataset("air", ds, chunks={"time": 24})
+    lazy = ctx.sql('SELECT * FROM "air"').to_dataset()
+    np.testing.assert_array_equal(lazy["lat"].values, ds["lat"].values)
+
+
 def test_chunks_argument_controls_partitioning(synthetic_dataset):
     """``chunks`` controls eager-vs-chunked and inherits the source grid.
 
