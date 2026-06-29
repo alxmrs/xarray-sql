@@ -18,7 +18,7 @@ exclude = [
 ]
 
 [dependencies]
-arrow = { version = "58.3.0", features = ["pyarrow"] }
+arrow = { version = "59.0.0", features = ["pyarrow"] }
 async-stream = "0.3"
 async-trait = "0.1"
 datafusion = { version = "54.0.0" }
@@ -38,3 +38,12 @@ pyo3-build-config = "0.28"
 [lib]
 name = "xarray_sql"
 crate-type = ["cdylib", "rlib"]
+
+# The FFI simplify-forwarding change (issue #197) lives in the alxmrs/datafusion
+# fork, pinned here as the third_party/datafusion submodule. Patch the whole
+# datafusion family to it so a single source resolves consistently.
+[patch.crates-io]
+datafusion = { path = "third_party/datafusion/datafusion/core" }
+datafusion-ffi = { path = "third_party/datafusion/datafusion/ffi" }
+datafusion-proto = { path = "third_party/datafusion/datafusion/proto" }
+datafusion-substrait = { path = "third_party/datafusion/datafusion/substrait" }

@@ -1,0 +1,5 @@
+[submodule "third_party/datafusion"]
+	path = third_party/datafusion
+	url = https://github.com/alxmrs/datafusion.git
+	branch = claude/xarray-sql-grad-patch-0hdbqm
+	shallow = true
