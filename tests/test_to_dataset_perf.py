@@ -1,9 +1,8 @@
-"""Opt-in peak-memory tests for the lazy SQL -> xarray round-trip.
+"""Peak-memory tests for the lazy SQL -> xarray round-trip.
 
-Asserts the lazy backend honors its contract: a single-slab access
+Asserts the lazy backend honors its contract: a single-chunk access
 peaks far below an eager whole-grid materialization, and a streaming
-aggregation does not balloon past the source size. Gated by the
-``integration`` marker; run with ``pytest -m integration``.
+aggregation does not balloon past the source size.
 """
 
 import gc
@@ -14,8 +13,6 @@ import pytest
 import xarray as xr
 
 from xarray_sql import XarrayContext
-
-pytestmark = pytest.mark.integration
 
 
 def _peak_mb(fn):
@@ -42,26 +39,26 @@ def air_source():
         pytest.skip(f"air_temperature tutorial dataset unavailable: {e}")
 
 
-def test_lazy_slab_peak_memory_is_bounded(air_source):
-    """``.sel(time=t0).load()`` materializes only the slab, not the cube.
+def test_lazy_chunk_peak_memory_is_bounded(air_source):
+    """``.sel(time=t0).load()`` materializes only one chunk, not the cube.
 
-    Reference observation: lazy slab peak is ~1.8 MB on a 31 MB
+    Reference observation: lazy chunk peak is ~1.8 MB on a 31 MB
     dense source. A regression that quietly buffers the whole result
-    would push past 10 MB. Eager `to_dataset(chunks=None)` is measured
-    too as a sanity floor for the gap: the eager path should be at
-    least an order of magnitude heavier than the lazy slab, otherwise
-    the lazy path isn't actually lazy.
+    would push past 10 MB. Eager ``to_dataset(chunks=None)`` is
+    measured too as a sanity floor for the gap: the eager path should
+    be at least an order of magnitude heavier than the lazy chunk,
+    otherwise the lazy path isn't actually lazy.
     """
     ctx = XarrayContext()
     ctx.from_dataset("air", air_source, chunks={"time": 24})
     t0 = air_source["time"].values[0]
 
     out = ctx.sql('SELECT * FROM "air"').to_dataset()
-    slab, slab_peak = _peak_mb(lambda: out["air"].sel(time=t0).load())
-    assert slab.size == air_source.sizes["lat"] * air_source.sizes["lon"]
-    assert slab_peak < 10.0, (
-        f"lazy single-slab access should stay under 10 MB on "
-        f"air_temperature, got {slab_peak:.2f} MB"
+    chunk, chunk_peak = _peak_mb(lambda: out["air"].sel(time=t0).load())
+    assert chunk.size == air_source.sizes["lat"] * air_source.sizes["lon"]
+    assert chunk_peak < 10.0, (
+        f"lazy single-chunk access should stay under 10 MB on "
+        f"air_temperature, got {chunk_peak:.2f} MB"
     )
 
     _, eager_peak = _peak_mb(
@@ -73,10 +70,10 @@ def test_lazy_slab_peak_memory_is_bounded(air_source):
         f"and the lazy assertion above no longer means anything. "
         f"Got {eager_peak:.1f} MB"
     )
-    assert eager_peak / max(slab_peak, 0.1) > 10.0, (
-        f"eager peak should be at least 10x the lazy slab peak; "
+    assert eager_peak / max(chunk_peak, 0.1) > 10.0, (
+        f"eager peak should be at least 10x the lazy chunk peak; "
         f"if it isn't, the lazy path isn't actually lazy. "
-        f"Got eager={eager_peak:.1f} MB, lazy={slab_peak:.2f} MB"
+        f"Got eager={eager_peak:.1f} MB, lazy={chunk_peak:.2f} MB"
     )
 
 
