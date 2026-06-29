@@ -91,7 +91,9 @@ jobs:
           manylinux: 2_28
           rustup-components: rust-std rustfmt
           sccache: 'true'
-          args: --release --strip --out dist -i python3.10 python3.11 python3.12 python3.13
+          # abi3 (see Cargo.toml) produces one wheel for all CPython >= 3.10,
+          # so a single interpreter is enough to build it.
+          args: --release --strip --out dist -i python3.10
 
       - uses: actions/upload-artifact@v6
         with:
@@ -113,7 +115,9 @@ jobs:
           manylinux: 2_28
           rustup-components: rust-std rustfmt
           sccache: 'true'
-          args: --release --strip --out dist -i python3.10 python3.11 python3.12 python3.13
+          # abi3 (see Cargo.toml) produces one wheel for all CPython >= 3.10,
+          # so a single interpreter is enough to build it.
+          args: --release --strip --out dist -i python3.10
 
       - uses: actions/upload-artifact@v6
         with:
