@@ -1,0 +1,228 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "xarray-sql",
+#   "xarray",
+#   "numpy",
+#   "scipy",
+#   "xee",
+#   "earthengine-api",
+#   "shapely",
+# ]
+#
+# [tool.uv.sources]
+# xarray-sql = { path = "../../", editable = true }
+# ///
+"""Regridding — interpolation to a new grid is a sparse matmul, i.e. a JOIN.
+
+Regridding (resampling a field from one grid onto another) is the operation we
+most associate with the *array* paradigm — xESMF/ESMF, ``apply_ufunc``,
+``.interp()``. But every linear regridding scheme (bilinear, conservative,
+nearest) is mathematically a **sparse matrix–vector product**: each output cell
+is a weighted sum of a few input cells. And a sparse matrix is just a table of
+``(target, source, weight)`` rows. So *applying* a regridding is::
+
+    SELECT w.dst_lat, w.dst_lon, SUM(s.value * w.weight) AS regridded
+    FROM   weights w JOIN src s ON s.lat = w.src_lat AND s.lon = w.src_lon
+    GROUP BY w.dst_lat, w.dst_lon
+
+— a JOIN against the weight table plus a weighted GROUP BY. This is the most
+relational the "array" paradigm ever gets: the operation we reach for xESMF to
+do is a join.
+
+**Where the array paradigm still earns its keep:** *generating* the weights is
+the genuinely geometric part (cell overlaps, interpolation stencils, spherical
+coordinates). Here we build bilinear weights with a few lines of numpy; for
+conservative remapping on real grids you would let ESMF/xESMF compute them once
+and hand the resulting sparse matrix to SQL as a table. SQL *applies* the
+weights; it does not invent the geometry.
+
+The field is real **SRTM elevation** (terrain over the Sierra Nevada), opened
+from the Earth Engine catalog through [Xee](https://github.com/google/Xee). We
+regrid it coarse → fine in SQL and validate against xarray's own bilinear
+``.interp()`` on the same source field.
+
+Requires Earth Engine access: ``earthengine authenticate`` once, then an
+initialized project (set ``EARTHENGINE_PROJECT``). Skips cleanly otherwise.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import xarray as xr
+
+import xarray_sql as xql
+
+from _harness import (
+    CaseSkipped,
+    assert_grid_close,
+    initialize_earth_engine,
+    measured,
+    run_case,
+    show_result,
+    show_sql,
+    timed,
+)
+
+# A 1° box over the Sierra Nevada — real terrain with strong relief.
+_AOI = (-119.6, 37.0, -118.6, 38.0)
+_SRC_SCALE_DEG = 0.02  # ~2 km source pixels (a coarse DEM to upsample)
+
+
+def _linear_weights(
+    src: np.ndarray, dst: np.ndarray
+) -> list[tuple[int, int, float]]:
+    """1-D linear-interpolation weights: (dst_index, src_index, weight) triples.
+
+    Each target point falls between two source points and borrows from both,
+    with weights summing to 1 — the 1-D building block of bilinear regridding.
+    """
+    triples = []
+    for t, x in enumerate(dst):
+        i = int(np.clip(np.searchsorted(src, x) - 1, 0, len(src) - 2))
+        span = src[i + 1] - src[i]
+        hi = (x - src[i]) / span
+        triples.append((t, i, 1.0 - hi))
+        triples.append((t, i + 1, hi))
+    return triples
+
+
+def _bilinear_weight_table(
+    slat: np.ndarray, slon: np.ndarray, tlat: np.ndarray, tlon: np.ndarray
+) -> xr.Dataset:
+    """Build the sparse bilinear weight matrix as a weight table.
+
+    The 2-D weight is the outer product of the 1-D lat and lon weights. Each
+    nonzero is one row naming the target cell by its ``(dst_lat, dst_lon)`` and
+    the source cell by its ``(src_lat, src_lon)`` — so the regrid SQL joins the
+    source grid on its coordinates (no pre-raveled cell id), lets the engine read
+    the source lazily, and rounds the result straight back to a (lat, lon) grid.
+    """
+    lat_w = _linear_weights(slat, tlat)
+    lon_w = _linear_weights(slon, tlon)
+    dst_lats, dst_lons, src_lats, src_lons, weights = [], [], [], [], []
+    for tj, si, wlat in lat_w:
+        for tk, sj, wlon in lon_w:
+            dst_lats.append(tlat[tj])
+            dst_lons.append(tlon[tk])
+            src_lats.append(slat[si])
+            src_lons.append(slon[sj])
+            weights.append(wlat * wlon)
+    n = len(weights)
+    return xr.Dataset(
+        {
+            "dst_lat": (["pair"], np.array(dst_lats, dtype="float64")),
+            "dst_lon": (["pair"], np.array(dst_lons, dtype="float64")),
+            "src_lat": (["pair"], np.array(src_lats, dtype="float64")),
+            "src_lon": (["pair"], np.array(src_lons, dtype="float64")),
+            "weight": (["pair"], np.array(weights, dtype="float64")),
+        },
+        coords={"pair": np.arange(n)},
+    ).chunk({"pair": n})
+
+
+def _open_srtm() -> xr.DataArray:
+    """Open SRTM elevation over the AOI as a coarse (lat, lon) field via Xee."""
+    try:
+        import shapely.geometry as sgeom
+        from xee import helpers
+    except ImportError as exc:  # pragma: no cover
+        raise CaseSkipped(
+            "Earth Engine support needs `pip install earthengine-api xee`"
+        ) from exc
+
+    ee = initialize_earth_engine()
+
+    # fit_geometry builds the pixel grid (crs, crs_transform, shape_2d) Xee's
+    # backend expects — here a geographic grid at _SRC_SCALE_DEG° over the AOI.
+    grid = helpers.fit_geometry(
+        sgeom.box(*_AOI),
+        grid_crs="EPSG:4326",
+        grid_scale=(_SRC_SCALE_DEG, _SRC_SCALE_DEG),
+    )
+    ic = ee.ImageCollection([ee.Image("USGS/SRTMGL1_003")])  # band: elevation
+    ds = xr.open_dataset(ic, engine="ee", **grid)
+    da = ds["elevation"].isel(time=0)
+    # Normalize Xee's spatial coordinate names to lat/lon and sort ascending so
+    # the 1-D weight construction (searchsorted) sees increasing coordinates.
+    rename = {}
+    for d in da.dims:
+        dl = d.lower()
+        if dl in ("y", "lat", "latitude"):
+            rename[d] = "lat"
+        elif dl in ("x", "lon", "longitude"):
+            rename[d] = "lon"
+    da = da.rename(rename).sortby("lat").sortby("lon")
+    # Stay lazy (no .load()): the source is read on demand by both the SQL table
+    # and the .interp reference, so each pays its own read. Force float64 coords
+    # so the weight table's src lat/lon match the source grid's exactly in the
+    # join.
+    return da.assign_coords(
+        lat=da.lat.astype("float64"), lon=da.lon.astype("float64")
+    )
+
+
+def main() -> None:
+    with timed("open SRTM via Xee (lazy)"):
+        src_da = _open_srtm()
+    slat = src_da.lat.values
+    slon = src_da.lon.values
+    print(f"  SRTM elevation source grid {len(slat)}×{len(slon)} (read lazily)")
+
+    # Finer target grid strictly inside the source extent (bilinear upsampling).
+    tlat = np.linspace(slat[1], slat[-2], 60)
+    tlon = np.linspace(slon[1], slon[-2], 72)
+    print(
+        f"  regrid {len(slat)}×{len(slon)} → {len(tlat)}×{len(tlon)} (bilinear)"
+    )
+
+    weights = _bilinear_weight_table(slat, slon, tlat, tlon)
+    print(
+        f"  weight matrix: {weights.sizes['pair']:,} nonzeros "
+        f"({len(tlat) * len(tlon)} targets × 4 corners)"
+    )
+
+    ctx = xql.XarrayContext()
+    # Register the source grid itself (lazy) — the join reads it on demand, the
+    # same source the .interp reference reads, so both pay an equal lazy read.
+    ctx.from_dataset(
+        "src",
+        src_da.to_dataset(name="value"),
+        chunks={"lat": len(slat), "lon": len(slon)},
+    )
+    ctx.from_dataset("weights", weights, chunks={"pair": weights.sizes["pair"]})
+
+    sql = """
+        SELECT w.dst_lat AS lat,
+               w.dst_lon AS lon,
+               SUM(s.value * w.weight) AS regridded
+        FROM weights w
+        JOIN src s ON s.lat = w.src_lat AND s.lon = w.src_lon
+        GROUP BY w.dst_lat, w.dst_lon
+        ORDER BY w.dst_lat, w.dst_lon
+    """
+    show_sql(sql)
+
+    # The weights name each target cell by its (lat, lon), so the result rounds
+    # straight back to the (lat, lon) field it represents — no reshape.
+    for _ in measured("SQL regrid (weight-table JOIN + weighted SUM)"):
+        got = ctx.sql(sql).to_dataset(dims=["lat", "lon"]).regridded
+
+    # Array reference: xarray's own bilinear interpolation of the same lazy field.
+    for _ in measured("xarray .interp reference"):
+        ref = src_da.interp(lat=tlat, lon=tlon, method="linear")
+
+    assert_grid_close("bilinear regrid", got, ref, rtol=1e-9, atol=1e-9)
+
+    show_result(got)
+
+    print(
+        f"\n  {got.size:,} target cells regridded; "
+        f"elevation range [{float(got.min()):.0f}, {float(got.max()):.0f}] m."
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(
+        run_case(main, "Regridding: sparse weight-table JOIN (SRTM)")
+    )
