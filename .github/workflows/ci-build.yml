@@ -28,6 +28,8 @@ jobs:
             target: x86_64
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: dtolnay/rust-toolchain@stable
 

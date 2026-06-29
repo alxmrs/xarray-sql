@@ -51,6 +51,8 @@ jobs:
         os: [ macos-latest, macos-15-intel, windows-latest ]
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -87,6 +89,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Build wheels for manylinux x86_64
         uses: PyO3/maturin-action@v1
@@ -121,6 +125,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Build wheels for manylinux arm64
         uses: PyO3/maturin-action@v1
@@ -156,6 +162,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Build sdist
         uses: PyO3/maturin-action@v1
