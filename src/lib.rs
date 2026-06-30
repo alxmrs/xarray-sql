@@ -48,7 +48,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use arrow::array::RecordBatch;
-use arrow::datatypes::{Schema, SchemaRef};
+use arrow::datatypes::{DataType, Schema, SchemaRef};
 use arrow::pyarrow::FromPyArrow;
 use async_stream::try_stream;
 use async_trait::async_trait;
@@ -68,7 +68,7 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream,
 };
 use datafusion::common::stats::Precision;
-use datafusion::common::Statistics;
+use datafusion::common::{ColumnStatistics, Statistics};
 use datafusion::prelude::SessionContext;
 use arrow::pyarrow::ToPyArrow;
 use tokio::runtime::Runtime;
@@ -696,18 +696,94 @@ fn sum_row_counts<'a>(metas: impl Iterator<Item = &'a PartitionMetadata>) -> Pre
     Precision::Exact(total)
 }
 
+/// Fold two same-variant `ScalarBound`s, keeping the smaller (`keep_min`) or
+/// larger one. Returns `None` if the variants differ (never expected within a
+/// single dimension) so the caller can fall back to unknown.
+fn fold_bound(a: &ScalarBound, b: &ScalarBound, keep_min: bool) -> Option<ScalarBound> {
+    let ord = match (a, b) {
+        (ScalarBound::Int64(x), ScalarBound::Int64(y)) => x.partial_cmp(y),
+        (ScalarBound::Float64(x), ScalarBound::Float64(y)) => x.partial_cmp(y),
+        (ScalarBound::TimestampNanos(x), ScalarBound::TimestampNanos(y)) => x.partial_cmp(y),
+        _ => return None,
+    }?;
+    let take_a = if keep_min {
+        ord != std::cmp::Ordering::Greater
+    } else {
+        ord != std::cmp::Ordering::Less
+    };
+    Some(if take_a { a.clone() } else { b.clone() })
+}
+
+/// Convert a coordinate bound into a `ScalarValue` matching a column's Arrow
+/// type, so column statistics line up with the schema. Returns `None` for
+/// type combinations we don't convert exactly (e.g. timestamp unit scaling),
+/// in which case the column is left without min/max rather than risk a wrong
+/// value.
+fn bound_to_scalar(bound: &ScalarBound, dtype: &DataType) -> Option<ScalarValue> {
+    match (bound, dtype) {
+        (ScalarBound::Int64(v), DataType::Int64) => Some(ScalarValue::Int64(Some(*v))),
+        (ScalarBound::Int64(v), DataType::Int32) => {
+            i32::try_from(*v).ok().map(|x| ScalarValue::Int32(Some(x)))
+        }
+        (ScalarBound::Float64(v), DataType::Float64) => Some(ScalarValue::Float64(Some(*v))),
+        (ScalarBound::Float64(v), DataType::Float32) => {
+            Some(ScalarValue::Float32(Some(*v as f32)))
+        }
+        // Timestamp columns are intentionally left without min/max for now:
+        // bounds are stored in nanoseconds but the column may be a different
+        // unit, and an unscaled value would be wrong. num_rows already covers
+        // the cost model; exact timestamp bounds can come with the dynamic
+        // filter work that actually consumes them.
+        _ => None,
+    }
+}
+
 /// Build table-level `Statistics` for a scan over the given partitions.
 ///
-/// `num_rows` is exact (the summed product of chunk dimension sizes).
-/// Column statistics are left unknown for now; the columns that matter for
-/// join planning are the dimension/key columns, whose min/max we already
-/// track per partition and can surface in a later pass.
+/// `num_rows` is exact (the summed product of chunk dimension sizes). For
+/// numeric dimension columns we also surface exact min/max, folded across the
+/// included partitions — these are the join/filter key columns, and unlike
+/// most providers the bounds are exact coordinate values, not estimates.
 fn build_scan_statistics(
     output_schema: &Schema,
     metas: &[&PartitionMetadata],
 ) -> Statistics {
     let mut stats = Statistics::new_unknown(output_schema);
     stats.num_rows = sum_row_counts(metas.iter().copied());
+
+    for (col_idx, field) in output_schema.fields().iter().enumerate() {
+        // Fold this column's min/max across every partition that has a range
+        // for it. All partitions share the same bound variant per dimension.
+        let mut folded: Option<(ScalarBound, ScalarBound)> = None;
+        for meta in metas {
+            if let Some(range) = meta.ranges.get(field.name()) {
+                folded = Some(match folded {
+                    None => (range.min.clone(), range.max.clone()),
+                    Some((lo, hi)) => (
+                        fold_bound(&lo, &range.min, true).unwrap_or(lo),
+                        fold_bound(&hi, &range.max, false).unwrap_or(hi),
+                    ),
+                });
+            }
+        }
+
+        if let Some((lo, hi)) = folded {
+            let dtype = field.data_type();
+            if let (Some(min), Some(max)) =
+                (bound_to_scalar(&lo, dtype), bound_to_scalar(&hi, dtype))
+            {
+                stats.column_statistics[col_idx] = ColumnStatistics {
+                    null_count: Precision::Exact(0),
+                    max_value: Precision::Exact(max),
+                    min_value: Precision::Exact(min),
+                    sum_value: Precision::Absent,
+                    distinct_count: Precision::Absent,
+                    byte_size: Precision::Absent,
+                };
+            }
+        }
+    }
+
     stats
 }
 

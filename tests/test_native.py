@@ -98,6 +98,25 @@ def test_native_statistics_in_plan(grid_ds):
     assert "Rows=Absent" not in plan.splitlines()[-1]
 
 
+def test_native_column_minmax_in_plan(grid_ds):
+    """Numeric dimension columns get exact min/max coordinate bounds."""
+    nat = XarrayContext(engine="native")
+    nat.from_dataset("air", grid_ds, chunks={"time": 3})
+    plan = nat.explain_native("SELECT lat, lon, air FROM air")
+    scan = next(l for l in plan.splitlines() if "XarrayScanExec" in l)
+
+    def fmt(v: float) -> str:
+        # DataFusion's ScalarValue display drops a trailing ".0".
+        return str(int(v)) if v == int(v) else str(v)
+
+    lat_min, lat_max = float(grid_ds.lat.min()), float(grid_ds.lat.max())
+    lon_min, lon_max = float(grid_ds.lon.min()), float(grid_ds.lon.max())
+    assert f"Min=Exact(Float64({fmt(lat_min)}))" in scan
+    assert f"Max=Exact(Float64({fmt(lat_max)}))" in scan
+    assert f"Min=Exact(Float64({fmt(lon_min)}))" in scan
+    assert f"Max=Exact(Float64({fmt(lon_max)}))" in scan
+
+
 def test_native_join_picks_small_build_side():
     """With exact statistics the optimizer broadcasts the smaller table.
 
