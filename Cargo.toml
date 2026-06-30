@@ -22,6 +22,10 @@ arrow = { version = "57.2.0", features = ["pyarrow"] }
 async-stream = "0.3"
 async-trait = "0.1"
 datafusion = { version = "52.0.0" }
+# Provides `snapshot_physical_expr`, used to resolve a join's dynamic filter to
+# its current bounds for partition pruning. Pinned to the same 52.x line as
+# datafusion so the PhysicalExpr ABI matches.
+datafusion-physical-expr-common = { version = "52.0.0" }
 datafusion-ffi = { version = "52.0.0" }
 futures = { version = "0.3" }
 # `abi3-py310` builds against CPython's stable ABI, so a single wheel per

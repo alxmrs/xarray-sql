@@ -47,7 +47,7 @@ use std::ffi::CString;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use arrow::array::{make_array, ArrayData, ArrayRef, RecordBatch};
+use arrow::array::{make_array, ArrayData, ArrayRef, BooleanArray, RecordBatch};
 use arrow::datatypes::{DataType, Schema, SchemaRef};
 use arrow::pyarrow::FromPyArrow;
 use arrow::pyarrow::ToPyArrow;
@@ -57,14 +57,20 @@ use datafusion::catalog::memory::MemorySchemaProvider;
 use datafusion::catalog::streaming::StreamingTable;
 use datafusion::catalog::Session;
 use datafusion::common::stats::Precision;
-use datafusion::common::{ColumnStatistics, Statistics};
+use datafusion::common::{Column, ColumnStatistics, Statistics};
 use datafusion::common::{DataFusionError, Result as DFResult, ScalarValue, TableReference};
+use datafusion::config::ConfigOptions;
 use datafusion::datasource::TableProvider;
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::expr::InList;
 use datafusion::logical_expr::{
     BinaryExpr, ColumnarValue, Expr, Operator, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl,
     Signature, TableProviderFilterPushDown, TableType, Volatility,
+};
+use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_optimizer::pruning::{PruningPredicate, PruningStatistics};
+use datafusion::physical_plan::filter_pushdown::{
+    ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation, PushedDown,
 };
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream;
@@ -75,6 +81,7 @@ use datafusion::physical_plan::{
 use datafusion::prelude::{col, lit, DataFrame, SessionContext};
 use datafusion_ffi::proto::logical_extension_codec::FFI_LogicalExtensionCodec;
 use datafusion_ffi::table_provider::FFI_TableProvider;
+use datafusion_physical_expr_common::physical_expr::snapshot_physical_expr;
 use futures::StreamExt;
 use pyo3::prelude::*;
 use pyo3::types::{PyCapsule, PyList, PyTuple};
@@ -599,13 +606,22 @@ impl TableProvider for PrunableStreamingTable {
                 None => Precision::Absent,
             })
             .collect();
+        // Owned copies of the surviving partitions' coordinate ranges, so the
+        // scan node can re-prune at execution time against a dynamic filter.
+        let owned_metas: Vec<PartitionMetadata> =
+            included_metas.iter().map(|&m| m.clone()).collect();
 
         // Handle empty case — all partitions pruned, return empty plan
         if included_indices.is_empty() {
             let empty_table = StreamingTable::try_new(Arc::clone(&self.schema), vec![])?;
             let inner = empty_table.scan(state, projection, filters, limit).await?;
             let stats = build_scan_statistics(inner.schema().as_ref(), &included_metas);
-            return Ok(Arc::new(XarrayScanExec::new(inner, stats, partition_rows)));
+            return Ok(Arc::new(XarrayScanExec::new(
+                inner,
+                stats,
+                partition_rows,
+                owned_metas,
+            )));
         }
 
         // Determine whether to push projection down to the Python factory.
@@ -663,7 +679,12 @@ impl TableProvider for PrunableStreamingTable {
             let streaming = StreamingTable::try_new(projected_schema, projected_partitions)?;
             let inner = streaming.scan(state, None, filters, limit).await?;
             let stats = build_scan_statistics(inner.schema().as_ref(), &included_metas);
-            Ok(Arc::new(XarrayScanExec::new(inner, stats, partition_rows)))
+            Ok(Arc::new(XarrayScanExec::new(
+                inner,
+                stats,
+                partition_rows,
+                owned_metas,
+            )))
         } else {
             // No projection pushdown — factory is called with None (loads all
             // columns). StreamingTable applies projection via ProjectionExec.
@@ -674,7 +695,12 @@ impl TableProvider for PrunableStreamingTable {
             let streaming = StreamingTable::try_new(Arc::clone(&self.schema), included_partitions)?;
             let inner = streaming.scan(state, projection, filters, limit).await?;
             let stats = build_scan_statistics(inner.schema().as_ref(), &included_metas);
-            Ok(Arc::new(XarrayScanExec::new(inner, stats, partition_rows)))
+            Ok(Arc::new(XarrayScanExec::new(
+                inner,
+                stats,
+                partition_rows,
+                owned_metas,
+            )))
         }
     }
 }
@@ -794,13 +820,20 @@ fn build_scan_statistics(output_schema: &Schema, metas: &[&PartitionMetadata]) -
 /// FFI boundary, which drops statistics entirely), this is what lets
 /// DataFusion's cost-based `JoinSelection` rule pick a sensible build side and
 /// broadcast-vs-shuffle strategy.
-#[derive(Debug)]
 struct XarrayScanExec {
     inner: Arc<dyn ExecutionPlan>,
+    /// Output schema (== `inner.schema()`), cached for pruning predicates.
+    schema: SchemaRef,
     statistics: Statistics,
     /// Exact row count per output partition (parallel to `inner` partitions),
     /// so `partition_statistics(Some(i))` is exact too.
     partition_rows: Vec<Precision<usize>>,
+    /// Coordinate-range metadata per output partition (parallel to `inner`
+    /// partitions), used to skip partitions a dynamic filter can't match.
+    metas: Vec<PartitionMetadata>,
+    /// Dynamic filters accepted from joins/TopK during the post-optimization
+    /// filter-pushdown phase. Empty until a parent pushes one in.
+    dynamic_filters: Vec<Arc<dyn PhysicalExpr>>,
 }
 
 impl XarrayScanExec {
@@ -808,26 +841,133 @@ impl XarrayScanExec {
         inner: Arc<dyn ExecutionPlan>,
         statistics: Statistics,
         partition_rows: Vec<Precision<usize>>,
+        metas: Vec<PartitionMetadata>,
     ) -> Self {
+        let schema = inner.schema();
         Self {
             inner,
+            schema,
             statistics,
             partition_rows,
+            metas,
+            dynamic_filters: Vec::new(),
         }
+    }
+
+    /// Clone this node carrying an additional set of dynamic filters.
+    fn with_dynamic_filters(&self, filters: Vec<Arc<dyn PhysicalExpr>>) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            schema: Arc::clone(&self.schema),
+            statistics: self.statistics.clone(),
+            partition_rows: self.partition_rows.clone(),
+            metas: self.metas.clone(),
+            dynamic_filters: filters,
+        }
+    }
+}
+
+impl Debug for XarrayScanExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("XarrayScanExec")
+            .field("num_partitions", &self.metas.len())
+            .field("num_dynamic_filters", &self.dynamic_filters.len())
+            .finish()
     }
 }
 
 impl DisplayAs for XarrayScanExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let n = self.dynamic_filters.len();
         match t {
             DisplayFormatType::Default | DisplayFormatType::Verbose => {
-                write!(f, "XarrayScanExec: rows={:?}", self.statistics.num_rows)
+                write!(f, "XarrayScanExec: rows={:?}", self.statistics.num_rows)?;
+                if n > 0 {
+                    write!(f, ", dynamic_filters={n}")?;
+                }
+                Ok(())
             }
             DisplayFormatType::TreeRender => {
                 write!(f, "rows={:?}", self.statistics.num_rows)
             }
         }
     }
+}
+
+/// `PruningStatistics` view over a single partition's coordinate bounds, so a
+/// dynamic filter snapshot can be evaluated against it to decide skipping.
+struct SinglePartitionStats<'a> {
+    meta: &'a PartitionMetadata,
+    schema: &'a SchemaRef,
+}
+
+impl SinglePartitionStats<'_> {
+    /// One-element array of this partition's min (or max) for `column`, typed to
+    /// the column, or `None` if the column has no usable numeric bound.
+    fn bound_array(&self, column: &Column, want_min: bool) -> Option<ArrayRef> {
+        let field = self.schema.field_with_name(&column.name).ok()?;
+        let dtype = field.data_type();
+        let range = self.meta.ranges.get(&column.name)?;
+        let bound = if want_min { &range.min } else { &range.max };
+        let scalar = bound_to_scalar(bound, dtype)?;
+        ScalarValue::iter_to_array(std::iter::once(scalar)).ok()
+    }
+}
+
+impl PruningStatistics for SinglePartitionStats<'_> {
+    fn min_values(&self, column: &Column) -> Option<ArrayRef> {
+        self.bound_array(column, true)
+    }
+    fn max_values(&self, column: &Column) -> Option<ArrayRef> {
+        self.bound_array(column, false)
+    }
+    fn num_containers(&self) -> usize {
+        1
+    }
+    fn null_counts(&self, _column: &Column) -> Option<ArrayRef> {
+        None
+    }
+    fn row_counts(&self, _column: &Column) -> Option<ArrayRef> {
+        None
+    }
+    fn contained(
+        &self,
+        _column: &Column,
+        _values: &std::collections::HashSet<ScalarValue>,
+    ) -> Option<BooleanArray> {
+        None
+    }
+}
+
+/// Returns true if every row of `meta`'s partition is provably excluded by at
+/// least one of `filters` (evaluated at their current/snapshot value).
+///
+/// Conservative: any uncertainty (a predicate `PruningPredicate` can't model, a
+/// column without bounds, an error) keeps the partition. Correctness does not
+/// depend on this — it only skips work a join/TopK would discard anyway — so a
+/// missed prune costs time, never results.
+fn partition_pruned(
+    filters: &[Arc<dyn PhysicalExpr>],
+    meta: &PartitionMetadata,
+    schema: &SchemaRef,
+) -> bool {
+    let stats = SinglePartitionStats { meta, schema };
+    for filter in filters {
+        // Snapshot resolves any DynamicFilterPhysicalExpr to its current bounds.
+        let Ok(snapshot) = snapshot_physical_expr(Arc::clone(filter)) else {
+            continue;
+        };
+        let Ok(predicate) = PruningPredicate::try_new(snapshot, Arc::clone(schema)) else {
+            continue;
+        };
+        if let Ok(keep) = predicate.prune(&stats) {
+            // One container in, one bool out: false means "cannot match".
+            if keep.first() == Some(&false) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[async_trait]
@@ -865,7 +1005,35 @@ impl ExecutionPlan for XarrayScanExec {
         partition: usize,
         ctx: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
-        self.inner.execute(partition, ctx)
+        // Fast path: no dynamic filters, just stream the inner partition.
+        if self.dynamic_filters.is_empty() {
+            return self.inner.execute(partition, ctx);
+        }
+
+        // Otherwise defer the prune decision to first poll. By the time the
+        // hash join probes (and this stream is polled) the build side has run
+        // and updated the dynamic filter's bounds, so the snapshot is final.
+        // Skipping here means the partition's Python factory is never called —
+        // no remote read for a partition that cannot match.
+        let inner = Arc::clone(&self.inner);
+        let schema = Arc::clone(&self.schema);
+        let filters = self.dynamic_filters.clone();
+        let meta = self.metas[partition].clone();
+
+        let stream = try_stream! {
+            if partition_pruned(&filters, &meta, &schema) {
+                return;
+            }
+            let mut s = inner.execute(partition, ctx)?;
+            while let Some(batch) = s.next().await {
+                yield batch?;
+            }
+        };
+
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            Arc::clone(&self.schema),
+            stream,
+        )))
     }
 
     fn statistics(&self) -> DFResult<Statistics> {
@@ -885,6 +1053,51 @@ impl ExecutionPlan for XarrayScanExec {
                 Ok(s)
             }
         }
+    }
+
+    /// Accept dynamic filters (join/TopK) pushed in during the post phase.
+    ///
+    /// We mark them `Yes` so the producing join activates its bounds
+    /// accumulator and keeps updating the filter at runtime. This is safe even
+    /// though we only prune at partition granularity: a hash join still matches
+    /// every surviving row, so the filter is a pure optimization here. Static
+    /// (`Pre`-phase) filters are left to the existing logical pushdown.
+    fn handle_child_pushdown_result(
+        &self,
+        phase: FilterPushdownPhase,
+        child_pushdown_result: ChildPushdownResult,
+        _config: &ConfigOptions,
+    ) -> DFResult<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>> {
+        if phase != FilterPushdownPhase::Post || child_pushdown_result.parent_filters.is_empty() {
+            return Ok(FilterPushdownPropagation::if_all(child_pushdown_result));
+        }
+
+        // Re-wrap each filter through `with_new_children`. For a
+        // `DynamicFilterPhysicalExpr` this clones the shared `inner` Arc,
+        // registering this scan as a *consumer* of the filter — which is what
+        // makes the producing hash join treat it as "used" (`is_used()`) and
+        // therefore actually compute and publish the build-side bounds at
+        // runtime. Without this the captured filter stays at its initial
+        // `true` value and never prunes.
+        let parent_filters: Vec<Arc<dyn PhysicalExpr>> = child_pushdown_result
+            .parent_filters
+            .iter()
+            .map(|f| {
+                let original = Arc::clone(&f.filter);
+                let children: Vec<Arc<dyn PhysicalExpr>> =
+                    original.children().into_iter().cloned().collect();
+                Arc::clone(&original)
+                    .with_new_children(children)
+                    .unwrap_or(original)
+            })
+            .collect();
+
+        let supports = vec![PushedDown::Yes; parent_filters.len()];
+        let updated = self.with_dynamic_filters(parent_filters);
+        Ok(FilterPushdownPropagation {
+            filters: supports,
+            updated_node: Some(Arc::new(updated)),
+        })
     }
 }
 

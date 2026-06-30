@@ -188,6 +188,102 @@ def test_native_join_picks_small_build_side():
     assert "HashJoinExec: mode=CollectLeft" in plan
 
 
+def _join_datasets():
+    """Probe table chunked on time; build table covers a narrow time window."""
+    nt = 300
+    rng = np.random.default_rng(0)
+    big = xr.Dataset(
+        {"t": (("time", "lat", "lon"), rng.standard_normal((nt, 4, 4)))},
+        coords={"time": np.arange(nt), "lat": np.arange(4), "lon": np.arange(4)},
+    )
+    sel = xr.Dataset(
+        {"w": (("time",), np.ones(10))}, coords={"time": np.arange(10, 20)}
+    )
+    return big, sel
+
+
+_JOIN_SQL = (
+    "SELECT b.time, SUM(b.t) x FROM big b JOIN sel s ON b.time=s.time "
+    "GROUP BY b.time"
+)
+
+
+def test_native_join_dynamic_filter_in_plan():
+    """The probe-side scan accepts the join's dynamic filter."""
+    big, sel = _join_datasets()
+    nat = XarrayContext(engine="native")
+    nat.from_dataset("big", big, chunks={"time": 30})
+    nat.from_dataset("sel", sel, chunks={"time": 10})
+    plan = nat._explain_native(_JOIN_SQL)
+    # The big (probe) scan carries one dynamic filter from the join.
+    assert "dynamic_filters=1" in plan
+
+
+def test_native_join_dynamic_filter_correctness():
+    """Dynamic-filter pruning must not change results."""
+    big, sel = _join_datasets()
+    nat = XarrayContext(engine="native")
+    nat.from_dataset("big", big, chunks={"time": 30})
+    nat.from_dataset("sel", sel, chunks={"time": 10})
+
+    got = nat.sql(_JOIN_SQL).to_pandas().sort_values("time").reset_index(drop=True)
+    ref = (
+        big.sel(time=slice(10, 19))["t"]
+        .sum(["lat", "lon"])
+        .to_dataframe()
+        .reset_index()
+        .rename(columns={"t": "x"})
+        .sort_values("time")
+        .reset_index(drop=True)
+    )
+    assert len(got) == 10
+    np.testing.assert_allclose(got["x"].to_numpy(), ref["x"].to_numpy())
+
+
+def test_native_join_dynamic_filter_prunes_partitions():
+    """At runtime the probe scan skips partitions the join can't match.
+
+    The big table is chunked into ten time-partitions; the build side only
+    covers times 10..19, which overlaps a single partition. A partition that is
+    skipped never has its Python factory invoked (no read at all).
+
+    Dynamic-filter pushdown is *opportunistic* -- whether a given partition is
+    pruned depends on the runtime race between the build side publishing its
+    bounds and the probe side being polled -- so we don't assert an exact count.
+    We require that (a) the one overlapping partition is always read and
+    (b) pruning fires: at least one run reads strictly fewer than all ten.
+    """
+    from xarray_sql.reader import read_xarray_table
+    from xarray_sql._native import NativeContext
+
+    big, sel = _join_datasets()
+
+    best = 10
+    for _ in range(5):
+        materialized = []
+        nc = NativeContext()
+        nc.register_table(
+            "big",
+            read_xarray_table(
+                big,
+                chunks={"time": 30},
+                _iteration_callback=lambda block, proj: materialized.append(
+                    (block["time"].start, block["time"].stop)
+                ),
+            ),
+        )
+        nc.register_table("sel", read_xarray_table(sel, chunks={"time": 10}))
+        list(nc.sql(_JOIN_SQL).execute_stream())  # force execution
+
+        slices = [(int(a), int(b)) for a, b in materialized]
+        # The overlapping partition must always be read for a correct result.
+        assert (0, 30) in slices
+        best = min(best, len(slices))
+
+    # Across the attempts, pruning must fire at least once.
+    assert best < 10, f"dynamic filter never pruned a partition (best={best})"
+
+
 def test_native_multigroup_namespace(weather_dataset):
     """A dataset spanning two dim groups registers as a SQL namespace."""
     ds = weather_dataset

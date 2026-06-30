@@ -3382,6 +3382,7 @@ dependencies = [
  "async-trait",
  "datafusion",
  "datafusion-ffi",
+ "datafusion-physical-expr-common",
  "futures",
  "pyo3",
  "pyo3-build-config",
