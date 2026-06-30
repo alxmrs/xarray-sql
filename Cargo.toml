@@ -29,7 +29,7 @@ futures = { version = "0.3" }
 # lets the release workflow ship pre-built wheels for every interpreter
 # without compiling per-version, avoiding local rebuilds on install.
 pyo3 = { version = "0.26.0", features = ["extension-module", "abi3-py310"] }
-tokio = { version = "1.46.1", features = ["rt"] }
+tokio = { version = "1.46.1", features = ["rt", "rt-multi-thread"] }
 
 
 [build-dependencies]

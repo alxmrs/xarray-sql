@@ -63,7 +63,15 @@ use datafusion::logical_expr::{
 };
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream;
-use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
+use datafusion::physical_plan::{
+    displayable, DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
+    SendableRecordBatchStream,
+};
+use datafusion::common::stats::Precision;
+use datafusion::common::Statistics;
+use datafusion::prelude::SessionContext;
+use arrow::pyarrow::ToPyArrow;
+use tokio::runtime::Runtime;
 use datafusion_ffi::proto::logical_extension_codec::FFI_LogicalExtensionCodec;
 use datafusion_ffi::table_provider::FFI_TableProvider;
 use pyo3::prelude::*;
@@ -136,6 +144,14 @@ pub struct DimensionRange {
 pub struct PartitionMetadata {
     /// Dimension ranges for this partition, keyed by column name
     pub ranges: HashMap<String, DimensionRange>,
+    /// Exact number of rows in this partition (product of the chunk's
+    /// per-dimension sizes). `None` when the producer did not supply it.
+    /// Used to report exact `Statistics::num_rows` to the optimizer so
+    /// cost-based rules (join build-side selection, broadcast vs. shuffle)
+    /// have real cardinalities instead of guesses. xarray knows this
+    /// exactly — it is the product of the partition's dimension lengths —
+    /// so unlike most table providers these statistics are not estimates.
+    pub num_rows: Option<usize>,
 }
 
 impl PartitionMetadata {
@@ -507,7 +523,10 @@ fn convert_python_metadata_from_bound(meta_obj: &Bound<'_, PyAny>) -> PyResult<P
             },
         );
     }
-    Ok(PartitionMetadata { ranges })
+    Ok(PartitionMetadata {
+        ranges,
+        num_rows: None,
+    })
 }
 
 impl Debug for PrunableStreamingTable {
@@ -563,10 +582,27 @@ impl TableProvider for PrunableStreamingTable {
         // Prune partitions based on filters
         let included_indices = self.prune_partitions(filters);
 
+        // Exact per-partition row counts for the partitions that survive
+        // pruning, in scan order. These feed `XarrayScanExec`'s statistics so
+        // the optimizer sees real cardinalities.
+        let included_metas: Vec<&PartitionMetadata> = included_indices
+            .iter()
+            .map(|&idx| &self.partitions[idx].1)
+            .collect();
+        let partition_rows: Vec<Precision<usize>> = included_metas
+            .iter()
+            .map(|meta| match meta.num_rows {
+                Some(n) => Precision::Exact(n),
+                None => Precision::Absent,
+            })
+            .collect();
+
         // Handle empty case — all partitions pruned, return empty plan
         if included_indices.is_empty() {
             let empty_table = StreamingTable::try_new(Arc::clone(&self.schema), vec![])?;
-            return empty_table.scan(state, projection, filters, limit).await;
+            let inner = empty_table.scan(state, projection, filters, limit).await?;
+            let stats = build_scan_statistics(inner.schema().as_ref(), &included_metas);
+            return Ok(Arc::new(XarrayScanExec::new(inner, stats, partition_rows)));
         }
 
         // Determine whether to push projection down to the Python factory.
@@ -622,7 +658,9 @@ impl TableProvider for PrunableStreamingTable {
             // StreamingTable already has the projected schema — pass None for
             // projection so it doesn't wrap the stream in a redundant ProjectionExec.
             let streaming = StreamingTable::try_new(projected_schema, projected_partitions)?;
-            streaming.scan(state, None, filters, limit).await
+            let inner = streaming.scan(state, None, filters, limit).await?;
+            let stats = build_scan_statistics(inner.schema().as_ref(), &included_metas);
+            Ok(Arc::new(XarrayScanExec::new(inner, stats, partition_rows)))
         } else {
             // No projection pushdown — factory is called with None (loads all
             // columns). StreamingTable applies projection via ProjectionExec.
@@ -631,7 +669,147 @@ impl TableProvider for PrunableStreamingTable {
                 .map(|&idx| self.partitions[idx].0.clone_as_stream())
                 .collect();
             let streaming = StreamingTable::try_new(Arc::clone(&self.schema), included_partitions)?;
-            streaming.scan(state, projection, filters, limit).await
+            let inner = streaming.scan(state, projection, filters, limit).await?;
+            let stats = build_scan_statistics(inner.schema().as_ref(), &included_metas);
+            Ok(Arc::new(XarrayScanExec::new(inner, stats, partition_rows)))
+        }
+    }
+}
+
+// ============================================================================
+// Exact Statistics + Scan Wrapper
+// ============================================================================
+
+/// Sum a set of optional per-partition row counts into a `Precision<usize>`.
+///
+/// Exact only when *every* partition reports a count; if any is missing we
+/// return `Absent` rather than an under-count, so the optimizer never sees a
+/// cardinality smaller than reality.
+fn sum_row_counts<'a>(metas: impl Iterator<Item = &'a PartitionMetadata>) -> Precision<usize> {
+    let mut total: usize = 0;
+    for meta in metas {
+        match meta.num_rows {
+            Some(n) => total += n,
+            None => return Precision::Absent,
+        }
+    }
+    Precision::Exact(total)
+}
+
+/// Build table-level `Statistics` for a scan over the given partitions.
+///
+/// `num_rows` is exact (the summed product of chunk dimension sizes).
+/// Column statistics are left unknown for now; the columns that matter for
+/// join planning are the dimension/key columns, whose min/max we already
+/// track per partition and can surface in a later pass.
+fn build_scan_statistics(
+    output_schema: &Schema,
+    metas: &[&PartitionMetadata],
+) -> Statistics {
+    let mut stats = Statistics::new_unknown(output_schema);
+    stats.num_rows = sum_row_counts(metas.iter().copied());
+    stats
+}
+
+/// A thin scan operator that wraps an inner `StreamingTableExec` and reports
+/// exact `Statistics` to the query optimizer.
+///
+/// Execution, schema, ordering, and partitioning are delegated verbatim to the
+/// inner plan (so projection mechanics are reused unchanged); the only thing
+/// this node adds is real cardinality. When consumed natively (not across the
+/// FFI boundary, which drops statistics entirely), this is what lets
+/// DataFusion's cost-based `JoinSelection` rule pick a sensible build side and
+/// broadcast-vs-shuffle strategy.
+#[derive(Debug)]
+struct XarrayScanExec {
+    inner: Arc<dyn ExecutionPlan>,
+    statistics: Statistics,
+    /// Exact row count per output partition (parallel to `inner` partitions),
+    /// so `partition_statistics(Some(i))` is exact too.
+    partition_rows: Vec<Precision<usize>>,
+}
+
+impl XarrayScanExec {
+    fn new(
+        inner: Arc<dyn ExecutionPlan>,
+        statistics: Statistics,
+        partition_rows: Vec<Precision<usize>>,
+    ) -> Self {
+        Self {
+            inner,
+            statistics,
+            partition_rows,
+        }
+    }
+}
+
+impl DisplayAs for XarrayScanExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(f, "XarrayScanExec: rows={:?}", self.statistics.num_rows)
+            }
+            DisplayFormatType::TreeRender => {
+                write!(f, "rows={:?}", self.statistics.num_rows)
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl ExecutionPlan for XarrayScanExec {
+    fn name(&self) -> &str {
+        "XarrayScanExec"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn properties(&self) -> &PlanProperties {
+        // Delegate partitioning + output ordering + boundedness to the inner
+        // StreamingTableExec. This is also how declared coordinate ordering
+        // (when present) reaches the optimizer.
+        self.inner.properties()
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        // A scan is a leaf; the inner plan is an execution detail, not a child
+        // the optimizer should rewrite.
+        vec![]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        ctx: Arc<TaskContext>,
+    ) -> DFResult<SendableRecordBatchStream> {
+        self.inner.execute(partition, ctx)
+    }
+
+    fn statistics(&self) -> DFResult<Statistics> {
+        Ok(self.statistics.clone())
+    }
+
+    fn partition_statistics(&self, partition: Option<usize>) -> DFResult<Statistics> {
+        match partition {
+            None => Ok(self.statistics.clone()),
+            Some(i) => {
+                let mut s = self.statistics.clone();
+                s.num_rows = self
+                    .partition_rows
+                    .get(i)
+                    .cloned()
+                    .unwrap_or(Precision::Absent);
+                Ok(s)
+            }
         }
     }
 }
@@ -921,12 +1099,24 @@ impl LazyArrowStreamTable {
         let mut partition_list: Vec<(Arc<dyn ProjectableStream>, PartitionMetadata)> = Vec::new();
         for item_result in partitions.try_iter()? {
             let item = item_result?;
-            let (factory_obj, meta_obj): (Py<PyAny>, Py<PyAny>) = item.extract().map_err(|e| {
-                pyo3::exceptions::PyTypeError::new_err(format!(
-                    "each partition must be a (factory, metadata_dict) tuple: {e}"
-                ))
-            })?;
-            let meta = convert_python_metadata_from_bound(meta_obj.bind(partitions.py()))?;
+            // Accept either ``(factory, metadata)`` (legacy) or
+            // ``(factory, metadata, num_rows)`` (preferred — carries the exact
+            // partition row count for statistics). Try the 3-tuple first.
+            let (factory_obj, meta_obj, num_rows): (Py<PyAny>, Py<PyAny>, Option<usize>) =
+                match item.extract::<(Py<PyAny>, Py<PyAny>, usize)>() {
+                    Ok((f, m, n)) => (f, m, Some(n)),
+                    Err(_) => {
+                        let (f, m): (Py<PyAny>, Py<PyAny>) = item.extract().map_err(|e| {
+                            pyo3::exceptions::PyTypeError::new_err(format!(
+                                "each partition must be a (factory, metadata_dict) or \
+                                 (factory, metadata_dict, num_rows) tuple: {e}"
+                            ))
+                        })?;
+                        (f, m, None)
+                    }
+                };
+            let mut meta = convert_python_metadata_from_bound(meta_obj.bind(partitions.py()))?;
+            meta.num_rows = num_rows;
             let partition: Arc<dyn ProjectableStream> =
                 Arc::new(PyArrowStreamPartition::new(factory_obj, schema_ref.clone()));
             partition_list.push((partition, meta));
@@ -969,7 +1159,6 @@ impl LazyArrowStreamTable {
 
     /// Get the schema of the table as a PyArrow Schema.
     fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        use arrow::pyarrow::ToPyArrow;
         self.table
             .schema()
             .to_pyarrow(py)
@@ -981,9 +1170,123 @@ impl LazyArrowStreamTable {
     }
 }
 
+// ============================================================================
+// Native Execution Context
+// ============================================================================
+
+/// Convert a DataFusion error into a Python exception.
+fn df_err_to_py(e: DataFusionError) -> PyErr {
+    pyo3::exceptions::PyRuntimeError::new_err(format!("DataFusion error: {e}"))
+}
+
+/// A DataFusion `SessionContext` that owns its tables *natively* (in-process,
+/// same compiled DataFusion), rather than across the FFI boundary.
+///
+/// This matters because `datafusion-ffi` does not forward `Statistics` or
+/// dynamic-filter pushdown across the boundary: a `ForeignExecutionPlan`
+/// reports unknown statistics regardless of what the provider knows. Consuming
+/// `PrunableStreamingTable` here, as a native `Arc<dyn TableProvider>`, lets the
+/// optimizer see the exact cardinalities `XarrayScanExec` reports and (in later
+/// work) accept join-driven dynamic filters and custom physical rules.
+///
+/// The query result is materialised and returned as a list of PyArrow
+/// `RecordBatch`es, so it round-trips through the existing xarray reconstruction
+/// path. Today this is an *eager* engine intended for reductions and joins; it
+/// does not register Python scalar UDFs (e.g. `cftime`), which remain on the
+/// default FFI engine.
+#[pyclass(name = "NativeContext")]
+struct NativeContext {
+    ctx: SessionContext,
+    rt: Runtime,
+}
+
+#[pymethods]
+impl NativeContext {
+    #[new]
+    fn new() -> PyResult<Self> {
+        let rt = Runtime::new().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "failed to create tokio runtime: {e}"
+            ))
+        })?;
+        Ok(Self {
+            ctx: SessionContext::new(),
+            rt,
+        })
+    }
+
+    /// Register a `LazyArrowStreamTable` natively under `name`.
+    ///
+    /// Unlike the FFI path (`register_table` with the capsule), this hands the
+    /// provider directly to the in-process `SessionContext`, so its statistics
+    /// and physical-plan capabilities are visible to the optimizer.
+    fn register_table(&self, name: &str, table: &LazyArrowStreamTable) -> PyResult<()> {
+        let provider: Arc<dyn TableProvider> = table.table.clone();
+        self.ctx
+            .register_table(name, provider)
+            .map_err(df_err_to_py)?;
+        Ok(())
+    }
+
+    /// Run a SQL query and return its result as a list of PyArrow RecordBatches.
+    ///
+    /// The GIL is released for the duration of execution so DataFusion's worker
+    /// threads can re-acquire it per batch when pulling from the Python-backed
+    /// partition streams.
+    fn sql(&self, py: Python<'_>, query: &str) -> PyResult<Vec<Py<PyAny>>> {
+        let batches: Vec<RecordBatch> = py
+            .detach(|| {
+                self.rt.block_on(async {
+                    let df = self.ctx.sql(query).await?;
+                    df.collect().await
+                })
+            })
+            .map_err(df_err_to_py)?;
+
+        let mut out = Vec::with_capacity(batches.len());
+        for batch in &batches {
+            out.push(batch.to_pyarrow(py)?.unbind());
+        }
+        Ok(out)
+    }
+
+    /// Return the PyArrow schema a query would produce, without executing it.
+    fn sql_schema(&self, py: Python<'_>, query: &str) -> PyResult<Py<PyAny>> {
+        let schema = py
+            .detach(|| {
+                self.rt.block_on(async {
+                    let df = self.ctx.sql(query).await?;
+                    Ok::<_, DataFusionError>(df.schema().inner().clone())
+                })
+            })
+            .map_err(df_err_to_py)?;
+        schema.as_ref().to_pyarrow(py).map(|b| b.unbind())
+    }
+
+    /// Return the physical plan for `query` as a string, with statistics shown.
+    ///
+    /// Used to verify that exact cardinalities now reach the optimizer (the
+    /// statistics line is absent on the FFI path).
+    fn explain(&self, py: Python<'_>, query: &str) -> PyResult<String> {
+        py.detach(|| {
+            self.rt.block_on(async {
+                let df = self.ctx.sql(query).await?;
+                let plan = df.create_physical_plan().await?;
+                let rendered = displayable(plan.as_ref())
+                    .set_show_statistics(true)
+                    .indent(true)
+                    .to_string();
+                Ok::<_, DataFusionError>(rendered)
+            })
+        })
+        .map_err(df_err_to_py)
+    }
+}
+
 /// Python module initialization
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LazyArrowStreamTable>()?;
+    m.add_class::<NativeContext>()?;
     Ok(())
 }
