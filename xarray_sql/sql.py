@@ -1,3 +1,4 @@
+import pyarrow as pa
 import xarray as xr
 from datafusion import SessionContext
 from datafusion.catalog import Schema
@@ -10,9 +11,27 @@ from .reader import read_xarray_table
 
 
 class XarrayContext(SessionContext):
-    """A datafusion `SessionContext` that also supports `xarray.Dataset`s."""
+    """A datafusion `SessionContext` that also supports `xarray.Dataset`s.
 
-    def __init__(self, *args, **kwargs):
+    Two query engines are available, selected with ``engine``:
+
+    * ``"ffi"`` (default): tables are registered with DataFusion through the
+      Arrow/FFI table-provider protocol. This is the mature path and supports
+      everything DataFusion's Python API does (scalar UDFs such as ``cftime``,
+      multi-dimension-group namespaces, lazy/chunked round-trips).
+
+    * ``"native"``: tables are registered into an in-process DataFusion
+      ``SessionContext`` compiled into this extension, *bypassing the FFI
+      boundary*. The boundary drops table statistics and dynamic-filter
+      pushdown, so only the native engine can give the cost-based optimizer
+      exact cardinalities (for join build-side selection and broadcast-vs-
+      shuffle) and, in future, join-driven partition pruning. The native
+      engine is **eager** (it materialises the result) and does not register
+      Python scalar UDFs; use the default engine for ``cftime`` filters or
+      multi-dimension-group datasets.
+    """
+
+    def __init__(self, *args, engine: str = "ffi", **kwargs):
         super().__init__(*args, **kwargs)
         # Track registered xarray Datasets so XarrayDataFrame can recover
         # defaults (dimension_columns) and metadata (var/dataset attrs,
@@ -21,6 +40,17 @@ class XarrayContext(SessionContext):
         # in SQL (e.g. ``"air"`` for a uniform-dim Dataset, or
         # ``"era5.surface"`` for one entry from a multi-dim-group split).
         self._registered_datasets: dict[str, xr.Dataset] = {}
+
+        if engine not in ("ffi", "native"):
+            raise ValueError(
+                f"engine must be 'ffi' or 'native', got {engine!r}"
+            )
+        self._engine = engine
+        self._native = None
+        if engine == "native":
+            from ._native import NativeContext
+
+            self._native = NativeContext()
 
     def from_dataset(
         self,
@@ -102,6 +132,14 @@ class XarrayContext(SessionContext):
                 name, input_table, chunks, coord_arrays=coord_arrays
             )
 
+        if self._native is not None:
+            raise NotImplementedError(
+                "The native engine does not yet support datasets whose "
+                "variables span multiple dimension groups (which register as "
+                f"a SQL namespace). {name!r} has groups {list(groups)}. Use "
+                "engine='ffi' for namespaced datasets."
+            )
+
         table_names = table_names or {}
         schema = Schema.memory_schema(self)
         self.catalog().register_schema(name, schema)
@@ -137,14 +175,22 @@ class XarrayContext(SessionContext):
         Registers a top-level table by default, or a table inside ``schema``
         (a SQL namespace) when one is given.
         """
-        register = (
-            self.register_table if schema is None else schema.register_table
+        table = read_xarray_table(
+            input_table, chunks, coord_arrays=coord_arrays
         )
-        register(
-            table_name,
-            read_xarray_table(input_table, chunks, coord_arrays=coord_arrays),
-        )
-        self._maybe_register_cftime_udf(input_table)
+        if self._native is not None:
+            # Register the provider directly into the in-process context so
+            # its statistics and physical-plan capabilities reach the
+            # optimizer (the FFI path drops them).
+            self._native.register_table(table_name, table)
+        else:
+            register = (
+                self.register_table
+                if schema is None
+                else schema.register_table
+            )
+            register(table_name, table)
+            self._maybe_register_cftime_udf(input_table)
         return self
 
     def _maybe_register_cftime_udf(self, ds: xr.Dataset) -> None:
@@ -174,8 +220,42 @@ class XarrayContext(SessionContext):
         Returns:
             An :class:`XarrayDataFrame` wrapping the DataFusion DataFrame.
         """
+        if self._native is not None:
+            return self._native_sql(query)
         inner = super().sql(query, *args, **kwargs)
         return XarrayDataFrame(inner, templates=self._registered_datasets)
+
+    def _native_sql(self, query: str) -> XarrayDataFrame:
+        """Execute *query* on the native engine and wrap the eager result.
+
+        The native context materialises the result as Arrow batches; we feed
+        them back into a DataFusion ``DataFrame`` (over an in-memory table) so
+        the existing :class:`XarrayDataFrame` round-trip — ``to_pandas`` and
+        ``to_dataset`` — works unchanged.
+        """
+        batches = self._native.sql(query)
+        if batches:
+            table = pa.Table.from_batches(batches)
+        else:
+            # Empty result: recover the schema so the wrapper still has columns.
+            schema = self._native.sql_schema(query)
+            table = pa.Table.from_batches([], schema=schema)
+        inner = SessionContext().from_arrow(table)
+        return XarrayDataFrame(inner, templates=self._registered_datasets)
+
+    def explain_native(self, query: str) -> str:
+        """Return the native engine's physical plan (with statistics) for *query*.
+
+        Useful for confirming that exact cardinalities reach the optimizer —
+        e.g. that a join is planned as ``HashJoinExec: mode=CollectLeft`` with
+        the smaller table on the build side. Only available on the native
+        engine.
+        """
+        if self._native is None:
+            raise RuntimeError(
+                "explain_native is only available when engine='native'"
+            )
+        return self._native.explain(query)
 
 
 def _group_vars_by_dims(ds: xr.Dataset) -> dict[tuple[str, ...], list[str]]:
