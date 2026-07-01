@@ -21,6 +21,7 @@ from .df import (
     Block,
     Chunks,
     DEFAULT_BATCH_SIZE,
+    _block_len,
     _block_metadata,
     _block_slices_from_resolved,
     _parse_schema,
@@ -315,7 +316,7 @@ def read_xarray_table(
     )
 
     def partition_pairs():
-        """Lazily yield (factory, metadata) for each partition.
+        """Lazily yield (factory, metadata, num_rows) for each partition.
 
         Consuming this generator one item at a time means Python never holds
         all N block dicts, metadata dicts, and factory closures simultaneously.
@@ -327,6 +328,10 @@ def read_xarray_table(
             yield (
                 make_partition_factory(block),
                 {**static_ranges, **dynamic},
+                # Exact row count for this partition (product of the chunk's
+                # per-dimension sizes), so the scan can report exact
+                # Statistics::num_rows to the optimizer.
+                _block_len(block),
             )
 
     return LazyArrowStreamTable(partition_pairs(), schema)

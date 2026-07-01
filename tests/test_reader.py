@@ -212,7 +212,7 @@ class TestDataFusionCollect:
         ctx.register_table("test_table", table)
 
         # Run a query that needs to scan all data
-        ctx.sql("SELECT COUNT(*) FROM test_table").collect()
+        ctx.sql("SELECT * FROM test_table").collect()
 
         # With time=100 and chunks=25, we expect 4 blocks
         expected_blocks = 100 // 25
@@ -318,7 +318,7 @@ class TestLazyEvaluationEndToEnd:
         ctx.register_table("test_table", table)
 
         # First query
-        ctx.sql("SELECT COUNT(*) FROM test_table").collect()
+        ctx.sql("SELECT * FROM test_table").collect()
         first_query_iterations = tracker.iteration_count
         assert first_query_iterations > 0, "First query should iterate"
 
@@ -358,8 +358,8 @@ class TestDataIntegrity:
         ctx.register_table("test_table", table)
 
         # Get count
-        result = ctx.sql("SELECT COUNT(*) as cnt FROM test_table").collect()
-        count = result[0].to_pandas()["cnt"].iloc[0]
+        result = ctx.sql("SELECT * FROM test_table").collect()
+        count = sum(b.num_rows for b in result)
 
         # Expected: 100 time steps * 10 lat * 10 lon = 10,000 rows
         expected_count = 100 * 10 * 10
@@ -512,7 +512,7 @@ class TestStreamingBehavior:
         ctx.register_table("test_table", table)
 
         # Run query that scans all data
-        ctx.sql("SELECT COUNT(*) FROM test_table").collect()
+        ctx.sql("SELECT * FROM test_table").collect()
 
         # All 4 batches should have been processed
         assert tracker.batch_count == 4, (
@@ -580,8 +580,8 @@ class TestStreamingBehavior:
         ctx.register_table("test_table", table)
 
         # Run a query that needs all data
-        result = ctx.sql("SELECT COUNT(*) as cnt FROM test_table").collect()
-        count = result[0].to_pandas()["cnt"].iloc[0]
+        result = ctx.sql("SELECT * FROM test_table").collect()
+        count = sum(b.num_rows for b in result)
 
         # Verify all blocks were processed
         assert tracker.batch_count == 20, (
@@ -639,8 +639,8 @@ class TestBoundedMemoryBehavior:
         ctx = SessionContext()
         ctx.register_table("test_table", table)
 
-        result = ctx.sql("SELECT COUNT(*) as cnt FROM test_table").collect()
-        count = result[0].to_pandas()["cnt"].iloc[0]
+        result = ctx.sql("SELECT * FROM test_table").collect()
+        count = sum(b.num_rows for b in result)
 
         # All 16 batches should have been processed
         assert tracker.batch_count == 16, (
@@ -722,8 +722,8 @@ class TestBoundedMemoryBehavior:
         ctx = SessionContext()
         ctx.register_table("test_table", table)
 
-        result = ctx.sql("SELECT COUNT(*) as cnt FROM test_table").collect()
-        count = result[0].to_pandas()["cnt"].iloc[0]
+        result = ctx.sql("SELECT * FROM test_table").collect()
+        count = sum(b.num_rows for b in result)
 
         # All 50 batches processed
         assert tracker.batch_count == 50, (
@@ -792,8 +792,8 @@ class TestErrorPropagation:
             raise ValueError("Factory intentionally failed")
 
         schema = pa.schema([("value", pa.int64())])
-        # partitions is an iterable of (factory, metadata_dict) pairs
-        table = LazyArrowStreamTable([(failing_factory, {})], schema)
+        # partitions is an iterable of (factory, metadata_dict, num_rows) tuples
+        table = LazyArrowStreamTable([(failing_factory, {}, 1)], schema)
 
         ctx = SessionContext()
         ctx.register_table("test_table", table)
@@ -860,8 +860,8 @@ class TestErrorPropagation:
         ctx = SessionContext()
         ctx.register_table("test_table", table)
 
-        result = ctx.sql("SELECT COUNT(*) as cnt FROM test_table").collect()
-        count = result[0].to_pandas()["cnt"].iloc[0]
+        result = ctx.sql("SELECT * FROM test_table").collect()
+        count = sum(b.num_rows for b in result)
 
         assert count == 0, f"Expected 0 rows for empty dataset, got {count}"
 
@@ -889,7 +889,7 @@ class TestMultiplePartitions:
         ctx.register_table("test_table", table)
 
         # First query
-        ctx.sql("SELECT COUNT(*) FROM test_table").collect()
+        ctx.sql("SELECT * FROM test_table").collect()
         first_query_count = call_count["value"]
         assert first_query_count == 2, (
             f"First query: expected 2, got {first_query_count}"
@@ -933,8 +933,8 @@ class TestMultiplePartitions:
         ctx2.register_table("test_table", table2)
 
         # Execute queries
-        ctx1.sql("SELECT COUNT(*) FROM test_table").collect()
-        ctx2.sql("SELECT COUNT(*) FROM test_table").collect()
+        ctx1.sql("SELECT * FROM test_table").collect()
+        ctx2.sql("SELECT * FROM test_table").collect()
 
         # Each should have its own iteration count
         assert tracker1.iteration_count == 4, (
