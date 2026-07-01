@@ -87,11 +87,54 @@ def test_native_to_dataset_roundtrip(grid_ds):
     np.testing.assert_allclose(got.to_numpy(), ref.to_numpy())
 
 
+def test_native_lazy_chunked_roundtrip(grid_ds):
+    """to_dataset(chunks=...) is lazy: dask-backed arrays, correct on compute."""
+    dask = pytest.importorskip("dask")  # noqa: F841
+    nat = XarrayContext(engine="native")
+    nat.from_dataset("air", grid_ds, chunks={"time": 3})
+
+    out = nat.sql("SELECT time, lat, lon, air FROM air").to_dataset(
+        dims=["time", "lat", "lon"], chunks={"time": 3}
+    )
+    # The result variable is lazy (a chunked dask array), not a dense ndarray.
+    assert out["air"].chunks is not None
+    assert type(out["air"].data).__module__.startswith("dask")
+
+    # Computing a slice reads lazily and matches the reference.
+    got = out["air"].sel(time=slice(3, 5)).compute().transpose("time", "lat", "lon")
+    ref = grid_ds["air"].sel(time=slice(3, 5)).transpose("time", "lat", "lon")
+    np.testing.assert_allclose(got.to_numpy(), ref.to_numpy())
+
+    # Full materialisation also matches.
+    full = out["air"].compute().transpose("time", "lat", "lon")
+    np.testing.assert_allclose(
+        full.to_numpy(), grid_ds["air"].transpose("time", "lat", "lon").to_numpy()
+    )
+
+
+def test_native_sql_returns_lazy_frame():
+    """NativeContext.sql plans lazily and streams — it does not collect."""
+    from xarray_sql._native import NativeContext
+    from xarray_sql.reader import read_xarray_table
+
+    ds = xr.Dataset(
+        {"v": (("x",), np.arange(10, dtype="float64"))},
+        coords={"x": np.arange(10)},
+    )
+    nc = NativeContext()
+    nc.register_table("t", read_xarray_table(ds, chunks={"x": 5}))
+    frame = nc.sql("SELECT x, v FROM t")
+    # A lazy frame exposes schema without executing, and streams batches.
+    assert [f.name for f in frame.schema()] == ["x", "v"]
+    total = sum(b.num_rows for b in frame.execute_stream())
+    assert total == 10
+
+
 def test_native_statistics_in_plan(grid_ds):
     """Exact row counts must appear at the scan and propagate upward."""
     nat = XarrayContext(engine="native")
     nat.from_dataset("air", grid_ds, chunks={"time": 3})
-    plan = nat.explain_native("SELECT lat, lon, AVG(air) FROM air GROUP BY lat, lon")
+    plan = nat._explain_native("SELECT lat, lon, AVG(air) FROM air GROUP BY lat, lon")
     total = grid_ds.sizes["time"] * grid_ds.sizes["lat"] * grid_ds.sizes["lon"]
     assert f"rows=Exact({total})" in plan
     # The exact count is not dropped to Absent above the scan.
@@ -102,7 +145,7 @@ def test_native_column_minmax_in_plan(grid_ds):
     """Numeric dimension columns get exact min/max coordinate bounds."""
     nat = XarrayContext(engine="native")
     nat.from_dataset("air", grid_ds, chunks={"time": 3})
-    plan = nat.explain_native("SELECT lat, lon, air FROM air")
+    plan = nat._explain_native("SELECT lat, lon, air FROM air")
     scan = next(l for l in plan.splitlines() if "XarrayScanExec" in l)
 
     def fmt(v: float) -> str:
@@ -138,7 +181,7 @@ def test_native_join_picks_small_build_side():
     nat.from_dataset("big", big, chunks={"time": 50})
     nat.from_dataset("small", small, chunks={"lat": 8})
 
-    plan = nat.explain_native(
+    plan = nat._explain_native(
         "SELECT b.time, SUM(b.t * s.w) AS x FROM big b "
         "JOIN small s ON b.lat=s.lat AND b.lon=s.lon GROUP BY b.time"
     )

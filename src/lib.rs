@@ -50,10 +50,13 @@ use std::sync::Arc;
 use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, Schema, SchemaRef};
 use arrow::pyarrow::FromPyArrow;
+use arrow::pyarrow::ToPyArrow;
 use async_stream::try_stream;
 use async_trait::async_trait;
 use datafusion::catalog::streaming::StreamingTable;
 use datafusion::catalog::Session;
+use datafusion::common::stats::Precision;
+use datafusion::common::{ColumnStatistics, Statistics};
 use datafusion::common::{DataFusionError, Result as DFResult, ScalarValue};
 use datafusion::datasource::TableProvider;
 use datafusion::execution::TaskContext;
@@ -67,15 +70,13 @@ use datafusion::physical_plan::{
     displayable, DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
     SendableRecordBatchStream,
 };
-use datafusion::common::stats::Precision;
-use datafusion::common::{ColumnStatistics, Statistics};
-use datafusion::prelude::SessionContext;
-use arrow::pyarrow::ToPyArrow;
-use tokio::runtime::Runtime;
+use datafusion::prelude::{col, lit, DataFrame, SessionContext};
 use datafusion_ffi::proto::logical_extension_codec::FFI_LogicalExtensionCodec;
 use datafusion_ffi::table_provider::FFI_TableProvider;
+use futures::StreamExt;
 use pyo3::prelude::*;
 use pyo3::types::{PyCapsule, PyList};
+use tokio::runtime::Runtime;
 
 // ============================================================================
 // Partition Metadata Types for Filter Pushdown
@@ -726,9 +727,7 @@ fn bound_to_scalar(bound: &ScalarBound, dtype: &DataType) -> Option<ScalarValue>
             i32::try_from(*v).ok().map(|x| ScalarValue::Int32(Some(x)))
         }
         (ScalarBound::Float64(v), DataType::Float64) => Some(ScalarValue::Float64(Some(*v))),
-        (ScalarBound::Float64(v), DataType::Float32) => {
-            Some(ScalarValue::Float32(Some(*v as f32)))
-        }
+        (ScalarBound::Float64(v), DataType::Float32) => Some(ScalarValue::Float32(Some(*v as f32))),
         // Timestamp columns are intentionally left without min/max for now:
         // bounds are stored in nanoseconds but the column may be a different
         // unit, and an unscaled value would be wrong. num_rows already covers
@@ -744,10 +743,7 @@ fn bound_to_scalar(bound: &ScalarBound, dtype: &DataType) -> Option<ScalarValue>
 /// numeric dimension columns we also surface exact min/max, folded across the
 /// included partitions — these are the join/filter key columns, and unlike
 /// most providers the bounds are exact coordinate values, not estimates.
-fn build_scan_statistics(
-    output_schema: &Schema,
-    metas: &[&PartitionMetadata],
-) -> Statistics {
+fn build_scan_statistics(output_schema: &Schema, metas: &[&PartitionMetadata]) -> Statistics {
     let mut stats = Statistics::new_unknown(output_schema);
     stats.num_rows = sum_row_counts(metas.iter().copied());
 
@@ -1262,18 +1258,17 @@ fn df_err_to_py(e: DataFusionError) -> PyErr {
 /// dynamic-filter pushdown across the boundary: a `ForeignExecutionPlan`
 /// reports unknown statistics regardless of what the provider knows. Consuming
 /// `PrunableStreamingTable` here, as a native `Arc<dyn TableProvider>`, lets the
-/// optimizer see the exact cardinalities `XarrayScanExec` reports and (in later
-/// work) accept join-driven dynamic filters and custom physical rules.
+/// optimizer see the exact cardinalities `XarrayScanExec` reports, accept
+/// join-driven dynamic filters, and (later) custom physical rules.
 ///
-/// The query result is materialised and returned as a list of PyArrow
-/// `RecordBatch`es, so it round-trips through the existing xarray reconstruction
-/// path. Today this is an *eager* engine intended for reductions and joins; it
-/// does not register Python scalar UDFs (e.g. `cftime`), which remain on the
-/// default FFI engine.
+/// Queries are returned as a lazy [`NativeDataFrame`]: nothing executes until
+/// the result is streamed, and it is streamed in batches rather than
+/// materialised, so a reduction over a petabyte-scale store never holds the
+/// whole input (or output) in memory at once.
 #[pyclass(name = "NativeContext")]
 struct NativeContext {
     ctx: SessionContext,
-    rt: Runtime,
+    rt: Arc<Runtime>,
 }
 
 #[pymethods]
@@ -1287,7 +1282,7 @@ impl NativeContext {
         })?;
         Ok(Self {
             ctx: SessionContext::new(),
-            rt,
+            rt: Arc::new(rt),
         })
     }
 
@@ -1304,45 +1299,24 @@ impl NativeContext {
         Ok(())
     }
 
-    /// Run a SQL query and return its result as a list of PyArrow RecordBatches.
+    /// Plan a SQL query and return a *lazy* `NativeDataFrame`.
     ///
-    /// The GIL is released for the duration of execution so DataFusion's worker
-    /// threads can re-acquire it per batch when pulling from the Python-backed
-    /// partition streams.
-    fn sql(&self, py: Python<'_>, query: &str) -> PyResult<Vec<Py<PyAny>>> {
-        let batches: Vec<RecordBatch> = py
-            .detach(|| {
-                self.rt.block_on(async {
-                    let df = self.ctx.sql(query).await?;
-                    df.collect().await
-                })
-            })
+    /// Planning runs now (so errors surface immediately) but no data is read
+    /// until the frame is streamed.
+    fn sql(&self, py: Python<'_>, query: &str) -> PyResult<NativeDataFrame> {
+        let df = py
+            .detach(|| self.rt.block_on(async { self.ctx.sql(query).await }))
             .map_err(df_err_to_py)?;
-
-        let mut out = Vec::with_capacity(batches.len());
-        for batch in &batches {
-            out.push(batch.to_pyarrow(py)?.unbind());
-        }
-        Ok(out)
-    }
-
-    /// Return the PyArrow schema a query would produce, without executing it.
-    fn sql_schema(&self, py: Python<'_>, query: &str) -> PyResult<Py<PyAny>> {
-        let schema = py
-            .detach(|| {
-                self.rt.block_on(async {
-                    let df = self.ctx.sql(query).await?;
-                    Ok::<_, DataFusionError>(df.schema().inner().clone())
-                })
-            })
-            .map_err(df_err_to_py)?;
-        schema.as_ref().to_pyarrow(py).map(|b| b.unbind())
+        Ok(NativeDataFrame {
+            df,
+            rt: Arc::clone(&self.rt),
+        })
     }
 
     /// Return the physical plan for `query` as a string, with statistics shown.
     ///
-    /// Used to verify that exact cardinalities now reach the optimizer (the
-    /// statistics line is absent on the FFI path).
+    /// Internal: used by tests to confirm that exact cardinalities reach the
+    /// optimizer (the statistics line is absent on the FFI path).
     fn explain(&self, py: Python<'_>, query: &str) -> PyResult<String> {
         py.detach(|| {
             self.rt.block_on(async {
@@ -1359,10 +1333,174 @@ impl NativeContext {
     }
 }
 
+/// A lazy handle to a planned query on a [`NativeContext`].
+///
+/// Mirrors the slice of the `datafusion-python` `DataFrame` API that the xarray
+/// round-trip needs — `schema()`, `execute_stream()`, plus column projection
+/// and coordinate filtering for the chunked (lazy) reconstruction path — but
+/// every consumer is streaming, so it scales to stores larger than memory.
+#[pyclass(name = "NativeDataFrame")]
+struct NativeDataFrame {
+    df: DataFrame,
+    rt: Arc<Runtime>,
+}
+
+#[pymethods]
+impl NativeDataFrame {
+    /// The PyArrow schema of the result (no execution).
+    fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.df
+            .schema()
+            .inner()
+            .as_ref()
+            .to_pyarrow(py)
+            .map(|b| b.unbind())
+    }
+
+    /// Begin streaming the result. Returns an iterator of PyArrow RecordBatches.
+    ///
+    /// The GIL is released while each batch is produced, so DataFusion's worker
+    /// threads can re-acquire it to pull from the Python-backed partition
+    /// streams. Batches are yielded one at a time — the full result is never
+    /// collected.
+    fn execute_stream(&self, py: Python<'_>) -> PyResult<NativeRecordBatchStream> {
+        let df = self.df.clone();
+        let stream = py
+            .detach(|| self.rt.block_on(async { df.execute_stream().await }))
+            .map_err(df_err_to_py)?;
+        Ok(NativeRecordBatchStream {
+            stream: Some(stream),
+            rt: Arc::clone(&self.rt),
+        })
+    }
+
+    /// Project to a subset of columns by name (lazy).
+    fn select_columns(&self, columns: Vec<String>) -> PyResult<NativeDataFrame> {
+        let exprs: Vec<Expr> = columns.iter().map(|c| col(c.as_str())).collect();
+        let df = self.df.clone().select(exprs).map_err(df_err_to_py)?;
+        Ok(NativeDataFrame {
+            df,
+            rt: Arc::clone(&self.rt),
+        })
+    }
+
+    /// The distinct values of `column`, ascending (lazy).
+    ///
+    /// Used to discover a dimension's coordinate values for the chunked
+    /// round-trip; the scan projects to this single column and skips data
+    /// variables, so discovery reads coordinates only.
+    fn distinct_sorted(&self, column: String) -> PyResult<NativeDataFrame> {
+        let c = col(column.as_str());
+        let df = self
+            .df
+            .clone()
+            .select(vec![c.clone()])
+            .map_err(df_err_to_py)?
+            .distinct()
+            .map_err(df_err_to_py)?
+            .sort(vec![c.sort(true, false)])
+            .map_err(df_err_to_py)?;
+        Ok(NativeDataFrame {
+            df,
+            rt: Arc::clone(&self.rt),
+        })
+    }
+
+    /// Keep only rows whose `column` is one of `values` (lazy).
+    ///
+    /// Used by the chunked round-trip to read a single output chunk: the
+    /// coordinate predicate pushes into the scan and prunes partitions, so each
+    /// chunk reads only the partitions it overlaps. `dtype_tag` matches the
+    /// tags used for partition bounds (`int64`, `float64`, `timestamp_ns`).
+    fn filter_in(
+        &self,
+        column: String,
+        values: &Bound<'_, PyAny>,
+        dtype_tag: &str,
+    ) -> PyResult<NativeDataFrame> {
+        let scalars = python_values_to_scalars(values, dtype_tag)?;
+        let list: Vec<Expr> = scalars.into_iter().map(lit).collect();
+        if list.is_empty() {
+            return Ok(NativeDataFrame {
+                df: self.df.clone(),
+                rt: Arc::clone(&self.rt),
+            });
+        }
+        let predicate = col(column.as_str()).in_list(list, false);
+        let df = self.df.clone().filter(predicate).map_err(df_err_to_py)?;
+        Ok(NativeDataFrame {
+            df,
+            rt: Arc::clone(&self.rt),
+        })
+    }
+}
+
+/// Convert a Python sequence of coordinate values into typed `ScalarValue`s.
+fn python_values_to_scalars(
+    values: &Bound<'_, PyAny>,
+    dtype_tag: &str,
+) -> PyResult<Vec<ScalarValue>> {
+    let mut out = Vec::new();
+    for item in values.try_iter()? {
+        let item = item?;
+        let scalar = match dtype_tag {
+            "timestamp_ns" => ScalarValue::TimestampNanosecond(Some(item.extract::<i64>()?), None),
+            "float64" => ScalarValue::Float64(Some(item.extract::<f64>()?)),
+            "int64" => ScalarValue::Int64(Some(item.extract::<i64>()?)),
+            _ => {
+                return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                    "Unsupported dtype tag for filter value: {dtype_tag}"
+                )))
+            }
+        };
+        out.push(scalar);
+    }
+    Ok(out)
+}
+
+/// A synchronous Python iterator over a DataFusion record-batch stream.
+///
+/// `unsendable` because a `SendableRecordBatchStream` is `Send` but not `Sync`
+/// and is only ever advanced from the single Python thread that owns it.
+#[pyclass(name = "NativeRecordBatchStream", unsendable)]
+struct NativeRecordBatchStream {
+    stream: Option<SendableRecordBatchStream>,
+    rt: Arc<Runtime>,
+}
+
+#[pymethods]
+impl NativeRecordBatchStream {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Pull the next batch (or signal end of iteration).
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let Some(stream) = self.stream.as_mut() else {
+            return Ok(None);
+        };
+        let rt = Arc::clone(&self.rt);
+        let next = py.detach(|| rt.block_on(async { stream.next().await }));
+        match next {
+            Some(Ok(batch)) => Ok(Some(batch.to_pyarrow(py)?.unbind())),
+            Some(Err(e)) => {
+                self.stream = None;
+                Err(df_err_to_py(e))
+            }
+            None => {
+                self.stream = None;
+                Ok(None)
+            }
+        }
+    }
+}
+
 /// Python module initialization
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LazyArrowStreamTable>()?;
     m.add_class::<NativeContext>()?;
+    m.add_class::<NativeDataFrame>()?;
+    m.add_class::<NativeRecordBatchStream>()?;
     Ok(())
 }

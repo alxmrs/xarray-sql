@@ -338,28 +338,38 @@ class SQLBackendArray(xr.backends.BackendArray):
         # OR-chain of equalities (DataFusion 52.0.0 does not expose a clean
         # ``Expr.in_list`` from Python; OR-chained equalities constant-fold
         # equivalently and stay typed).
-        predicates = []
-        for dim in self._dimension_columns:
-            if dim in full_dims:
-                continue
-            vals = requested[dim]
-            if len(vals) == 1:
-                predicates.append(col(f'"{dim}"') == literal(vals[0]))
-            else:
-                eq = col(f'"{dim}"') == literal(vals[0])
-                for v in vals[1:]:
-                    eq = eq | (col(f'"{dim}"') == literal(v))
-                predicates.append(eq)
+        wanted = self._dimension_columns + [self._var_name]
+        if hasattr(self._inner_df, "filter_coord"):
+            # Native engine: express the per-dim predicate structurally. Each
+            # coordinate filter pushes into the scan and prunes source
+            # partitions, so a chunk reads only the partitions it overlaps.
+            frame = self._inner_df
+            for dim in self._dimension_columns:
+                if dim in full_dims:
+                    continue
+                frame = frame.filter_coord(dim, requested[dim])
+            projected = frame.select_columns(wanted)
+        else:
+            predicates = []
+            for dim in self._dimension_columns:
+                if dim in full_dims:
+                    continue
+                vals = requested[dim]
+                if len(vals) == 1:
+                    predicates.append(col(f'"{dim}"') == literal(vals[0]))
+                else:
+                    eq = col(f'"{dim}"') == literal(vals[0])
+                    for v in vals[1:]:
+                        eq = eq | (col(f'"{dim}"') == literal(v))
+                    predicates.append(eq)
 
-        filtered = self._inner_df
-        if predicates:
-            combined = predicates[0]
-            for p in predicates[1:]:
-                combined = combined & p
-            filtered = filtered.filter(combined)
-        projected = filtered.select(
-            *(col(f'"{c}"') for c in self._dimension_columns + [self._var_name])
-        )
+            filtered = self._inner_df
+            if predicates:
+                combined = predicates[0]
+                for p in predicates[1:]:
+                    combined = combined & p
+                filtered = filtered.filter(combined)
+            projected = filtered.select(*(col(f'"{c}"') for c in wanted))
 
         # Consume the projected DataFrame as Arrow RecordBatches. The
         # DataFusion wrapper exposes ``.to_pyarrow()`` to convert each
@@ -528,7 +538,11 @@ def _build_lazy_scan(
     )
     if coord_arrays is None:
         coord_arrays = {}
+        native = hasattr(inner_df, "distinct_sorted_values")
         for d in dimension_columns:
+            if native:
+                coord_arrays[d] = inner_df.distinct_sorted_values(d)
+                continue
             dim_only = (
                 inner_df.select(col(f'"{d}"'))
                 .distinct()

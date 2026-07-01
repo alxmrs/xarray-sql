@@ -1,4 +1,3 @@
-import pyarrow as pa
 import xarray as xr
 from datafusion import SessionContext
 from datafusion.catalog import Schema
@@ -7,6 +6,7 @@ from collections import defaultdict
 from . import cftime as cft
 from .df import Chunks
 from .ds import XarrayDataFrame
+from .native import NativeFrame
 from .reader import read_xarray_table
 
 
@@ -25,10 +25,12 @@ class XarrayContext(SessionContext):
       boundary*. The boundary drops table statistics and dynamic-filter
       pushdown, so only the native engine can give the cost-based optimizer
       exact cardinalities (for join build-side selection and broadcast-vs-
-      shuffle) and, in future, join-driven partition pruning. The native
-      engine is **eager** (it materialises the result) and does not register
-      Python scalar UDFs; use the default engine for ``cftime`` filters or
-      multi-dimension-group datasets.
+      shuffle). Results stream lazily and round-trip through the same
+      ``to_pandas`` / ``to_dataset`` (including the chunked, partition-pruning
+      path) as the default engine, so a reduction or chunked scan over a store
+      larger than memory never materialises the whole result. The native engine
+      does not register Python scalar UDFs; use the default engine for
+      ``cftime`` filters or multi-dimension-group datasets.
     """
 
     def __init__(self, *args, engine: str = "ffi", **kwargs):
@@ -226,30 +228,26 @@ class XarrayContext(SessionContext):
         return XarrayDataFrame(inner, templates=self._registered_datasets)
 
     def _native_sql(self, query: str) -> XarrayDataFrame:
-        """Execute *query* on the native engine and wrap the eager result.
+        """Plan *query* on the native engine and wrap the lazy result.
 
-        The native context materialises the result as Arrow batches; we feed
-        them back into a DataFusion ``DataFrame`` (over an in-memory table) so
-        the existing :class:`XarrayDataFrame` round-trip — ``to_pandas`` and
-        ``to_dataset`` — works unchanged.
+        The native context returns a lazy, streaming ``NativeDataFrame`` (no
+        data is read until the result is streamed). :class:`NativeFrame` adapts
+        it to the small DataFrame interface the :class:`XarrayDataFrame`
+        round-trip consumes, so ``to_pandas`` and ``to_dataset`` — including the
+        chunked, partition-pruning path — work without materialising the result.
         """
-        batches = self._native.sql(query)
-        if batches:
-            table = pa.Table.from_batches(batches)
-        else:
-            # Empty result: recover the schema so the wrapper still has columns.
-            schema = self._native.sql_schema(query)
-            table = pa.Table.from_batches([], schema=schema)
-        inner = SessionContext().from_arrow(table)
-        return XarrayDataFrame(inner, templates=self._registered_datasets)
+        native_df = self._native.sql(query)
+        return XarrayDataFrame(
+            NativeFrame(native_df), templates=self._registered_datasets
+        )
 
-    def explain_native(self, query: str) -> str:
+    def _explain_native(self, query: str) -> str:
         """Return the native engine's physical plan (with statistics) for *query*.
 
-        Useful for confirming that exact cardinalities reach the optimizer —
-        e.g. that a join is planned as ``HashJoinExec: mode=CollectLeft`` with
-        the smaller table on the build side. Only available on the native
-        engine.
+        Internal helper (not public API): used by tests to confirm that exact
+        cardinalities reach the optimizer — e.g. that a join is planned as
+        ``HashJoinExec: mode=CollectLeft`` with the smaller table on the build
+        side, or that a probe scan carries a join dynamic filter.
         """
         if self._native is None:
             raise RuntimeError(
