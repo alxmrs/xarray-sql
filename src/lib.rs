@@ -47,22 +47,24 @@ use std::ffi::CString;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use arrow::array::RecordBatch;
+use arrow::array::{make_array, ArrayData, ArrayRef, RecordBatch};
 use arrow::datatypes::{DataType, Schema, SchemaRef};
 use arrow::pyarrow::FromPyArrow;
 use arrow::pyarrow::ToPyArrow;
 use async_stream::try_stream;
 use async_trait::async_trait;
+use datafusion::catalog::memory::MemorySchemaProvider;
 use datafusion::catalog::streaming::StreamingTable;
 use datafusion::catalog::Session;
 use datafusion::common::stats::Precision;
 use datafusion::common::{ColumnStatistics, Statistics};
-use datafusion::common::{DataFusionError, Result as DFResult, ScalarValue};
+use datafusion::common::{DataFusionError, Result as DFResult, ScalarValue, TableReference};
 use datafusion::datasource::TableProvider;
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::expr::InList;
 use datafusion::logical_expr::{
-    BinaryExpr, Expr, Operator, TableProviderFilterPushDown, TableType,
+    BinaryExpr, ColumnarValue, Expr, Operator, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl,
+    Signature, TableProviderFilterPushDown, TableType, Volatility,
 };
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream;
@@ -75,7 +77,7 @@ use datafusion_ffi::proto::logical_extension_codec::FFI_LogicalExtensionCodec;
 use datafusion_ffi::table_provider::FFI_TableProvider;
 use futures::StreamExt;
 use pyo3::prelude::*;
-use pyo3::types::{PyCapsule, PyList};
+use pyo3::types::{PyCapsule, PyList, PyTuple};
 use tokio::runtime::Runtime;
 
 // ============================================================================
@@ -1291,11 +1293,53 @@ impl NativeContext {
     /// Unlike the FFI path (`register_table` with the capsule), this hands the
     /// provider directly to the in-process `SessionContext`, so its statistics
     /// and physical-plan capabilities are visible to the optimizer.
+    ///
+    /// `name` may be schema-qualified (e.g. `"era5.surface"`), so a dataset
+    /// whose variables span several dimension groups registers as a SQL
+    /// namespace just like the FFI path. The schema is created on demand.
     fn register_table(&self, name: &str, table: &LazyArrowStreamTable) -> PyResult<()> {
         let provider: Arc<dyn TableProvider> = table.table.clone();
+        let reference = TableReference::from(name);
+
+        // For a qualified name, make sure the target schema exists first —
+        // DataFusion won't auto-create it.
+        if let Some(schema_name) = reference.schema() {
+            if let Some(catalog) = self.ctx.catalog("datafusion") {
+                if catalog.schema(schema_name).is_none() {
+                    catalog
+                        .register_schema(schema_name, Arc::new(MemorySchemaProvider::new()))
+                        .map_err(df_err_to_py)?;
+                }
+            }
+        }
+
         self.ctx
-            .register_table(name, provider)
+            .register_table(reference, provider)
             .map_err(df_err_to_py)?;
+        Ok(())
+    }
+
+    /// Register a Python callable as a native scalar UDF.
+    ///
+    /// The callable receives one PyArrow `Array` per argument and returns a
+    /// PyArrow `Array`. This is how the `cftime()` filter helper — a Python
+    /// function backed by the `cftime` library — becomes available inside the
+    /// native engine, which cannot consume a `datafusion-python` UDF across the
+    /// FFI boundary. `input_types` and `return_type` are PyArrow `DataType`s.
+    fn register_scalar_udf(
+        &self,
+        name: &str,
+        func: Py<PyAny>,
+        input_types: Vec<Bound<'_, PyAny>>,
+        return_type: Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let in_types = input_types
+            .iter()
+            .map(DataType::from_pyarrow_bound)
+            .collect::<PyResult<Vec<_>>>()?;
+        let ret = DataType::from_pyarrow_bound(&return_type)?;
+        let udf = PyScalarUdf::new(name.to_string(), in_types, ret, func);
+        self.ctx.register_udf(ScalarUDF::new_from_impl(udf));
         Ok(())
     }
 
@@ -1492,6 +1536,104 @@ impl NativeRecordBatchStream {
                 Ok(None)
             }
         }
+    }
+}
+
+/// A native DataFusion scalar UDF backed by a Python callable.
+///
+/// Each invocation converts the argument arrays to PyArrow, calls the Python
+/// function (acquiring the GIL), and converts the PyArrow result back to Arrow.
+/// Used to expose the `cftime()` filter helper to the native engine.
+#[derive(Debug)]
+struct PyScalarUdf {
+    name: String,
+    signature: Signature,
+    return_type: DataType,
+    /// `Arc` so the closure moved into `Python::attach` shares the callable
+    /// without acquiring the GIL just to clone it.
+    func: Arc<Py<PyAny>>,
+}
+
+impl PyScalarUdf {
+    fn new(
+        name: String,
+        input_types: Vec<DataType>,
+        return_type: DataType,
+        func: Py<PyAny>,
+    ) -> Self {
+        Self {
+            name,
+            signature: Signature::exact(input_types, Volatility::Immutable),
+            return_type,
+            func: Arc::new(func),
+        }
+    }
+}
+
+// `ScalarUDFImpl` requires `Eq`/`Hash` (via `DynEq`/`DynHash`), which we can't
+// derive through the `Py` callable. Identity is its signature — name, argument
+// types, and return type — which is all the optimizer needs to compare UDFs.
+impl PartialEq for PyScalarUdf {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.signature == other.signature
+            && self.return_type == other.return_type
+    }
+}
+
+impl Eq for PyScalarUdf {}
+
+impl std::hash::Hash for PyScalarUdf {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.return_type.hash(state);
+    }
+}
+
+impl ScalarUDFImpl for PyScalarUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(self.return_type.clone())
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let num_rows = args.number_rows;
+        // Materialise every argument (scalars broadcast to `num_rows`) so the
+        // Python function always sees full arrays.
+        let arrays: Vec<ArrayRef> = args
+            .args
+            .into_iter()
+            .map(|cv| cv.into_array(num_rows))
+            .collect::<DFResult<_>>()?;
+
+        let func = Arc::clone(&self.func);
+        let result = Python::attach(|py| -> DFResult<ArrayRef> {
+            let py_args = arrays
+                .iter()
+                .map(|a| a.to_data().to_pyarrow(py))
+                .collect::<PyResult<Vec<_>>>()
+                .and_then(|args| PyTuple::new(py, args))
+                .map_err(|e| DataFusionError::Execution(format!("UDF arg conversion: {e}")))?;
+            let out = func.call1(py, py_args).map_err(|e| {
+                DataFusionError::Execution(format!("UDF '{}' failed: {e}", self.name))
+            })?;
+            let data = ArrayData::from_pyarrow_bound(out.bind(py))
+                .map_err(|e| DataFusionError::Execution(format!("UDF result conversion: {e}")))?;
+            Ok(make_array(data))
+        })?;
+
+        Ok(ColumnarValue::Array(result))
     }
 }
 

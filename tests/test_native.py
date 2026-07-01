@@ -188,13 +188,46 @@ def test_native_join_picks_small_build_side():
     assert "HashJoinExec: mode=CollectLeft" in plan
 
 
-def test_native_multigroup_not_supported(weather_dataset):
-    """Datasets that split into a namespace are FFI-only for now."""
-    # Build a two-group dataset: a 3-D var and a 2-D var.
+def test_native_multigroup_namespace(weather_dataset):
+    """A dataset spanning two dim groups registers as a SQL namespace."""
     ds = weather_dataset
     two_group = ds.assign(
-        surface_pressure=(("lat", "lon"), ds["temperature"].isel(time=0, level=0).data)
+        surface_pressure=(
+            ("lat", "lon"),
+            ds["temperature"].isel(time=0, level=0).data,
+        )
     )
     nat = XarrayContext(engine="native")
-    with pytest.raises(NotImplementedError, match="native engine"):
-        nat.from_dataset("wx", two_group, chunks={"time": 3})
+    nat.from_dataset("wx", two_group, chunks={"time": 3})
+
+    # Both dim-group tables are queryable under the "wx" schema.
+    got = nat.sql(
+        'SELECT AVG("surface_pressure") AS p FROM wx.lat_lon'
+    ).to_pandas()
+    ref = float(two_group["surface_pressure"].mean())
+    np.testing.assert_allclose(got["p"].to_numpy()[0], ref, rtol=1e-6)
+
+    n = nat.sql("SELECT COUNT(*) AS n FROM wx.lat_lon_time_level").to_pandas()
+    assert int(n["n"].to_numpy()[0]) == two_group["temperature"].size
+
+
+def test_native_cftime_udf(rasm_ds):
+    """The cftime() filter UDF works on the native engine (non-Gregorian cal)."""
+    pytest.importorskip("cftime")
+    # rasm uses a noleap (Gregorian-like) calendar; build a 360_day dataset so
+    # the int64/UDF path is exercised.
+    import cftime
+
+    times = [cftime.Datetime360Day(2000, m, 1) for m in range(1, 13)]
+    ds = xr.Dataset(
+        {"v": (("time",), np.arange(12, dtype="float64"))},
+        coords={"time": times},
+    )
+    nat = XarrayContext(engine="native")
+    nat.from_dataset("cal", ds, chunks={"time": 6})
+
+    # cftime('2000-07-01') resolves to the July offset; expect months 7..12.
+    got = nat.sql(
+        "SELECT v FROM cal WHERE time >= cftime('2000-07-01') ORDER BY v"
+    ).to_pandas()
+    np.testing.assert_allclose(got["v"].to_numpy(), np.arange(6, 12))

@@ -214,19 +214,19 @@ def arrow_field(name: str, units: str, cal: str) -> pa.Field:
 # ---------------------------------------------------------------------------
 
 
-def make_cftime_udf(units: str, calendar: str):
-    """Create a DataFusion scalar UDF that converts date strings to int64 offsets.
+def make_cftime_callable(units: str, calendar: str):
+    """Build the raw ``pa.Array -> pa.Array`` cftime conversion function.
 
-    This enables ergonomic SQL filtering on non-Gregorian cftime columns::
+    Returned alongside its Arrow signature so it can be wrapped as either a
+    ``datafusion-python`` UDF (FFI engine) or a native scalar UDF (native
+    engine). The function parses each input string as a cftime datetime in the
+    given calendar and returns the int64 offset in the specified units.
 
-        SELECT * FROM ds360 WHERE time > cftime('0500-01-01')
-
-    The UDF parses the input string as a cftime datetime in the given
-    calendar system and returns the corresponding int64 offset in the
-    specified units.
+    Returns:
+        ``(func, name, input_types, return_type)`` where ``func`` maps a PyArrow
+        utf8 ``Array`` to a PyArrow int64 ``Array``.
     """
     import cftime as _cftime
-    from datafusion import udf
 
     def _cftime_scalar(date_strings: pa.Array) -> pa.Array:
         results: list[int | None] = []
@@ -239,10 +239,17 @@ def make_cftime_udf(units: str, calendar: str):
             results.append(int(val))
         return pa.array(results, type=pa.int64())
 
-    return udf(
-        _cftime_scalar,
-        [pa.utf8()],
-        pa.int64(),
-        "immutable",
-        "cftime",
-    )
+    return _cftime_scalar, "cftime", [pa.utf8()], pa.int64()
+
+
+def make_cftime_udf(units: str, calendar: str):
+    """Create a ``datafusion-python`` scalar UDF converting date strings to offsets.
+
+    This enables ergonomic SQL filtering on non-Gregorian cftime columns::
+
+        SELECT * FROM ds360 WHERE time > cftime('0500-01-01')
+    """
+    from datafusion import udf
+
+    func, name, input_types, return_type = make_cftime_callable(units, calendar)
+    return udf(func, input_types, return_type, "immutable", name)

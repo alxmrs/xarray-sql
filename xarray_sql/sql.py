@@ -28,9 +28,9 @@ class XarrayContext(SessionContext):
       shuffle). Results stream lazily and round-trip through the same
       ``to_pandas`` / ``to_dataset`` (including the chunked, partition-pruning
       path) as the default engine, so a reduction or chunked scan over a store
-      larger than memory never materialises the whole result. The native engine
-      does not register Python scalar UDFs; use the default engine for
-      ``cftime`` filters or multi-dimension-group datasets.
+      larger than memory never materialises the whole result. Multi-dimension-
+      group datasets (SQL namespaces) and the ``cftime()`` filter UDF are
+      supported here too.
     """
 
     def __init__(self, *args, engine: str = "ffi", **kwargs):
@@ -134,15 +134,22 @@ class XarrayContext(SessionContext):
                 name, input_table, chunks, coord_arrays=coord_arrays
             )
 
-        if self._native is not None:
-            raise NotImplementedError(
-                "The native engine does not yet support datasets whose "
-                "variables span multiple dimension groups (which register as "
-                f"a SQL namespace). {name!r} has groups {list(groups)}. Use "
-                "engine='ffi' for namespaced datasets."
-            )
-
         table_names = table_names or {}
+
+        if self._native is not None:
+            # Native engine: register each dim-group under a schema-qualified
+            # name (``name.sub_name``). The Rust side creates the SQL schema on
+            # demand, so ``SELECT ... FROM era5.surface`` works just like FFI.
+            for dims, var_names in groups.items():
+                sub_name = table_names.get(dims, "_".join(dims) or "scalar")
+                sub_ds = input_table[var_names]
+                qualified = f"{name}.{sub_name}"
+                self._from_dataset(
+                    qualified, sub_ds, chunks, coord_arrays=coord_arrays
+                )
+                self._registered_datasets[qualified] = sub_ds
+            return self
+
         schema = Schema.memory_schema(self)
         self.catalog().register_schema(name, schema)
 
@@ -192,16 +199,29 @@ class XarrayContext(SessionContext):
                 else schema.register_table
             )
             register(table_name, table)
-            self._maybe_register_cftime_udf(input_table)
+        self._maybe_register_cftime_udf(input_table)
         return self
 
     def _maybe_register_cftime_udf(self, ds: xr.Dataset) -> None:
-        """Auto-register a cftime() UDF for non-Gregorian cftime coordinates."""
+        """Auto-register a cftime() UDF for non-Gregorian cftime coordinates.
+
+        On the native engine the UDF is a Python callable registered directly
+        into the in-process context (a ``datafusion-python`` UDF cannot cross
+        the FFI boundary); on the FFI engine it is a ``datafusion-python`` UDF.
+        """
         for coord_name in ds.dims:
             if cft.is_cftime_index(ds, coord_name):
                 units, cal = cft.encoding(ds, coord_name)
                 if not cft.is_gregorian_like(cal):
-                    self.register_udf(cft.make_cftime_udf(units, cal))
+                    if self._native is not None:
+                        func, name, in_types, ret = cft.make_cftime_callable(
+                            units, cal
+                        )
+                        self._native.register_scalar_udf(
+                            name, func, in_types, ret
+                        )
+                    else:
+                        self.register_udf(cft.make_cftime_udf(units, cal))
                     break  # One UDF per context is enough.
 
     def sql(self, query: str, *args, **kwargs) -> XarrayDataFrame:
