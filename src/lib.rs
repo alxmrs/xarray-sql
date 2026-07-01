@@ -41,20 +41,22 @@
 //! Will skip loading partitions whose time ranges are entirely before 2020-02-01.
 //! Supported operators: `=`, `<`, `>`, `<=`, `>=`, `BETWEEN`, `IN`, `AND`, `OR`.
 
-use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fmt::Debug;
 use std::sync::Arc;
 
 use arrow::array::RecordBatch;
-use arrow::datatypes::{Schema, SchemaRef};
-use arrow::pyarrow::FromPyArrow;
+use arrow::datatypes::{DataType, Schema, SchemaRef, TimeUnit};
+use arrow::pyarrow::{FromPyArrow, ToPyArrow};
 use async_stream::try_stream;
 use async_trait::async_trait;
 use datafusion::catalog::streaming::StreamingTable;
 use datafusion::catalog::Session;
-use datafusion::common::{DataFusionError, Result as DFResult, ScalarValue};
+use datafusion::common::stats::Precision;
+use datafusion::common::{
+    ColumnStatistics, DataFusionError, Result as DFResult, ScalarValue, Statistics,
+};
 use datafusion::datasource::TableProvider;
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::expr::InList;
@@ -63,7 +65,9 @@ use datafusion::logical_expr::{
 };
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream;
-use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
+};
 use datafusion_ffi::proto::logical_extension_codec::FFI_LogicalExtensionCodec;
 use datafusion_ffi::table_provider::FFI_TableProvider;
 use pyo3::prelude::*;
@@ -132,10 +136,18 @@ pub struct DimensionRange {
 }
 
 /// Metadata for a single partition, used for filter-based pruning.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct PartitionMetadata {
     /// Dimension ranges for this partition, keyed by column name
     pub ranges: HashMap<String, DimensionRange>,
+    /// Exact number of rows in this partition (product of the chunk's
+    /// per-dimension sizes). Every partition supplies it, so the scan can
+    /// report exact `Statistics::num_rows` to the optimizer and cost-based
+    /// rules (join build-side selection, broadcast vs. shuffle) have real
+    /// cardinalities instead of guesses. xarray knows this exactly — it is
+    /// the product of the partition's dimension lengths — so unlike most
+    /// table providers these statistics are not estimates.
+    pub num_rows: usize,
 }
 
 impl PartitionMetadata {
@@ -485,12 +497,15 @@ fn python_to_scalar_bound(obj: &Bound<'_, PyAny>, dtype_tag: &str) -> PyResult<S
     }
 }
 
-/// Convert a bound Python metadata dict to Rust PartitionMetadata.
+/// Convert a bound Python metadata dict into per-dimension coordinate ranges.
 ///
 /// Operates on an already-bound reference so no additional GIL acquisition
 /// is needed — this is called from within a `#[pymethods]` context where
-/// the GIL is already held.
-fn convert_python_metadata_from_bound(meta_obj: &Bound<'_, PyAny>) -> PyResult<PartitionMetadata> {
+/// the GIL is already held. The caller pairs the result with the partition's
+/// row count to build a [`PartitionMetadata`].
+fn convert_python_ranges_from_bound(
+    meta_obj: &Bound<'_, PyAny>,
+) -> PyResult<HashMap<String, DimensionRange>> {
     type MetaDict = HashMap<String, (Py<PyAny>, Py<PyAny>, String)>;
     let meta_dict: MetaDict = meta_obj.extract()?;
     let py = meta_obj.py();
@@ -507,7 +522,7 @@ fn convert_python_metadata_from_bound(meta_obj: &Bound<'_, PyAny>) -> PyResult<P
             },
         );
     }
-    Ok(PartitionMetadata { ranges })
+    Ok(ranges)
 }
 
 impl Debug for PrunableStreamingTable {
@@ -522,10 +537,6 @@ impl Debug for PrunableStreamingTable {
 
 #[async_trait]
 impl TableProvider for PrunableStreamingTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         Arc::clone(&self.schema)
     }
@@ -563,10 +574,24 @@ impl TableProvider for PrunableStreamingTable {
         // Prune partitions based on filters
         let included_indices = self.prune_partitions(filters);
 
+        // Exact per-partition row counts for the partitions that survive
+        // pruning, in scan order. These feed `XarrayScanExec`'s statistics so
+        // the optimizer sees real cardinalities.
+        let included_metas: Vec<&PartitionMetadata> = included_indices
+            .iter()
+            .map(|&idx| &self.partitions[idx].1)
+            .collect();
+        let partition_rows: Vec<Precision<usize>> = included_metas
+            .iter()
+            .map(|meta| Precision::Exact(meta.num_rows))
+            .collect();
+
         // Handle empty case — all partitions pruned, return empty plan
         if included_indices.is_empty() {
             let empty_table = StreamingTable::try_new(Arc::clone(&self.schema), vec![])?;
-            return empty_table.scan(state, projection, filters, limit).await;
+            let inner = empty_table.scan(state, projection, filters, limit).await?;
+            let stats = build_scan_statistics(inner.schema().as_ref(), &included_metas);
+            return Ok(Arc::new(XarrayScanExec::new(inner, stats, partition_rows)));
         }
 
         // Determine whether to push projection down to the Python factory.
@@ -622,7 +647,9 @@ impl TableProvider for PrunableStreamingTable {
             // StreamingTable already has the projected schema — pass None for
             // projection so it doesn't wrap the stream in a redundant ProjectionExec.
             let streaming = StreamingTable::try_new(projected_schema, projected_partitions)?;
-            streaming.scan(state, None, filters, limit).await
+            let inner = streaming.scan(state, None, filters, limit).await?;
+            let stats = build_scan_statistics(inner.schema().as_ref(), &included_metas);
+            Ok(Arc::new(XarrayScanExec::new(inner, stats, partition_rows)))
         } else {
             // No projection pushdown — factory is called with None (loads all
             // columns). StreamingTable applies projection via ProjectionExec.
@@ -631,7 +658,260 @@ impl TableProvider for PrunableStreamingTable {
                 .map(|&idx| self.partitions[idx].0.clone_as_stream())
                 .collect();
             let streaming = StreamingTable::try_new(Arc::clone(&self.schema), included_partitions)?;
-            streaming.scan(state, projection, filters, limit).await
+            let inner = streaming.scan(state, projection, filters, limit).await?;
+            let stats = build_scan_statistics(inner.schema().as_ref(), &included_metas);
+            Ok(Arc::new(XarrayScanExec::new(inner, stats, partition_rows)))
+        }
+    }
+}
+
+// ============================================================================
+// Exact Statistics + Scan Wrapper
+// ============================================================================
+
+/// Sum the exact per-partition row counts into a `Precision<usize>`.
+///
+/// Every partition carries an exact count, so the total is exact too. The sum
+/// is the table's row count and fits `usize`; `saturating_add` is defensive
+/// against a pathological overflow rather than an expected case.
+fn sum_row_counts<'a>(metas: impl Iterator<Item = &'a PartitionMetadata>) -> Precision<usize> {
+    Precision::Exact(metas.fold(0usize, |total, meta| total.saturating_add(meta.num_rows)))
+}
+
+/// Fold two same-variant `ScalarBound`s, keeping the smaller (`keep_min`) or
+/// larger one. Returns `None` if the variants differ (never expected within a
+/// single dimension) so the caller can fall back to unknown.
+fn fold_bound(a: &ScalarBound, b: &ScalarBound, keep_min: bool) -> Option<ScalarBound> {
+    let ord = match (a, b) {
+        (ScalarBound::Int64(x), ScalarBound::Int64(y)) => x.partial_cmp(y),
+        (ScalarBound::Float64(x), ScalarBound::Float64(y)) => x.partial_cmp(y),
+        (ScalarBound::TimestampNanos(x), ScalarBound::TimestampNanos(y)) => x.partial_cmp(y),
+        _ => return None,
+    }?;
+    let take_a = if keep_min {
+        ord != std::cmp::Ordering::Greater
+    } else {
+        ord != std::cmp::Ordering::Less
+    };
+    Some(if take_a { a.clone() } else { b.clone() })
+}
+
+/// Convert a coordinate bound into a `ScalarValue` matching a column's Arrow
+/// type, so the min/max we report line up with the column's own type. Returns
+/// `None` for combinations we cannot convert without loss (e.g. a timestamp
+/// unit we can't scale exactly), in which case the column is left without
+/// min/max rather than risk a wrong value.
+fn bound_to_scalar(bound: &ScalarBound, dtype: &DataType) -> Option<ScalarValue> {
+    match (bound, dtype) {
+        (ScalarBound::Int64(v), DataType::Int64) => Some(ScalarValue::Int64(Some(*v))),
+        (ScalarBound::Int64(v), DataType::Int32) => {
+            i32::try_from(*v).ok().map(|x| ScalarValue::Int32(Some(x)))
+        }
+        (ScalarBound::Float64(v), DataType::Float64) => Some(ScalarValue::Float64(Some(*v))),
+        (ScalarBound::Float64(v), DataType::Float32) => Some(ScalarValue::Float32(Some(*v as f32))),
+        // Datetime coordinates arrive as nanoseconds (see `cftime.partition_bounds`
+        // and the datetime64[ns] path in `_block_metadata`). Map them onto the
+        // column's own timestamp unit, but only when the scaling is exact so a
+        // reported bound is never a rounded value.
+        (ScalarBound::TimestampNanos(v), DataType::Timestamp(unit, tz)) => {
+            let scaled = match unit {
+                TimeUnit::Nanosecond => Some(*v),
+                TimeUnit::Microsecond if v % 1_000 == 0 => Some(v / 1_000),
+                TimeUnit::Millisecond if v % 1_000_000 == 0 => Some(v / 1_000_000),
+                TimeUnit::Second if v % 1_000_000_000 == 0 => Some(v / 1_000_000_000),
+                _ => None,
+            }?;
+            Some(match unit {
+                TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(scaled), tz.clone()),
+                TimeUnit::Microsecond => {
+                    ScalarValue::TimestampMicrosecond(Some(scaled), tz.clone())
+                }
+                TimeUnit::Millisecond => {
+                    ScalarValue::TimestampMillisecond(Some(scaled), tz.clone())
+                }
+                TimeUnit::Second => ScalarValue::TimestampSecond(Some(scaled), tz.clone()),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Exact in-memory byte size of `num_rows` rows of `schema`, or `Absent` if any
+/// column is variable-width (e.g. Utf8) and cannot be sized from the row count
+/// alone. Our data model is dense fixed-width grids, so this is normally exact.
+fn total_byte_size(schema: &Schema, num_rows: &Precision<usize>) -> Precision<usize> {
+    let Precision::Exact(rows) = num_rows else {
+        return Precision::Absent;
+    };
+    let mut row_width = 0usize;
+    for field in schema.fields() {
+        match field.data_type().primitive_width() {
+            Some(w) => row_width += w,
+            None => return Precision::Absent,
+        }
+    }
+    Precision::Exact(rows.saturating_mul(row_width))
+}
+
+/// Build `Statistics` for a scan over the given partitions.
+///
+/// Every statistic here is derived from coordinate metadata xarray already
+/// knows — none of it scans the data — and each is exact, not an estimate:
+///
+/// * `num_rows`: summed product of each surviving chunk's dimension sizes.
+///   Drives `JoinSelection`'s build-side choice and lets `COUNT(*)` skip the
+///   scan entirely.
+/// * `total_byte_size`: `num_rows × fixed row width`, for memory-cost rules.
+/// * per dimension-coordinate column: exact `min`/`max` (folded coordinate
+///   bounds — the join/filter keys) and `null_count = 0` (grid axes are always
+///   fully populated). Data variables are left unknown; their bounds would need
+///   a scan.
+fn build_scan_statistics(output_schema: &Schema, metas: &[&PartitionMetadata]) -> Statistics {
+    let mut stats = Statistics::new_unknown(output_schema);
+    stats.num_rows = sum_row_counts(metas.iter().copied());
+    stats.total_byte_size = total_byte_size(output_schema, &stats.num_rows);
+
+    for (col_idx, field) in output_schema.fields().iter().enumerate() {
+        // Fold this column's min/max across every partition that carries a
+        // range for it. A column has a range iff it is a dimension coordinate
+        // with a representable bound; all such partitions share the same bound
+        // variant, so the fold is well-defined.
+        let mut folded: Option<(ScalarBound, ScalarBound)> = None;
+        for meta in metas {
+            if let Some(range) = meta.ranges.get(field.name()) {
+                folded = Some(match folded {
+                    None => (range.min.clone(), range.max.clone()),
+                    Some((lo, hi)) => (
+                        fold_bound(&lo, &range.min, true).unwrap_or(lo),
+                        fold_bound(&hi, &range.max, false).unwrap_or(hi),
+                    ),
+                });
+            }
+        }
+
+        let Some((lo, hi)) = folded else { continue };
+        // This column is a coordinate axis: never null, so the null count is
+        // exactly zero regardless of whether the bound maps to a ScalarValue.
+        let dtype = field.data_type();
+        stats.column_statistics[col_idx] = ColumnStatistics {
+            null_count: Precision::Exact(0),
+            min_value: bound_to_scalar(&lo, dtype)
+                .map(Precision::Exact)
+                .unwrap_or(Precision::Absent),
+            max_value: bound_to_scalar(&hi, dtype)
+                .map(Precision::Exact)
+                .unwrap_or(Precision::Absent),
+            sum_value: Precision::Absent,
+            distinct_count: Precision::Absent,
+            byte_size: Precision::Absent,
+        };
+    }
+
+    stats
+}
+
+/// A thin scan operator that wraps an inner `StreamingTableExec` and reports
+/// exact `Statistics` to the query optimizer.
+///
+/// Execution, schema, ordering, and partitioning are delegated verbatim to the
+/// inner plan (so projection mechanics are reused unchanged); the only thing
+/// this node adds is real cardinality. `StreamingTableExec` reports unknown
+/// statistics, and the physical `JoinSelection` rule reads statistics from the
+/// `ExecutionPlan` (not from `TableProvider::statistics`) — even in DataFusion
+/// 54, which forwards `ExecutionPlan` statistics across the FFI boundary — so
+/// this wrapper is what carries the exact cardinality through to the optimizer.
+#[derive(Debug)]
+struct XarrayScanExec {
+    inner: Arc<dyn ExecutionPlan>,
+    statistics: Statistics,
+    /// Exact row count per output partition (parallel to `inner` partitions),
+    /// so `partition_statistics(Some(i))` is exact too.
+    partition_rows: Vec<Precision<usize>>,
+}
+
+impl XarrayScanExec {
+    fn new(
+        inner: Arc<dyn ExecutionPlan>,
+        statistics: Statistics,
+        partition_rows: Vec<Precision<usize>>,
+    ) -> Self {
+        Self {
+            inner,
+            statistics,
+            partition_rows,
+        }
+    }
+}
+
+impl DisplayAs for XarrayScanExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(f, "XarrayScanExec: rows={:?}", self.statistics.num_rows)
+            }
+            DisplayFormatType::TreeRender => {
+                write!(f, "rows={:?}", self.statistics.num_rows)
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl ExecutionPlan for XarrayScanExec {
+    fn name(&self) -> &str {
+        "XarrayScanExec"
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        // Delegate partitioning + output ordering + boundedness to the inner
+        // StreamingTableExec.
+        self.inner.properties()
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        // A scan is a leaf; the inner plan is an execution detail, not a child
+        // the optimizer should rewrite.
+        vec![]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        ctx: Arc<TaskContext>,
+    ) -> DFResult<SendableRecordBatchStream> {
+        self.inner.execute(partition, ctx)
+    }
+
+    fn partition_statistics(&self, partition: Option<usize>) -> DFResult<Arc<Statistics>> {
+        match partition {
+            None => Ok(Arc::new(self.statistics.clone())),
+            Some(i) => {
+                // Build a fresh, self-consistent per-partition summary rather
+                // than reusing the table-level one: the folded column min/max
+                // and `total_byte_size` describe the whole scan, and claiming
+                // them (as `Exact`) for a single partition could be wrong —
+                // partition `i` need not contain the table-wide min/max. We
+                // keep only what is exact per partition: its row count and the
+                // byte size derived from it. Column bounds are left unknown
+                // (we do not retain per-partition bounds here).
+                let num_rows = self
+                    .partition_rows
+                    .get(i)
+                    .cloned()
+                    .unwrap_or(Precision::Absent);
+                let schema = self.inner.schema();
+                let mut s = Statistics::new_unknown(&schema);
+                s.num_rows = num_rows;
+                s.total_byte_size = total_byte_size(&schema, &s.num_rows);
+                Ok(Arc::new(s))
+            }
         }
     }
 }
@@ -810,27 +1090,26 @@ fn ffi_logical_codec_from_pycapsule(
         session
     };
 
-    let capsule = capsule.downcast::<PyCapsule>().map_err(|e| {
+    let capsule = capsule.cast::<PyCapsule>().map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!(
             "session did not produce a PyCapsule for the logical extension codec: {e}"
         ))
     })?;
 
-    let capsule_name = capsule.name()?.ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(
-            "datafusion_logical_extension_codec PyCapsule has no name set",
-        )
-    })?;
-    let capsule_name = capsule_name.to_str()?;
-    if capsule_name != "datafusion_logical_extension_codec" {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "expected capsule name 'datafusion_logical_extension_codec', got '{capsule_name}'"
-        )));
-    }
+    // `pointer_checked` validates the capsule name matches before handing back
+    // the pointer, so an unexpectedly-named capsule is rejected here.
+    let expected = CString::new("datafusion_logical_extension_codec").unwrap();
+    let ptr = capsule
+        .pointer_checked(Some(expected.as_c_str()))
+        .map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "capsule is not a datafusion_logical_extension_codec: {e}"
+            ))
+        })?;
 
     // SAFETY: The capsule was produced by datafusion-python and contains a
     // valid FFI_LogicalExtensionCodec (#[repr(C)] StableAbi struct).
-    let codec = unsafe { capsule.reference::<FFI_LogicalExtensionCodec>() };
+    let codec = unsafe { &*(ptr.as_ptr() as *const FFI_LogicalExtensionCodec) };
     Ok(codec.clone())
 }
 
@@ -860,13 +1139,14 @@ fn ffi_logical_codec_from_pycapsule(
 ///
 /// schema = pa.schema([("time", pa.int64()), ("air", pa.float32())])
 ///
-/// # Each element is a (factory_callable, metadata_dict) pair.
+/// # Each element is a (factory_callable, metadata_dict, num_rows) tuple.
 /// # metadata_dict maps dim name -> (min, max, dtype_str); use {} for no pruning.
+/// # num_rows is the exact partition row count.
 /// def make_partitions():
 ///     yield (lambda: pa.RecordBatchReader.from_batches(schema, batches_0),
-///            {"time": (0, 1_000_000_000, "int64")})
+///            {"time": (0, 1_000_000_000, "int64")}, len(batches_0_rows))
 ///     yield (lambda: pa.RecordBatchReader.from_batches(schema, batches_1),
-///            {"time": (1_000_000_001, 2_000_000_000, "int64")})
+///            {"time": (1_000_000_001, 2_000_000_000, "int64")}, len(batches_1_rows))
 ///
 /// table = LazyArrowStreamTable(make_partitions(), schema)
 ///
@@ -886,13 +1166,15 @@ impl LazyArrowStreamTable {
     /// Create a new LazyArrowStreamTable from an iterable of partition pairs.
     ///
     /// Args:
-    ///     partitions: Any Python iterable yielding ``(factory, metadata_dict)``
-    ///             pairs, where:
+    ///     partitions: Any Python iterable yielding
+    ///             ``(factory, metadata_dict, num_rows)`` tuples, where:
     ///             - ``factory`` is a zero-argument callable returning a
     ///               ``pa.RecordBatchReader`` (called lazily at query time).
     ///             - ``metadata_dict`` is a ``dict[str, tuple[Any, Any, str]]``
     ///               mapping dimension name to ``(min, max, dtype_str)``; pass
     ///               ``{}`` to skip pruning for a partition.
+    ///             - ``num_rows`` is the exact row count for the partition, so
+    ///               the scan reports exact ``Statistics`` to the optimizer.
     ///             Generators are accepted, so partition state can be produced
     ///             one item at a time and released after Rust stores it.
     ///     schema: A PyArrow Schema for the table.
@@ -921,12 +1203,17 @@ impl LazyArrowStreamTable {
         let mut partition_list: Vec<(Arc<dyn ProjectableStream>, PartitionMetadata)> = Vec::new();
         for item_result in partitions.try_iter()? {
             let item = item_result?;
-            let (factory_obj, meta_obj): (Py<PyAny>, Py<PyAny>) = item.extract().map_err(|e| {
-                pyo3::exceptions::PyTypeError::new_err(format!(
-                    "each partition must be a (factory, metadata_dict) tuple: {e}"
-                ))
-            })?;
-            let meta = convert_python_metadata_from_bound(meta_obj.bind(partitions.py()))?;
+            // Each partition is a ``(factory, metadata_dict, num_rows)`` tuple;
+            // `num_rows` is the exact per-partition row count that feeds the
+            // scan's statistics.
+            let (factory_obj, meta_obj, num_rows): (Py<PyAny>, Py<PyAny>, usize) =
+                item.extract().map_err(|e| {
+                    pyo3::exceptions::PyTypeError::new_err(format!(
+                        "each partition must be a (factory, metadata_dict, num_rows) tuple: {e}"
+                    ))
+                })?;
+            let ranges = convert_python_ranges_from_bound(meta_obj.bind(partitions.py()))?;
+            let meta = PartitionMetadata { ranges, num_rows };
             let partition: Arc<dyn ProjectableStream> =
                 Arc::new(PyArrowStreamPartition::new(factory_obj, schema_ref.clone()));
             partition_list.push((partition, meta));
@@ -969,7 +1256,6 @@ impl LazyArrowStreamTable {
 
     /// Get the schema of the table as a PyArrow Schema.
     fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        use arrow::pyarrow::ToPyArrow;
         self.table
             .schema()
             .to_pyarrow(py)
