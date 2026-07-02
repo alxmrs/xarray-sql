@@ -1,6 +1,6 @@
 import xarray as xr
 import pandas as pd
-from typing import Dict, Optional, Any, List
+from typing import Dict, Optional, Any, List, Tuple, Union
 
 class XarrayContext:
     """
@@ -9,6 +9,7 @@ class XarrayContext:
     def __init__(self):
         self._tables: Dict[str, Any] = {}
         self._chunks: Dict[str, Optional[Dict]] = {}
+        self._table_names: Dict[str, Tuple[str, ...]] = {}
 
     @classmethod
     def from_dataset(cls, ds: xr.Dataset, name: Optional[str] = None, chunks: Optional[Dict] = None) -> 'XarrayContext':
@@ -28,7 +29,7 @@ class XarrayContext:
         ctx.from_dataset(table_name, ds, chunks)
         return ctx
 
-    def from_dataset(self, name: str, ds: xr.Dataset, chunks: Optional[Dict] = None):
+    def from_dataset(self, name: str, ds: xr.Dataset, chunks: Optional[Dict] = None, table_names: Optional[Dict[Union[str, Tuple[str, ...]], str]] = None):
         """
         Registra un dataset de Xarray como una tabla SQL.
         
@@ -36,15 +37,57 @@ class XarrayContext:
             name: Nombre de la tabla.
             ds: Dataset de Xarray.
             chunks: Tamaño de los chunks para la tabla.
+            table_names: Diccionario para mapear nombres de tablas a dimensiones.
+                         Formato: {'nombre_tabla': ('dim1', 'dim2', ...)}
+                         Si se pasa con tuplas como clave, se invierte automáticamente.
         """
         self._tables[name] = ds
         self._chunks[name] = chunks
+        
+        # Procesar table_names
+        if table_names is not None:
+            inverted = {}
+            for key, value in table_names.items():
+                if isinstance(key, tuple):
+                    # Si la clave es una tupla, intercambiar
+                    inverted[value] = key
+                else:
+                    # Si la clave es un string, usarlo directamente
+                    inverted[key] = value
+            self._table_names.update(inverted)
+
+    @classmethod
+    def read_xarray(cls, ds: xr.Dataset, chunks: Optional[Dict] = None, table_names: Optional[Dict[str, Tuple[str, ...]]] = None) -> 'XarrayContext':
+        """
+        Lee un dataset de Xarray y lo registra en un nuevo contexto.
+        
+        Args:
+            ds: Dataset de Xarray.
+            chunks: Tamaño de los chunks.
+            table_names: Diccionario para mapear nombres de tablas a dimensiones.
+                         Formato: {'nombre_tabla': ('dim1', 'dim2', ...)}
+        
+        Returns:
+            XarrayContext: Nuevo contexto.
+        """
+        ctx = cls()
+        ctx.from_dataset('default', ds, chunks, table_names)
+        return ctx
 
     def __getitem__(self, key: str) -> Any:
         """
         Permite acceso a tablas mediante subíndices: ctx['table']
         """
         return self.table(key)
+
+    def __setitem__(self, key: str, value: Any):
+        """
+        Permite registrar tablas mediante asignación: ctx['table'] = ds
+        """
+        if isinstance(value, xr.Dataset):
+            self.from_dataset(key, value)
+        else:
+            raise TypeError(f"Expected xr.Dataset, got {type(value)}")
 
     def table(self, name: str) -> Any:
         """
@@ -74,12 +117,20 @@ class XarrayContext:
         if name in self._tables:
             del self._tables[name]
             del self._chunks[name]
+            if name in self._table_names:
+                del self._table_names[name]
 
     def list_tables(self) -> list:
         """
         Lista todas las tablas registradas.
         """
         return list(self._tables.keys())
+
+    def get_table_names(self) -> Dict[str, Tuple[str, ...]]:
+        """
+        Obtiene el mapeo de nombres de tablas a dimensiones.
+        """
+        return self._table_names
 
     def to_dataset(self, df: pd.DataFrame, dims: Optional[List[str]] = None) -> xr.Dataset:
         """
@@ -95,23 +146,19 @@ class XarrayContext:
         if dims is None:
             dims = self._infer_dims(df)
         
-        # Verificar que las dimensiones existen en el DataFrame
         missing_dims = [d for d in dims if d not in df.columns]
         if missing_dims:
             raise ValueError(f"Columns not found in DataFrame: {missing_dims}")
         
-        # Verificar que las dimensiones tengan valores únicos
         for d in dims:
             if len(df[d].unique()) != len(df):
                 raise ValueError(f"Column '{d}' does not have unique values. Cannot use as dimension.")
         
-        # Crear índice multi-dimensional si hay más de una dimensión
         if len(dims) == 1:
             df_indexed = df.set_index(dims[0])
         else:
             df_indexed = df.set_index(dims)
         
-        # Convertir a Dataset
         return df_indexed.to_xarray()
 
     def _infer_dims(self, df: pd.DataFrame) -> List[str]:
@@ -124,26 +171,19 @@ class XarrayContext:
         Returns:
             List[str]: Lista de dimensiones inferidas.
         """
-        # Lista de columnas que típicamente son dimensiones
         possible_dims = ['time', 'sample', 'step', 'epoch', 'batch', 'id', 'index']
-        
-        # Obtener todas las columnas
         all_cols = df.columns.tolist()
-        
-        # Intentar encontrar dimensiones potenciales
         dims = []
         for col in possible_dims:
             if col in all_cols and len(df[col].unique()) > 1:
                 dims.append(col)
                 all_cols.remove(col)
         
-        # Si no se encontraron dimensiones, usar la primera columna no numérica
         if not dims:
             non_numeric_cols = df.select_dtypes(exclude=['number']).columns.tolist()
             if non_numeric_cols:
                 dims = [non_numeric_cols[0]]
             else:
-                # Si todas son numéricas, usar la primera columna
                 dims = [all_cols[0]]
         
         return dims
@@ -152,8 +192,7 @@ class XarrayContext:
         """
         Ejecuta una consulta SQL sobre las tablas registradas.
         """
-        # Lógica para ejecutar consultas SQL
-        # ...
+        # Placeholder para SQL real
         return pd.DataFrame()
 
     def __repr__(self) -> str:
