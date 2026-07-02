@@ -55,15 +55,16 @@ class XarrayContext:
             self._table_names.update(inverted)
 
     @classmethod
-    def read_xarray(cls, ds: xr.Dataset, chunks: Optional[Dict] = None, table_names: Optional[Dict[str, Tuple[str, ...]]] = None, data_vars: Optional[List[str]] = None) -> 'XarrayContext':
+    def read_xarray(cls, ds: xr.Dataset, chunks: Optional[Dict] = None, table_names: Optional[Dict[str, Tuple[str, ...]]] = None, data_vars: Optional[List[str]] = None, max_partitions: int = 1000) -> 'XarrayContext':
         """
-        Lee un dataset de Xarray de manera optimizada.
+        Lee un dataset de Xarray de manera optimizada, combinando fragmentos nativos en particiones limitadas.
         
         Args:
             ds: Dataset de Xarray.
             chunks: Tamaño de los chunks.
             table_names: Diccionario para mapear nombres de tablas a dimensiones.
             data_vars: Lista de variables de datos a incluir (filtro).
+            max_partitions: Número máximo de particiones para combinar fragmentos.
         
         Returns:
             XarrayContext: Nuevo contexto con el dataset registrado.
@@ -72,12 +73,13 @@ class XarrayContext:
         if data_vars is not None:
             ds = ds[data_vars]
         
-        # Si hay muchos chunks, procesar por lotes
+        # Optimizar fragmentos
         if hasattr(ds, 'chunks') and ds.chunks is not None:
             total_chunks = sum(len(c) for c in ds.chunks.values())
-            if total_chunks > 100:
-                # Procesar con chunks optimizados
-                ds = ds.chunk({dim: -1 for dim in ds.dims})
+            if total_chunks > max_partitions:
+                # Combinar fragmentos en particiones limitadas
+                factor = max(1, total_chunks // max_partitions)
+                ds = ds.chunk({dim: factor for dim in ds.dims})
         
         ctx = cls()
         ctx.from_dataset('default', ds, chunks, table_names)
