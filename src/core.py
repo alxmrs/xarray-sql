@@ -10,6 +10,24 @@ class XarrayContext:
         self._tables: Dict[str, Any] = {}
         self._chunks: Dict[str, Optional[Dict]] = {}
 
+    @classmethod
+    def from_dataset(cls, ds: xr.Dataset, name: Optional[str] = None, chunks: Optional[Dict] = None) -> 'XarrayContext':
+        """
+        Crea un nuevo contexto a partir de un dataset de Xarray.
+        
+        Args:
+            ds: Dataset de Xarray.
+            name: Nombre de la tabla (opcional). Si no se proporciona, se usa 'default'.
+            chunks: Tamaño de los chunks (opcional).
+        
+        Returns:
+            XarrayContext: Nuevo contexto con el dataset registrado.
+        """
+        ctx = cls()
+        table_name = name if name is not None else 'default'
+        ctx.from_dataset(table_name, ds, chunks)
+        return ctx
+
     def from_dataset(self, name: str, ds: xr.Dataset, chunks: Optional[Dict] = None):
         """
         Registra un dataset de Xarray como una tabla SQL.
@@ -137,3 +155,15 @@ class XarrayContext:
         # Lógica para ejecutar consultas SQL
         # ...
         return pd.DataFrame()
+
+    def __repr__(self) -> str:
+        """
+        Representación legible del contexto.
+        """
+        tables_info = "\n".join([
+            f"  - {name}: {type(table).__name__} (chunks: {self._chunks.get(name)})"
+            for name, table in self._tables.items()
+        ])
+        if not tables_info:
+            tables_info = "  (No tables registered)"
+        return f"XarrayContext(tables={len(self._tables)}):\n{tables_info}"
