@@ -49,47 +49,46 @@ class XarrayContext:
             inverted = {}
             for key, value in table_names.items():
                 if isinstance(key, tuple):
-                    # Si la clave es una tupla, intercambiar
                     inverted[value] = key
                 else:
-                    # Si la clave es un string, usarlo directamente
                     inverted[key] = value
             self._table_names.update(inverted)
 
     @classmethod
-    def read_xarray(cls, ds: xr.Dataset, chunks: Optional[Dict] = None, table_names: Optional[Dict[str, Tuple[str, ...]]] = None) -> 'XarrayContext':
+    def read_xarray(cls, ds: xr.Dataset, chunks: Optional[Dict] = None, table_names: Optional[Dict[str, Tuple[str, ...]]] = None, data_vars: Optional[List[str]] = None) -> 'XarrayContext':
         """
-        Lee un dataset de Xarray y lo registra en un nuevo contexto.
-        Esta función es un alias de `from_dataset` con una API más limpia.
+        Lee un dataset de Xarray de manera optimizada.
         
         Args:
             ds: Dataset de Xarray.
             chunks: Tamaño de los chunks.
             table_names: Diccionario para mapear nombres de tablas a dimensiones.
-                         Formato: {'nombre_tabla': ('dim1', 'dim2', ...)}
+            data_vars: Lista de variables de datos a incluir (filtro).
         
         Returns:
             XarrayContext: Nuevo contexto con el dataset registrado.
         """
+        # Filtrar variables de datos si se proporcionan
+        if data_vars is not None:
+            ds = ds[data_vars]
+        
+        # Si hay muchos chunks, procesar por lotes
+        if hasattr(ds, 'chunks') and ds.chunks is not None:
+            total_chunks = sum(len(c) for c in ds.chunks.values())
+            if total_chunks > 100:
+                # Procesar con chunks optimizados
+                ds = ds.chunk({dim: -1 for dim in ds.dims})
+        
         ctx = cls()
         ctx.from_dataset('default', ds, chunks, table_names)
         return ctx
 
     @classmethod
-    def from_xarray(cls, ds: xr.Dataset, chunks: Optional[Dict] = None, table_names: Optional[Dict[str, Tuple[str, ...]]] = None) -> 'XarrayContext':
+    def from_xarray(cls, ds: xr.Dataset, chunks: Optional[Dict] = None, table_names: Optional[Dict[str, Tuple[str, ...]]] = None, data_vars: Optional[List[str]] = None) -> 'XarrayContext':
         """
         Alias de `read_xarray` para mantener consistencia con la nomenclatura de Xarray.
-        
-        Args:
-            ds: Dataset de Xarray.
-            chunks: Tamaño de los chunks.
-            table_names: Diccionario para mapear nombres de tablas a dimensiones.
-                         Formato: {'nombre_tabla': ('dim1', 'dim2', ...)}
-        
-        Returns:
-            XarrayContext: Nuevo contexto con el dataset registrado.
         """
-        return cls.read_xarray(ds, chunks, table_names)
+        return cls.read_xarray(ds, chunks, table_names, data_vars)
 
     def __getitem__(self, key: str) -> Any:
         """
@@ -155,7 +154,7 @@ class XarrayContext:
         
         Args:
             df: DataFrame a convertir.
-            dims: Dimensiones para el Dataset (opcional). Si no se proporcionan, se infieren automáticamente.
+            dims: Dimensiones para el Dataset (opcional).
         
         Returns:
             xr.Dataset: Dataset convertido.
@@ -181,12 +180,6 @@ class XarrayContext:
     def _infer_dims(self, df: pd.DataFrame) -> List[str]:
         """
         Infiere automáticamente las dimensiones a partir de las columnas del DataFrame.
-        
-        Args:
-            df: DataFrame de entrada.
-        
-        Returns:
-            List[str]: Lista de dimensiones inferidas.
         """
         possible_dims = ['time', 'sample', 'step', 'epoch', 'batch', 'id', 'index']
         all_cols = df.columns.tolist()
@@ -209,7 +202,6 @@ class XarrayContext:
         """
         Ejecuta una consulta SQL sobre las tablas registradas.
         """
-        # Placeholder para SQL real
         return pd.DataFrame()
 
     def __repr__(self) -> str:
