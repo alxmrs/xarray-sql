@@ -60,6 +60,7 @@ class XarrayContext:
     def read_xarray(cls, ds: xr.Dataset, chunks: Optional[Dict] = None, table_names: Optional[Dict[str, Tuple[str, ...]]] = None) -> 'XarrayContext':
         """
         Lee un dataset de Xarray y lo registra en un nuevo contexto.
+        Esta función es un alias de `from_dataset` con una API más limpia.
         
         Args:
             ds: Dataset de Xarray.
@@ -68,11 +69,27 @@ class XarrayContext:
                          Formato: {'nombre_tabla': ('dim1', 'dim2', ...)}
         
         Returns:
-            XarrayContext: Nuevo contexto.
+            XarrayContext: Nuevo contexto con el dataset registrado.
         """
         ctx = cls()
         ctx.from_dataset('default', ds, chunks, table_names)
         return ctx
+
+    @classmethod
+    def from_xarray(cls, ds: xr.Dataset, chunks: Optional[Dict] = None, table_names: Optional[Dict[str, Tuple[str, ...]]] = None) -> 'XarrayContext':
+        """
+        Alias de `read_xarray` para mantener consistencia con la nomenclatura de Xarray.
+        
+        Args:
+            ds: Dataset de Xarray.
+            chunks: Tamaño de los chunks.
+            table_names: Diccionario para mapear nombres de tablas a dimensiones.
+                         Formato: {'nombre_tabla': ('dim1', 'dim2', ...)}
+        
+        Returns:
+            XarrayContext: Nuevo contexto con el dataset registrado.
+        """
+        return cls.read_xarray(ds, chunks, table_names)
 
     def __getitem__(self, key: str) -> Any:
         """
